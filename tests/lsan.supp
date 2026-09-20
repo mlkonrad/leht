@@ -1,0 +1,15 @@
+# LeakSanitizer suppressions for known upstream MuPDF leaks.
+#
+# Every entry here must name an upstream defect with a reproducer under
+# tests/crashes/. Never suppress a leak in Leht's own code -- fix it.
+
+# pdf_save_document with do_garbage >= 2 leaks ~874 bytes per call in the object
+# renumbering path (renumberobj -> pdf_copy_dict -> pdf_new_dict). Confirmed in
+# both MuPDF 1.28.2 and 1.28.4 with a pure-C reproducer containing no Leht code:
+# tests/crashes/mupdf_save_leak_repro.c. Leaks scale linearly with saves.
+#
+# Leht keeps do_garbage=3 deliberately: de-duplication is worth far more than
+# 874 bytes, since merging N similar files without it costs N copies of their
+# shared fonts. See tests/crashes/README.md.
+leak:renumberobj
+leak:renumberobjs

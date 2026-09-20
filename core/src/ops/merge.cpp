@@ -64,6 +64,7 @@ void append_image_page(fz_context* ctx, pdf_document* dst,
 
     OwnedPdfObj image_ref{ctx};
     OwnedPdfObj resources{ctx};
+    OwnedPdfObj xobjects{ctx};
     OwnedBuffer contents{ctx};
     OwnedPdfObj page{ctx};
 
@@ -73,10 +74,14 @@ void append_image_page(fz_context* ctx, pdf_document* dst,
         // lossless path -- no decode, no re-encode.
         *image_ref.slot() = pdf_add_image(g, dst, img);
 
-        pdf_obj* xobjects = pdf_new_dict(g, dst, 1);
+        // Both dictionaries are held by guards in the outer frame. pdf_dict_puts
+        // takes its own reference, so ours must still be dropped -- holding them
+        // here also keeps it correct if MuPDF throws part-way through.
+        *xobjects.slot() = pdf_new_dict(g, dst, 1);
+        pdf_dict_puts(g, xobjects.get(), "Img", image_ref.get());
+
         *resources.slot() = pdf_new_dict(g, dst, 1);
-        pdf_dict_puts(g, resources.get(), "XObject", xobjects);
-        pdf_dict_puts(g, xobjects, "Img", image_ref.get());
+        pdf_dict_puts(g, resources.get(), "XObject", xobjects.get());
 
         *contents.slot() = fz_new_buffer(g, 128);
         // %g takes a double through varargs; promote explicitly.

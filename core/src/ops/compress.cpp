@@ -154,9 +154,11 @@ bool recompress_image(fz_context* ctx, pdf_document* doc, pdf_obj* ref,
         // Dictionary edits go to the resolved object; the stream replacement
         // needs the indirect reference itself.
         pdf_obj* dict = pdf_resolve_indirect(g, ref);
-        pdf_dict_put(g, dict, PDF_NAME(Width), pdf_new_int(g, final_w));
-        pdf_dict_put(g, dict, PDF_NAME(Height), pdf_new_int(g, final_h));
-        pdf_dict_put(g, dict, PDF_NAME(BitsPerComponent), pdf_new_int(g, 8));
+        // put_int rather than put(..., pdf_new_int(...)): the dict takes its
+        // own reference and ours would leak. Same bug as ops/pages.cpp had.
+        pdf_dict_put_int(g, dict, PDF_NAME(Width), final_w);
+        pdf_dict_put_int(g, dict, PDF_NAME(Height), final_h);
+        pdf_dict_put_int(g, dict, PDF_NAME(BitsPerComponent), 8);
         pdf_dict_put(g, dict, PDF_NAME(ColorSpace), PDF_NAME(DeviceRGB));
         pdf_dict_put(g, dict, PDF_NAME(Filter), PDF_NAME(DCTDecode));
         pdf_dict_del(g, dict, PDF_NAME(DecodeParms));

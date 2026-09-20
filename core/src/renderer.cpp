@@ -212,7 +212,18 @@ std::optional<Bitmap> Renderer::render(int page_index, float zoom, int rotation,
     const std::size_t bytes =
         static_cast<std::size_t>(out.stride) * static_cast<std::size_t>(out.height);
     out.pixels.resize(bytes);
-    std::memcpy(out.pixels.data(), fz_pixmap_samples(ctx, pix), bytes);
+
+    // A degenerate page -- zoom of zero, or an empty box -- yields a pixmap
+    // with no samples. memcpy with a null pointer is undefined even when the
+    // length is zero, which UBSan correctly flags, so guard rather than rely on
+    // it being harmless in practice.
+    if (bytes > 0) {
+        const unsigned char* samples = fz_pixmap_samples(ctx, pix);
+        if (samples == nullptr) {
+            throw Error(0, "MuPDF returned a pixmap with no sample data");
+        }
+        std::memcpy(out.pixels.data(), samples, bytes);
+    }
 
     return out;
 }

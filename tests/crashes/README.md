@@ -1,8 +1,8 @@
-# Crash artifacts
+# Engine defect artifacts
 
-Inputs that crash the engine. **These are deliberately excluded from the normal
-test corpus** — adding them to `tests/corpus/` would abort the test suite rather
-than fail it.
+Reproducers for defects in the engine, kept next to the evidence for them.
+Crash inputs here are **deliberately excluded from the normal test corpus** —
+adding them to `tests/corpus/` would abort the test suite rather than fail it.
 
 ## `obj-dict-5byte.pdf` — MuPDF 1.28.2 heap corruption in xref repair
 
@@ -95,3 +95,66 @@ things.
    public API exposes a MuPDF type, and batch work already uses independent
    `Context`s per worker rather than a shared one.
 2. The fuzz target earns its place in CI. It found a real bug on its first run.
+
+
+---
+
+## `mupdf_save_leak_repro.c` — MuPDF leaks ~874 bytes per save
+
+`pdf_save_document` leaks when `do_garbage >= 2`, in the object renumbering
+path: `renumberobjs` → `renumberobj` → `pdf_copy_dict` → `pdf_new_dict`.
+
+```sh
+gcc -g -O0 -fsanitize=address mupdf_save_leak_repro.c -o probe /usr/lib64/libmupdf.so
+./probe ../corpus/text_10p.pdf 3
+```
+
+It is precisely the garbage-collection level that triggers it:
+
+| `do_garbage` | meaning | leaked |
+|---|---|---|
+| 0 | none | nothing |
+| 1 | collect | nothing |
+| 2 | collect + renumber | 642 bytes, 19 allocations |
+| 3 | collect + renumber + de-duplicate | 874 bytes, 23 allocations |
+
+It accumulates linearly — 1 save leaks 874 bytes, 10 leak 8,740, 50 leak 43,700 —
+and it is present in **both** MuPDF 1.28.2 and 1.28.4, so it is long-standing
+rather than a recent regression. Unlike the `obj<<` crash above, **this one is
+still live in current upstream and is worth reporting to Artifex.**
+
+### Why Leht keeps `do_garbage = 3` anyway
+
+De-duplication is worth far more than 874 bytes. Merging four copies of one file
+without it costs four copies of their shared fonts, which `test_merge` asserts.
+For the CLI the leak is irrelevant — the process exits. It will matter for the
+M2 viewer if it performs many saves in one session, and that is the point at
+which to revisit it.
+
+### Suppression
+
+`tests/lsan.supp` suppresses this so a real leak in Leht's own code is not lost
+in the noise. Two things about that file are load-bearing:
+
+- Every entry must name an upstream defect with a reproducer here. **Never
+  suppress a leak in our own code — fix it.**
+- `ASAN_OPTIONS=fast_unwind_on_malloc=0` is required, not a tuning knob. LSan's
+  default fast unwinder produces stacks too shallow to reach the frames the
+  suppressions name, so without it every suppression silently fails to match
+  and the suite goes red for no reason anyone can see.
+
+### What ASan found in our own code
+
+Worth recording, because the upstream leak was the *least* valuable thing this
+exercise turned up. Running the suite under ASan/UBSan for the first time found
+four real defects in Leht:
+
+- `renderer.cpp` — `memcpy` with a null pointer when a degenerate page produced
+  a pixmap with no samples. Undefined behaviour even at zero length.
+- `ops/pages.cpp` — `pdf_dict_put(..., pdf_new_int(...))` in `rotate`. The
+  dictionary takes its own reference, so the one `pdf_new_int` returns leaked.
+- `ops/compress.cpp` — the same mistake three more times.
+- `ops/merge.cpp` — an XObject dictionary that was never dropped.
+
+All four are invisible without sanitizers, and all four are in code that passed
+its functional tests.

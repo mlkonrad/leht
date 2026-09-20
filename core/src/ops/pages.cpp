@@ -280,7 +280,10 @@ PagesResult rotate(const Context& ctx, const std::string& input,
                 pdf_dict_get_int(g, page_obj, PDF_NAME(Rotate));
             // PDF /Rotate must be a non-negative multiple of 90.
             const int updated = (((current + degrees) % 360) + 360) % 360;
-            pdf_dict_put(g, page_obj, PDF_NAME(Rotate), pdf_new_int(g, updated));
+            // put_int, not put(..., pdf_new_int(...)): pdf_dict_put takes its
+            // own reference, so the one pdf_new_int returns would never be
+            // dropped. ASan caught exactly that leak here.
+            pdf_dict_put_int(g, page_obj, PDF_NAME(Rotate), updated);
         });
     }
 

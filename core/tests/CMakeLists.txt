@@ -6,6 +6,18 @@ function(leht_add_test name)
     target_compile_definitions(${name} PRIVATE
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
     add_test(NAME ${name} COMMAND ${name})
+
+    # Under sanitizers, suppress the known upstream MuPDF leaks so a real leak
+    # in our own code is not lost in the noise. The suppression file documents
+    # each entry and points at its reproducer; nothing of ours is suppressed.
+    #
+    # fast_unwind_on_malloc=0 is required, not optional: LSan's default fast
+    # unwinder produces stacks too shallow to reach the frame the suppressions
+    # name, so every suppression silently fails to match. It costs speed.
+    if(LEHT_SANITIZE)
+        set_tests_properties(${name} PROPERTIES ENVIRONMENT
+            "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tests/lsan.supp;ASAN_OPTIONS=fast_unwind_on_malloc=0;UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1")
+    endif()
 endfunction()
 
 leht_add_test(test_context)
