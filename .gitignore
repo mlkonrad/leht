@@ -1,0 +1,10 @@
+build/
+build-*/
+.cache/
+compile_commands.json
+*.o
+*.so
+*.a
+tests/corpus/*.pdf
+!tests/corpus/README.md
+bench/results/

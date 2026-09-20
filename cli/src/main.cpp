@@ -1,0 +1,394 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// leht(1) -- the headless front end to leht::core.
+//
+// Hand-rolled argument parsing on purpose: a PDF toolkit that advertises being
+// light should not pull in a command-line framework to read a dozen flags.
+
+#include "leht/context.hpp"
+#include "leht/document.hpp"
+#include "leht/error.hpp"
+#include "leht/ops/compress.hpp"
+#include "leht/ops/encrypt.hpp"
+#include "leht/ops/merge.hpp"
+#include "leht/ops/pages.hpp"
+#include "leht/renderer.hpp"
+
+#include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+constexpr const char* kUsage =
+    "leht -- fast, desktop-neutral PDF toolkit\n"
+    "\n"
+    "usage: leht <command> [options] <files...>\n"
+    "\n"
+    "commands:\n"
+    "  info      FILE...                      pages, size, metadata, encryption\n"
+    "  render    FILE -o OUT.png [-p N] [-z Z]  render one page to PNG\n"
+    "  merge     FILE... -o OUT.pdf           merge PDFs and images, in order\n"
+    "  split     FILE -o 'part-%03d.pdf' [-n N]  split into chunks\n"
+    "  extract   FILE -p RANGES -o OUT.pdf    keep only these pages\n"
+    "  remove    FILE -p RANGES -o OUT.pdf    drop these pages\n"
+    "  rotate    FILE -p RANGES -d DEG -o OUT.pdf   rotate by a multiple of 90\n"
+    "  compress  FILE -o OUT.pdf [--preset P] [-q N] [--linearize]\n"
+    "  encrypt   FILE -o OUT.pdf [--user-pw PW] [--owner-pw PW] [--method M]\n"
+    "  decrypt   FILE -o OUT.pdf [--password PW]\n"
+    "\n"
+    "options:\n"
+    "  -o PATH        output file or pattern\n"
+    "  -p SPEC        pages, 1-based and inclusive: \"1-5,8,12-\" (default: all)\n"
+    "                 a descending range reverses, so \"5-1\" flips those pages\n"
+    "  -z ZOOM        render scale, 1.0 = 72 DPI (default 1.0)\n"
+    "  -n COUNT       pages per file when splitting (default 1)\n"
+    "  -d DEGREES     rotation, a multiple of 90, may be negative\n"
+    "  -q QUALITY     JPEG quality 1-100, overrides the preset\n"
+    "  --preset P     lossless | print | ebook | screen   (default ebook)\n"
+    "  --method M     aes256 | aes128 | rc4               (default aes256)\n"
+    "  --linearize    optimise for progressive web loading\n"
+    "\n"
+    "leht is free software under the AGPL-3.0-or-later.\n";
+
+/// Parsed command line: flags with values, plus the positional arguments.
+struct Args {
+    std::string command;
+    std::vector<std::string> positional;
+    std::map<std::string, std::string> flags;
+    std::vector<std::string> switches;
+
+    [[nodiscard]] bool has_switch(const std::string& name) const {
+        for (const std::string& s : switches) {
+            if (s == name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::string flag(const std::string& name,
+                                   const std::string& fallback = "") const {
+        const auto it = flags.find(name);
+        return it == flags.end() ? fallback : it->second;
+    }
+
+    [[nodiscard]] int int_flag(const std::string& name, int fallback) const {
+        const auto it = flags.find(name);
+        if (it == flags.end()) {
+            return fallback;
+        }
+        return std::atoi(it->second.c_str());
+    }
+
+    [[nodiscard]] float float_flag(const std::string& name, float fallback) const {
+        const auto it = flags.find(name);
+        if (it == flags.end()) {
+            return fallback;
+        }
+        return static_cast<float>(std::atof(it->second.c_str()));
+    }
+};
+
+/// Flags that take a value. Anything else beginning with '-' is a switch.
+bool takes_value(const std::string& name) {
+    static const std::vector<std::string> kValued{
+        "-o", "-p", "-z", "-n", "-d", "-q", "--preset",
+        "--method", "--user-pw", "--owner-pw", "--password"};
+    for (const std::string& v : kValued) {
+        if (v == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Args parse(int argc, char** argv) {
+    Args args;
+    if (argc > 1) {
+        args.command = argv[1];
+    }
+    for (int i = 2; i < argc; ++i) {
+        const std::string token = argv[i];
+        if (token.size() > 1 && token[0] == '-') {
+            if (takes_value(token)) {
+                if (i + 1 >= argc) {
+                    throw leht::Error(0, token + " needs a value");
+                }
+                args.flags[token] = argv[++i];
+            } else {
+                args.switches.push_back(token);
+            }
+        } else {
+            args.positional.push_back(token);
+        }
+    }
+    return args;
+}
+
+std::string human_bytes(std::size_t bytes) {
+    static const char* kUnits[] = {"B", "KB", "MB", "GB"};
+    auto value = static_cast<double>(bytes);
+    int unit = 0;
+    while (value >= 1024.0 && unit < 3) {
+        value /= 1024.0;
+        ++unit;
+    }
+    std::array<char, 64> out{};
+    std::snprintf(out.data(), out.size(), unit == 0 ? "%.0f %s" : "%.1f %s",
+                  value, kUnits[unit]);
+    return out.data();
+}
+
+std::string require_output(const Args& args) {
+    const std::string out = args.flag("-o");
+    if (out.empty()) {
+        throw leht::Error(0, "this command needs an output path (-o)");
+    }
+    return out;
+}
+
+std::string require_input(const Args& args) {
+    if (args.positional.empty()) {
+        throw leht::Error(0, "this command needs an input file");
+    }
+    return args.positional.front();
+}
+
+leht::ops::CompressPreset parse_preset(const std::string& name) {
+    if (name.empty() || name == "ebook")  { return leht::ops::CompressPreset::Ebook; }
+    if (name == "lossless")               { return leht::ops::CompressPreset::Lossless; }
+    if (name == "print")                  { return leht::ops::CompressPreset::Print; }
+    if (name == "screen")                 { return leht::ops::CompressPreset::Screen; }
+    throw leht::Error(0, "unknown preset '" + name +
+                             "' (lossless, print, ebook, screen)");
+}
+
+leht::ops::Encryption parse_method(const std::string& name) {
+    if (name.empty() || name == "aes256") { return leht::ops::Encryption::Aes256; }
+    if (name == "aes128")                 { return leht::ops::Encryption::Aes128; }
+    if (name == "rc4")                    { return leht::ops::Encryption::Rc4_128; }
+    throw leht::Error(0, "unknown method '" + name + "' (aes256, aes128, rc4)");
+}
+
+// -- commands ---------------------------------------------------------------
+
+int cmd_info(const leht::Context& ctx, const Args& args) {
+    if (args.positional.empty()) {
+        throw leht::Error(0, "info needs at least one file");
+    }
+    for (const std::string& path : args.positional) {
+        leht::Document doc = leht::Document::open(ctx, path);
+
+        std::error_code ec;
+        const auto size = fs::file_size(path, ec);
+        std::printf("%s\n", path.c_str());
+        std::printf("  size       %s\n",
+                    human_bytes(ec ? 0 : static_cast<std::size_t>(size)).c_str());
+
+        if (doc.needs_password()) {
+            std::printf("  encrypted  yes (locked -- supply a password to read more)\n");
+            continue;
+        }
+        std::printf("  pages      %d\n", doc.page_count());
+        std::printf("  encrypted  no\n");
+
+        for (const char* key : {"format", "info:Title", "info:Author",
+                                "info:Subject", "info:Creator",
+                                "info:Producer", "info:CreationDate"}) {
+            if (const auto value = doc.metadata(key); value && !value->empty()) {
+                std::printf("  %-10s %s\n", key, value->c_str());
+            }
+        }
+    }
+    return 0;
+}
+
+int cmd_render(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+    const int page = args.int_flag("-p", 1);
+    const float zoom = args.float_flag("-z", 1.0F);
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    if (page < 1 || page > doc.page_count()) {
+        throw leht::Error(0, "page " + std::to_string(page) + " is out of range (" +
+                                 std::to_string(doc.page_count()) + " pages)");
+    }
+
+    leht::Renderer renderer{ctx, doc};
+    const auto bitmap = renderer.render(page - 1, zoom);
+    if (!bitmap) {
+        throw leht::Error(0, "render was cancelled");
+    }
+    leht::write_png(ctx, *bitmap, output);
+
+    std::printf("wrote %s  %dx%d px\n", output.c_str(), bitmap->width,
+                bitmap->height);
+    return 0;
+}
+
+int cmd_merge(const leht::Context& ctx, const Args& args) {
+    if (args.positional.empty()) {
+        throw leht::Error(0, "merge needs at least one input");
+    }
+    const std::string output = require_output(args);
+
+    leht::ops::MergeOptions options;
+    options.linearize = args.has_switch("--linearize");
+
+    const auto result = leht::ops::merge(ctx, args.positional, output, options);
+    std::printf("merged %d input%s into %s  %d pages, %s\n",
+                result.inputs_merged, result.inputs_merged == 1 ? "" : "s",
+                output.c_str(), result.pages_written,
+                human_bytes(result.output_bytes).c_str());
+    return 0;
+}
+
+int cmd_compress(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+
+    leht::ops::CompressOptions options;
+    options.preset = parse_preset(args.flag("--preset"));
+    options.jpeg_quality = args.int_flag("-q", 0);
+    options.linearize = args.has_switch("--linearize");
+
+    const auto result = leht::ops::compress(ctx, input, output, options);
+    const double saved = result.saved_fraction() * 100.0;
+
+    std::printf("%s -> %s  [%s]\n", input.c_str(), output.c_str(),
+                leht::ops::preset_name(options.preset));
+    std::printf("  %s -> %s  (%.1f%% %s)\n",
+                human_bytes(result.input_bytes).c_str(),
+                human_bytes(result.output_bytes).c_str(),
+                saved < 0 ? -saved : saved, saved < 0 ? "larger" : "smaller");
+    if (result.images_examined > 0) {
+        std::printf("  %d of %d images recompressed\n",
+                    result.images_recompressed, result.images_examined);
+    }
+    if (saved <= 0) {
+        std::printf("  note: already well compressed; the original is the "
+                    "better file\n");
+    }
+    return 0;
+}
+
+int cmd_extract(const leht::Context& ctx, const Args& args) {
+    const auto result = leht::ops::extract(ctx, require_input(args),
+                                           require_output(args),
+                                           args.flag("-p"));
+    std::printf("wrote %d page%s, %s\n", result.pages_written,
+                result.pages_written == 1 ? "" : "s",
+                human_bytes(result.output_bytes).c_str());
+    return 0;
+}
+
+int cmd_remove(const leht::Context& ctx, const Args& args) {
+    const auto result = leht::ops::remove_pages(ctx, require_input(args),
+                                                require_output(args),
+                                                args.flag("-p"));
+    std::printf("wrote %d remaining page%s, %s\n", result.pages_written,
+                result.pages_written == 1 ? "" : "s",
+                human_bytes(result.output_bytes).c_str());
+    return 0;
+}
+
+int cmd_rotate(const leht::Context& ctx, const Args& args) {
+    const int degrees = args.int_flag("-d", 90);
+    const auto result = leht::ops::rotate(ctx, require_input(args),
+                                          require_output(args),
+                                          args.flag("-p"), degrees);
+    std::printf("rotated by %d degrees, wrote %d pages, %s\n", degrees,
+                result.pages_written, human_bytes(result.output_bytes).c_str());
+    return 0;
+}
+
+int cmd_split(const leht::Context& ctx, const Args& args) {
+    const auto written = leht::ops::split(ctx, require_input(args),
+                                          require_output(args),
+                                          args.int_flag("-n", 1));
+    for (const std::string& path : written) {
+        std::printf("  %s\n", path.c_str());
+    }
+    std::printf("wrote %zu file%s\n", written.size(),
+                written.size() == 1 ? "" : "s");
+    return 0;
+}
+
+int cmd_encrypt(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+
+    leht::ops::EncryptOptions options;
+    options.user_password = args.flag("--user-pw");
+    options.owner_password = args.flag("--owner-pw");
+    options.method = parse_method(args.flag("--method"));
+
+    leht::ops::encrypt(ctx, input, output, options);
+    std::printf("wrote encrypted %s\n", output.c_str());
+    if (options.user_password.empty()) {
+        std::printf("  note: no user password, so anyone can open it. The "
+                    "permission flags are advisory only.\n");
+    }
+    return 0;
+}
+
+int cmd_decrypt(const leht::Context& ctx, const Args& args) {
+    leht::ops::decrypt(ctx, require_input(args), require_output(args),
+                       args.flag("--password"));
+    std::printf("wrote decrypted %s\n", args.flag("-o").c_str());
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fputs(kUsage, stderr);
+        return 2;
+    }
+
+    try {
+        const Args args = parse(argc, argv);
+        const std::string& cmd = args.command;
+
+        if (cmd == "-h" || cmd == "--help" || cmd == "help") {
+            std::fputs(kUsage, stdout);
+            return 0;
+        }
+        if (cmd == "--version" || cmd == "version") {
+            std::printf("leht 0.1.0\n");
+            return 0;
+        }
+
+        leht::Context ctx;
+
+        if (cmd == "info")     { return cmd_info(ctx, args); }
+        if (cmd == "render")   { return cmd_render(ctx, args); }
+        if (cmd == "merge")    { return cmd_merge(ctx, args); }
+        if (cmd == "compress") { return cmd_compress(ctx, args); }
+        if (cmd == "extract")  { return cmd_extract(ctx, args); }
+        if (cmd == "remove")   { return cmd_remove(ctx, args); }
+        if (cmd == "rotate")   { return cmd_rotate(ctx, args); }
+        if (cmd == "split")    { return cmd_split(ctx, args); }
+        if (cmd == "encrypt")  { return cmd_encrypt(ctx, args); }
+        if (cmd == "decrypt")  { return cmd_decrypt(ctx, args); }
+
+        std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
+        std::fputs(kUsage, stderr);
+        return 2;
+    } catch (const leht::Error& e) {
+        std::fprintf(stderr, "leht: %s\n", e.what());
+        return 1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "leht: %s\n", e.what());
+        return 1;
+    }
+}
