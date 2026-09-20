@@ -10,6 +10,10 @@ list; `core/` links no second PDF library. Qt6 arrives with the GUI in M2:
 sudo dnf install gcc-c++ cmake ninja-build mupdf-devel
 ```
 
+Building the GUI (`-DLEHT_BUILD_UI=ON`, M2) additionally needs **`qt6-qtbase-devel`**. The
+runtime `qt6-qtbase-gui` package is not enough — without the `-devel` package there is no
+`Qt6Config.cmake` and `ui/` cannot be configured at all.
+
 **Test-time dependencies are separate packages and none of them is a runtime dependency
 of Leht:**
 
