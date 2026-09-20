@@ -8,3 +8,10 @@ compile_commands.json
 tests/corpus/*.pdf
 !tests/corpus/README.md
 bench/results/
+
+# libFuzzer artifacts, if a run is started without -artifact_prefix
+crash-*
+leak-*
+timeout-*
+oom-*
+slow-unit-*

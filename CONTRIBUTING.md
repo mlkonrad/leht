@@ -64,6 +64,32 @@ missing, so a skip is not a pass — install the tools above before trusting a g
 The test corpus is **generated, not committed** — run `./tests/corpus/generate.sh`, which
 needs ghostscript. Generated PDFs are gitignored. Don't commit binary test files.
 
+### Sanitizers
+
+```sh
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug -DLEHT_SANITIZE=ON
+cmake --build build-asan && ctest --test-dir build-asan
+```
+
+Run this before sending anything that touches `core/`. The first time the suite was ever
+run under ASan/UBSan it found **four real defects** — a `memcpy` from a null pointer, and
+three leaked MuPDF object references — all in code whose functional tests were passing.
+Sixty-two green tests said nothing was wrong. That is the whole argument for running them.
+
+Two things about the setup are load-bearing rather than tuning:
+
+- `tests/lsan.supp` suppresses one known upstream MuPDF leak so a real leak of ours is not
+  buried in the noise. **Every entry must name an upstream defect with a reproducer under
+  `tests/crashes/`. Never suppress a leak in our own code — fix it.**
+- `ASAN_OPTIONS=fast_unwind_on_malloc=0` is **required**, and CMake sets it for you. LSan's
+  default fast unwinder produces stacks too shallow to reach the frames a suppression
+  names, so without it every suppression silently fails to match and the suite goes red
+  with no visible explanation.
+
+Coverage-guided fuzzing with clang also needs `llvm-symbolizer` (Fedora package `llvm`) for
+suppressions to resolve. Without it, run libFuzzer with `-detect_leaks=0` and rely on the
+GCC ASan build for leak checking.
+
 ## Fuzzing
 
 `ctest` runs **`fuzz_corpus_replay`**, which replays every corpus file unmutated. That is a
@@ -96,7 +122,7 @@ with an empty path, which swallows the `-lmupdf` that follows it, so
 `find_library` and an absolute path. If you are compiling a one-off reproducer by hand, pass
 `/usr/lib64/libmupdf.so` directly instead of using `pkg-config`.
 
-## Three rules that are not negotiable
+## Four rules that are not negotiable
 
 **1. `core/` never links Qt, and no public header may name a MuPDF type.** Public headers
 use forward-declared opaque pointers only. This is what keeps the engine headlessly
@@ -120,6 +146,22 @@ constructed **inside** a `guarded()` lambda.
 MuPDF takes `FZ_LOCK_ALLOC` around every allocation, and cloned rendering gets *slower*
 with each thread added. See [docs/threading.md](docs/threading.md) for the numbers and the
 command to reproduce them.
+
+**4. A diagnostic pragma needs a comment saying why the warning is wrong here.** Warnings
+are errors in Debug, and the way that protection gets defeated is not by arguing with it
+but by quietly silencing it. `#pragma GCC diagnostic ignored` is sometimes legitimate —
+MuPDF's C headers trip `-Wold-style-cast`, and `core/src/mupdf_c.hpp` suppresses that in
+one place, with a comment. What is not legitimate is suppressing a warning about your own
+code because it is inconvenient.
+
+`-Wformat-nonliteral` in particular is almost never wrong. It exists to name CWE-134,
+uncontrolled format strings, and Leht shipped exactly that bug underneath a pragma
+silencing it: `ops::split` passed the caller's output pattern to `snprintf` as its format
+string, so `leht split in.pdf -o '%s.pdf'` segfaulted and `%n` would have been an
+arbitrary write. The pragma was added by the same change that introduced the bug. See
+[docs/robustness.md](docs/robustness.md).
+
+If you find yourself reaching for a pragma, first assume the compiler is right.
 
 ## Licensing of contributions
 

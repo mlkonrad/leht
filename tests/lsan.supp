@@ -13,3 +13,9 @@
 # shared fonts. See tests/crashes/README.md.
 leak:renumberobj
 leak:renumberobjs
+
+# NOTE on libFuzzer: these suppressions only match when the stack can be
+# symbolized, which needs llvm-symbolizer (Fedora package `llvm`). Without it
+# libFuzzer reports the known upstream save leak as a finding and stops on the
+# first corpus entry. Run libFuzzer with -detect_leaks=0 in that case; leak
+# checking is covered properly by the GCC ASan build, where it works.
