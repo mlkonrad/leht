@@ -190,6 +190,64 @@ void split_honours_chunk_size() {
     fs::remove_all(dir);
 }
 
+/// REGRESSION, security. split() used to pass the caller's pattern straight to
+/// snprintf as the format string -- an uncontrolled format string (CWE-134).
+/// `-o '%s.pdf'` made printf dereference the page number as a pointer and
+/// segfaulted; `%n` would have been an arbitrary write. Every one of these must
+/// now be a clean leht::Error, and none may crash.
+void split_rejects_dangerous_format_patterns() {
+    Context ctx;
+    const fs::path dir = fs::temp_directory_path() / "leht_split_fmt";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    for (const char* pattern : {"%s.pdf",        // pointer dereference
+                                "%n.pdf",        // arbitrary write
+                                "%p.pdf",        // pointer leak
+                                "%x-%x-%x.pdf",  // stack read
+                                "a-%d-%d.pdf",   // two fields, one argument
+                                "%.pdf",         // truncated conversion
+                                "%999999999d.pdf",  // absurd width
+                                "plain.pdf"}) {   // no field at all
+        bool threw = false;
+        try {
+            (void)split(ctx, corpus("text_10p.pdf"),
+                        (dir / pattern).string(), 5);
+        } catch (const leht::Error&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+    fs::remove_all(dir);
+}
+
+/// The supported syntax must still work, including %% for a literal percent.
+void split_accepts_valid_format_patterns() {
+    Context ctx;
+    const fs::path dir = fs::temp_directory_path() / "leht_split_ok";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    const auto padded = split(ctx, corpus("text_10p.pdf"),
+                              (dir / "p-%03d.pdf").string(), 5);
+    CHECK(padded.size() == 2);
+    CHECK(fs::exists(dir / "p-001.pdf"));
+    CHECK(fs::exists(dir / "p-002.pdf"));
+
+    const auto plain = split(ctx, corpus("text_10p.pdf"),
+                             (dir / "q-%d.pdf").string(), 5);
+    CHECK(plain.size() == 2);
+    CHECK(fs::exists(dir / "q-1.pdf"));
+
+    // %% is a literal percent and does not count as the integer field.
+    const auto percent = split(ctx, corpus("text_10p.pdf"),
+                               (dir / "100%%-%d.pdf").string(), 5);
+    CHECK(percent.size() == 2);
+    CHECK(fs::exists(dir / "100%-1.pdf"));
+
+    fs::remove_all(dir);
+}
+
 void split_requires_a_format_field() {
     Context ctx;
     bool threw = false;
@@ -219,5 +277,7 @@ int main() {
     RUN(split_writes_one_file_per_page);
     RUN(split_honours_chunk_size);
     RUN(split_requires_a_format_field);
+    RUN(split_rejects_dangerous_format_patterns);
+    RUN(split_accepts_valid_format_patterns);
     return 0;
 }

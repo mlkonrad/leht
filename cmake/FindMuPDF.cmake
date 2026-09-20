@@ -5,6 +5,43 @@ if(TARGET MuPDF::MuPDF)
     return()
 endif()
 
+# LEHT_MUPDF_ROOT points at a hand-built MuPDF source tree (one that has been
+# built with `make libs`), bypassing pkg-config and the system library.
+#
+# This exists because of a lesson the fuzzer taught us: the version a
+# distribution ships is not the version upstream supports, and for a library
+# parsing hostile input that gap matters. Being able to build and test against
+# current upstream without touching the system is worth the twelve lines.
+#
+#   cmake -S . -B build-next -DLEHT_MUPDF_ROOT=/path/to/mupdf-1.28.4-source
+set(LEHT_MUPDF_ROOT "" CACHE PATH "Built MuPDF source tree to use instead of the system one")
+
+if(LEHT_MUPDF_ROOT)
+    find_path(MuPDF_INCLUDE_DIR NAMES mupdf/fitz.h
+              PATHS "${LEHT_MUPDF_ROOT}/include" NO_DEFAULT_PATH)
+    find_library(MuPDF_LIBRARY NAMES mupdf
+                 PATHS "${LEHT_MUPDF_ROOT}/build/release" NO_DEFAULT_PATH)
+    find_library(MuPDF_THIRD_LIBRARY NAMES mupdf-third
+                 PATHS "${LEHT_MUPDF_ROOT}/build/release" NO_DEFAULT_PATH)
+
+    if(NOT MuPDF_INCLUDE_DIR OR NOT MuPDF_LIBRARY)
+        message(FATAL_ERROR
+            "LEHT_MUPDF_ROOT=${LEHT_MUPDF_ROOT} does not look like a built "
+            "MuPDF tree. Run: make -j HAVE_X11=no HAVE_GLUT=no build=release libs")
+    endif()
+
+    add_library(MuPDF::MuPDF UNKNOWN IMPORTED)
+    set_target_properties(MuPDF::MuPDF PROPERTIES
+        IMPORTED_LOCATION "${MuPDF_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${MuPDF_INCLUDE_DIR}")
+    target_link_libraries(MuPDF::MuPDF INTERFACE
+        "${MuPDF_THIRD_LIBRARY}" m pthread)
+
+    set(MuPDF_FOUND TRUE)
+    message(STATUS "Using hand-built MuPDF from ${LEHT_MUPDF_ROOT}")
+    return()
+endif()
+
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(PC_MUPDF QUIET mupdf)

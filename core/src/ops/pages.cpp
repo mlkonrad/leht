@@ -79,6 +79,75 @@ PagesResult graft_selection(fz_context* ctx, pdf_document* src,
     return result;
 }
 
+/// Expands a filename pattern containing exactly one integer field.
+///
+/// Supports `%d` and zero-padded `%0Nd`; `%%` is a literal percent. Everything
+/// else is rejected.
+///
+/// This deliberately does NOT call snprintf with the caller's pattern. Doing so
+/// is an uncontrolled format string (CWE-134): `%s` makes printf dereference the
+/// page number as a pointer, and `%n` turns it into an arbitrary write. An
+/// earlier version of this function did exactly that and segfaulted on
+/// `leht split in.pdf -o '%s.pdf'`. Formatting the number here keeps printf out
+/// of reach of user input entirely.
+std::string expand_pattern(const std::string& pattern, int value) {
+    std::string out;
+    out.reserve(pattern.size() + 8);
+    int conversions = 0;
+
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        if (pattern[i] != '%') {
+            out.push_back(pattern[i]);
+            continue;
+        }
+
+        if (i + 1 < pattern.size() && pattern[i + 1] == '%') {
+            out.push_back('%');
+            ++i;
+            continue;
+        }
+
+        std::size_t j = i + 1;
+        bool zero_pad = false;
+        while (j < pattern.size() && pattern[j] == '0') {
+            zero_pad = true;
+            ++j;
+        }
+        std::size_t width = 0;
+        while (j < pattern.size() && pattern[j] >= '0' && pattern[j] <= '9') {
+            width = width * 10 + static_cast<std::size_t>(pattern[j] - '0');
+            ++j;
+        }
+        if (width > 64) {
+            throw Error(0, "field width too large in output pattern: " + pattern);
+        }
+        if (j >= pattern.size() || (pattern[j] != 'd' && pattern[j] != 'i')) {
+            throw Error(0,
+                        "output pattern may only contain an integer field such "
+                        "as %d or %03d (and %% for a literal percent): " +
+                            pattern);
+        }
+
+        std::string digits = std::to_string(value);
+        if (zero_pad && digits.size() < width) {
+            digits.insert(0, width - digits.size(), '0');
+        } else if (!zero_pad && digits.size() < width) {
+            digits.insert(0, width - digits.size(), ' ');
+        }
+        out += digits;
+
+        ++conversions;
+        i = j;
+    }
+
+    if (conversions != 1) {
+        throw Error(0, "output pattern needs exactly one integer field, e.g. "
+                       "part-%03d.pdf (got " +
+                           std::to_string(conversions) + "): " + pattern);
+    }
+    return out;
+}
+
 int parse_int(const std::string& text, const std::string& spec) {
     try {
         std::size_t consumed = 0;
@@ -231,10 +300,9 @@ std::vector<std::string> split(const Context& ctx, const std::string& input,
     if (pages_per_file < 1) {
         throw Error(0, "pages per file must be at least 1");
     }
-    if (output_pattern.find('%') == std::string::npos) {
-        throw Error(0, "output pattern needs a printf integer field, e.g. "
-                       "part-%03d.pdf");
-    }
+    // Validate the pattern before opening anything, so a bad pattern costs
+    // nothing and cannot half-finish a split.
+    (void)expand_pattern(output_pattern, 1);
 
     fz_context* c = ctx.raw();
     OwnedPdfDoc doc = open_pdf(c, input);
@@ -251,19 +319,7 @@ std::vector<std::string> split(const Context& ctx, const std::string& input,
             selection.push_back(page);
         }
 
-        std::array<char, 1024> name{};
-        // The pattern is caller-supplied and validated to contain a % field.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-nonliteral"
-        const int length = std::snprintf(name.data(), name.size(),
-                                         output_pattern.c_str(), index);
-#pragma GCC diagnostic pop
-        if (length <= 0 || static_cast<std::size_t>(length) >= name.size()) {
-            throw Error(0, "could not build an output name from pattern: " +
-                               output_pattern);
-        }
-
-        const std::string path(name.data(), static_cast<std::size_t>(length));
+        const std::string path = expand_pattern(output_pattern, index);
         graft_selection(c, doc.get(), selection, path);
         written.push_back(path);
     }
