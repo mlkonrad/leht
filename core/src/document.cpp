@@ -6,10 +6,75 @@
 #include "leht/context.hpp"
 #include "leht/error.hpp"
 
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
 #include <utility>
 #include <vector>
 
 namespace leht {
+
+namespace {
+
+/// State of an fz_stream reading from a file descriptor. Plain C layout: it is
+/// allocated with fz_calloc and freed by fd_drop, both on MuPDF's side.
+struct FdStream {
+    int fd;
+    std::int64_t offset;  ///< next byte pread() will fetch
+    std::int64_t size;
+    unsigned char buffer[8192];
+};
+
+// The three callbacks below are called from inside MuPDF, in C frames, where
+// fz_throw is the error channel MuPDF expects. They hold only trivially
+// destructible locals, so a longjmp out of them is safe.
+
+int fd_next(fz_context* ctx, fz_stream* stm, std::size_t /*max*/) {
+    auto* s = static_cast<FdStream*>(stm->state);
+    ssize_t n = 0;
+    do {
+        n = ::pread(s->fd, s->buffer, sizeof(s->buffer), s->offset);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) {
+        fz_throw(ctx, FZ_ERROR_SYSTEM, "read error on document descriptor");
+    }
+    s->offset += n;
+    stm->rp = s->buffer;
+    stm->wp = s->buffer + n;
+    stm->pos = s->offset;
+    if (n == 0) {
+        return EOF;
+    }
+    return *stm->rp++;
+}
+
+void fd_seek(fz_context* ctx, fz_stream* stm, std::int64_t offset, int whence) {
+    auto* s = static_cast<FdStream*>(stm->state);
+    std::int64_t target = offset;
+    if (whence == SEEK_CUR) {
+        target = stm->pos - (stm->wp - stm->rp) + offset;
+    } else if (whence == SEEK_END) {
+        target = s->size + offset;
+    }
+    if (target < 0) {
+        fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot seek before the start of the document");
+    }
+    s->offset = target;
+    stm->pos = target;
+    stm->rp = s->buffer;
+    stm->wp = s->buffer;
+}
+
+void fd_drop(fz_context* ctx, void* state) {
+    auto* s = static_cast<FdStream*>(state);
+    ::close(s->fd);
+    fz_free(ctx, s);
+}
+
+}  // namespace
 
 Document::Document(fz_context* ctx, fz_document* doc) noexcept
     : ctx_(ctx), doc_(doc) {}
@@ -60,6 +125,57 @@ Document Document::open_memory(const Context& ctx, const void* data,
     if (stream == nullptr) {
         throw Error(0, "could not open a stream over the input buffer");
     }
+
+    fz_document* doc = nullptr;
+    const char* hint = magic.empty() ? nullptr : magic.c_str();
+    guarded(c, [&](fz_context* g) {
+        doc = fz_open_document_with_stream(g, hint, stream);
+    });
+    if (doc == nullptr) {
+        throw Error(0, "fz_open_document_with_stream returned null");
+    }
+    return Document{c, doc};
+}
+
+Document Document::open_fd(const Context& ctx, int fd, const std::string& magic) {
+    fz_context* c = ctx.raw();
+    if (c == nullptr || fd < 0) {
+        if (fd >= 0) {
+            ::close(fd);
+        }
+        throw Error(0, c == nullptr
+                           ? "cannot open a document from a moved-from Context"
+                           : "invalid file descriptor");
+    }
+
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(fd);
+        throw Error(0, "document descriptor is not a regular file");
+    }
+
+    FdStream* state = nullptr;
+    try {
+        guarded(c, [&](fz_context* g) {
+            state = static_cast<FdStream*>(fz_calloc(g, 1, sizeof(FdStream)));
+        });
+    } catch (...) {
+        ::close(fd);
+        throw;
+    }
+    state->fd = fd;
+    state->offset = 0;
+    state->size = st.st_size;
+
+    // From here the fd belongs to `state`: fz_new_stream drops the state (and
+    // so closes the fd) itself if it fails, and the stream's drop does it
+    // afterwards.
+    fz_stream* stream = nullptr;
+    guarded(c, [&](fz_context* g) {
+        stream = fz_new_stream(g, state, fd_next, fd_drop);
+        stream->seek = fd_seek;
+    });
+    detail::Owned<fz_stream, fz_drop_stream> owned_stream{c, stream};
 
     fz_document* doc = nullptr;
     const char* hint = magic.empty() ? nullptr : magic.c_str();

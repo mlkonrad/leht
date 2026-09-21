@@ -267,3 +267,43 @@ in-process fix available at all.
 
 Worth reporting to Artifex alongside the save leak. No artifact is committed —
 the triggering file is multi-megabyte — so the generator stands in for it.
+
+## `mupdf_outline_depth_stackoverflow.py` — MuPDF stack overflow loading a deep outline
+
+An outline nested tens of thousands of levels deep (each item's `/First` is the
+next item) crashes MuPDF with a stack overflow when the outline is loaded.
+`fz_load_outline` -> `pdf_new_outline_iterator` -> `pdf_test_outline` validates
+the tree by recursing once per `/First` level (`source/pdf/pdf-outline.c:105` in
+1.28.4), with no depth limit.
+
+```sh
+python3 mupdf_outline_depth_stackoverflow.py deep.pdf 200000
+gcc -O2 pure_mupdf_outline_repro.c -o repro /usr/lib64/libmupdf.so
+./repro deep.pdf                          # SIGSEGV
+```
+
+`pure_mupdf_outline_repro.c` contains no Leht code: `fz_open_document`, then
+`fz_load_outline`. Found 2026-09-21 while looking for a real viewer-path crash to
+test M3's containment against.
+
+| version | depth 50,000 | depth 75,000 (~7.8 MB) | depth 200,000 (~21 MB) |
+|---|---|---|---|
+| 1.28.2 (Fedora 44) | loads | SIGSEGV | SIGSEGV |
+| 1.28.4 (upstream latest) | loads | SIGSEGV | SIGSEGV |
+
+(`-O2`, default 8 MB stack. The threshold moves with frame size and stack
+limit; the unbounded recursion is the bug.)
+
+### Why this one matters more than the reference chain
+
+Same class as the reference-chain overflow, a crash / denial of service needing
+a multi-megabyte crafted file, but it is **on every viewer's path**. The
+reference chain only fires when something walks the whole object graph (save,
+`compress`). Loading the outline is what a viewer does immediately after
+opening a document: before M3, double-clicking this file killed the Leht viewer
+on open. It is the fixture `worker/tests/test_worker.cpp` uses to prove the
+viewer survives a worker crash.
+
+Leht cannot cap it from `core/`: the recursion happens inside a single
+`fz_load_outline` call. Worth reporting to Artifex together with the other two.
+No artifact is committed; the generator stands in for it.

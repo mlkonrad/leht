@@ -69,6 +69,8 @@ std::vector<std::uint8_t> encode_rendered(const leht::Bitmap& b) {
 
 void test_round_trips() {
     CHECK(round_trip(Hello{}).version == kProtocolVersion);
+    CHECK(round_trip(Open{"report.pdf"}).name == "report.pdf");
+    CHECK(rejects<Open>(make_frame(1, Open{"../etc/passwd"}).payload));
     CHECK(round_trip(Authenticate{"s3cr\xc3\xa9t"}).password == "s3cr\xc3\xa9t");
     CHECK(round_trip(Cancel{42}).generation == 42);
     CHECK(round_trip(Search{"needle"}).needle == "needle");

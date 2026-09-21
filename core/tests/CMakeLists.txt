@@ -1,13 +1,7 @@
 # Plain-assert test executables driven by CTest. No framework dependency:
 # core/ has few enough seams that a test framework would cost more than it saves.
-# Sanitizer environment, shared by every test that runs Leht code -- the library
-# executables AND the CLI script. Kept in one variable so a new test cannot be
-# added without it, which is exactly the mistake that left cli_arguments red
-# under ASan: it saves with do_garbage=3 and hit the known upstream leak.
-set(LEHT_SANITIZER_ENV
-    "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tests/lsan.supp"
-    "ASAN_OPTIONS=fast_unwind_on_malloc=0"
-    "UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1")
+# LEHT_SANITIZER_ENV is defined in the top-level CMakeLists.txt, next to the
+# option that enables it, so ipc/ and worker/ tests share it too.
 
 function(leht_add_test name)
     add_executable(${name} ${name}.cpp)
@@ -40,6 +34,7 @@ leht_add_test(test_pages)
 leht_add_test(test_encrypt)
 leht_add_test(test_robustness)
 leht_add_test(test_bombs)
+leht_add_test(test_open_fd)
 
 # Independent cross-check against poppler. Self-consistency proves nothing about
 # correctness; agreement with a different rasteriser does. Skips cleanly (exit

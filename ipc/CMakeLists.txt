@@ -5,6 +5,7 @@ add_library(lehtipc
     src/wire.cpp
     src/protocol.cpp
     src/channel.cpp
+    src/process.cpp
 )
 add_library(leht::ipc ALIAS lehtipc)
 
@@ -20,4 +21,7 @@ if(LEHT_BUILD_TESTS)
     target_link_libraries(test_ipc PRIVATE leht::ipc leht::warnings)
     target_include_directories(test_ipc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests)
     add_test(NAME test_ipc COMMAND test_ipc)
+    if(LEHT_SANITIZE)
+        set_tests_properties(test_ipc PROPERTIES ENVIRONMENT "${LEHT_SANITIZER_ENV}")
+    endif()
 endif()

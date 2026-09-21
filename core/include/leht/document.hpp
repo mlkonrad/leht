@@ -52,6 +52,18 @@ public:
     Document& operator=(const Document&) = delete;
     ~Document();
 
+    /// Opens the document behind an already-open file descriptor, TAKING
+    /// OWNERSHIP of `fd`: it is closed when the Document is destroyed, or
+    /// before this throws. Reads use pread() at explicit offsets, so the fd's
+    /// own file position is irrelevant.
+    ///
+    /// This is how the sandboxed worker opens files: the viewer opens the
+    /// path and passes the descriptor, so the worker needs no filesystem
+    /// access at all. `magic` is as for open_memory(); passing the file name
+    /// lets MuPDF pick the handler the same way open() would.
+    static Document open_fd(const Context& ctx, int fd,
+                            const std::string& magic = "pdf");
+
     [[nodiscard]] int page_count() const;
 
     /// True when the document is encrypted and no usable password has been

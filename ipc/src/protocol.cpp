@@ -92,6 +92,16 @@ bool is_known(std::uint16_t type) noexcept {
 void Hello::encode(Writer& w) const { w.u32(version); }
 Hello Hello::decode(Reader& r) { return {r.u32()}; }
 
+void Open::encode(Writer& w) const { w.str(name); }
+Open Open::decode(Reader& r) {
+    Open m;
+    m.name = r.str(4096);
+    if (m.name.find('/') != std::string::npos || m.name.find('\0') != std::string::npos) {
+        throw ProtocolError("open hint must be a bare file name");
+    }
+    return m;
+}
+
 void Authenticate::encode(Writer& w) const { w.str(password); }
 Authenticate Authenticate::decode(Reader& r) { return {r.str(kMaxString)}; }
 

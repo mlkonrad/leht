@@ -72,11 +72,14 @@ struct Hello {
     static Hello decode(Reader& r);
 };
 
-/// The document itself travels as the frame's attached fd.
+/// The document itself travels as the frame's attached fd. `name` is only a
+/// format hint (the file's base name, so MuPDF can pick a handler by
+/// extension); the worker never opens anything by name.
 struct Open {
     static constexpr MsgType kType = MsgType::Open;
-    void encode(Writer&) const {}
-    static Open decode(Reader&) { return {}; }
+    std::string name;
+    void encode(Writer& w) const;
+    static Open decode(Reader& r);
 };
 
 struct Authenticate {

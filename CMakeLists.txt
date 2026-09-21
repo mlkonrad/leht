@@ -23,6 +23,16 @@ option(LEHT_BUILD_FUZZ   "Build the fuzz target"              ON)
 
 include(CompilerWarnings)
 
+# Sanitizer environment, shared by every test that runs Leht code -- the library
+# executables AND the CLI script. Kept in one variable so a new test cannot be
+# added without it, which is exactly the mistake that left cli_arguments red
+# under ASan: it saves with do_garbage=3 and hit the known upstream leak.
+set(LEHT_SANITIZER_ENV
+    "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tests/lsan.supp"
+    "ASAN_OPTIONS=fast_unwind_on_malloc=0"
+    "UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1")
+
+
 if(LEHT_BUILD_TESTS)
     enable_testing()
 endif()
@@ -31,6 +41,7 @@ add_subdirectory(core)
 # The viewer <-> leht-worker wire format (M3). Always built: it is small,
 # has no dependency beyond core/, and its tests guard the process boundary.
 add_subdirectory(ipc)
+add_subdirectory(worker)
 
 if(LEHT_BUILD_CLI)
     add_subdirectory(cli)
