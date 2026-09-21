@@ -189,3 +189,27 @@ void RenderWorker::selectRegion(int page, QPointF aBase, QPointF bBase,
         // No selection rather than a crash.
     }
 }
+
+void RenderWorker::renderThumbnail(int page, int targetWidth) {
+    if (renderer_ == nullptr || doc_ == nullptr || page < 0) {
+        return;
+    }
+    try {
+        const leht::PageSize base = renderer_->page_size(page, 1.0F);
+        if (base.width <= 0) {
+            return;
+        }
+        const auto zoom = static_cast<float>(targetWidth) /
+                          static_cast<float>(base.width);
+        // Rendered directly, not through the page cache: a thumbnail must not
+        // evict the full-size pages the reader is actually looking at.
+        if (auto bmp = renderer_->render(page, zoom)) {
+            const QImage img = toQImage(*bmp);
+            if (!img.isNull()) {
+                emit thumbnailReady(page, img);
+            }
+        }
+    } catch (const leht::Error&) {
+        // A bad page simply gets no thumbnail.
+    }
+}

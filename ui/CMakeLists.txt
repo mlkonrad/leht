@@ -8,6 +8,7 @@ qt_add_library(leht_viewer_lib STATIC
     src/main_window.cpp
     src/page_view.cpp
     src/render_worker.cpp
+    src/thumbnail_bar.cpp
 )
 target_include_directories(leht_viewer_lib PUBLIC src)
 # leht::warnings is deliberately not applied: Qt's moc output and headers do not

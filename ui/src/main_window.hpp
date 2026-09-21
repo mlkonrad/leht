@@ -15,6 +15,7 @@ class QToolBar;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QSpinBox;
+class ThumbnailBar;
 
 /// The application window. Owns the render thread, wires it to the view, and
 /// provides open / zoom / fit actions.
@@ -63,6 +64,7 @@ private:
     QLineEdit* findEdit_ = nullptr;
     QLabel* findLabel_ = nullptr;
     QTreeWidget* outlineTree_ = nullptr;
+    ThumbnailBar* thumbnails_ = nullptr;
     QSpinBox* pageSpin_ = nullptr;
     bool syncingSpin_ = false;
     int pageCount_ = 0;

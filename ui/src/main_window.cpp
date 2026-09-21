@@ -22,6 +22,7 @@
 #include <QTreeWidget>
 
 #include "outline_model.hpp"
+#include "thumbnail_bar.hpp"
 
 MainWindow::MainWindow() {
     setWindowTitle(tr("Leht"));
@@ -61,6 +62,14 @@ MainWindow::MainWindow() {
             &RenderWorker::selectRegion);
     connect(worker_, &RenderWorker::selectionReady, view_,
             &PageView::setSelection);
+
+    // Thumbnails: bar -> worker request, worker -> bar image, bar -> navigation.
+    connect(worker_, &RenderWorker::thumbnailReady, this,
+            [this](int page, const QImage& img) {
+                if (thumbnails_ != nullptr) {
+                    thumbnails_->onThumbnail(page, img);
+                }
+            });
 
     connect(view_, &PageView::currentPageChanged, this,
             &MainWindow::onCurrentPageChanged);
@@ -113,6 +122,19 @@ MainWindow::MainWindow() {
     dock->hide();
     connect(outlineTree_, &QTreeWidget::itemClicked, this,
             &MainWindow::onOutlineClicked);
+
+    // Thumbnail sidebar, tabbed with the outline on the left.
+    auto* thumbDock = new QDockWidget(tr("Thumbnails"), this);
+    thumbDock->setObjectName(QStringLiteral("thumbnailDock"));
+    thumbnails_ = new ThumbnailBar(thumbDock);
+    thumbDock->setWidget(thumbnails_);
+    addDockWidget(Qt::LeftDockWidgetArea, thumbDock);
+    tabifyDockWidget(dock, thumbDock);
+    thumbDock->raise();  // thumbnails visible by default
+    connect(thumbnails_, &ThumbnailBar::needThumbnail, worker_,
+            &RenderWorker::renderThumbnail);
+    connect(thumbnails_, &ThumbnailBar::pageChosen, this,
+            [this](int page) { view_->goToPage(page); });
 
     // Go-to-page: a spin box in the status bar, kept in sync with the view.
     pageSpin_ = new QSpinBox(this);
@@ -192,6 +214,9 @@ void MainWindow::openPath(const QString& path) {
     currentTitle_ = QFileInfo(path).fileName();
     statusBar()->showMessage(tr("Opening %1…").arg(currentTitle_));
     view_->clear();
+    if (thumbnails_ != nullptr) {
+        thumbnails_->clearThumbnails();
+    }
     emit requestOpen(path);
 }
 
@@ -203,6 +228,7 @@ void MainWindow::onOpened(int pageCount, QVector<QSize> baseSizes) {
     view_->fitWidth();
     pageSpin_->setMaximum(qMax(1, pageCount));
     pageSpin_->setEnabled(pageCount > 0);
+    thumbnails_->setPageCount(pageCount);
     onCurrentPageChanged(view_->currentPage());
     updateZoomLabel();
 }
@@ -218,6 +244,9 @@ void MainWindow::onCurrentPageChanged(int page) {
         syncingSpin_ = true;
         pageSpin_->setValue(page + 1);
         syncingSpin_ = false;
+        if (thumbnails_ != nullptr) {
+            thumbnails_->setCurrentPageQuiet(page);
+        }
     } else {
         pageLabel_->clear();
     }

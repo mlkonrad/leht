@@ -20,6 +20,7 @@
 #include <QDockWidget>
 #include <QScrollBar>
 #include <QTreeWidget>
+#include "thumbnail_bar.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -185,6 +186,35 @@ int main(int argc, char** argv) {
     view->goToPage(0);
     pump(300);
     check(view->currentPage() == 0, "goToPage(0) returns to the first page");
+
+    // --- Thumbnails --------------------------------------------------------
+    // Reopen the 10-page text doc; the thumbnail bar should populate and load
+    // visible thumbnails from the worker.
+    window.openPath(QString::fromStdString(doc));
+    pump(2000);
+    auto* thumbs = window.findChild<ThumbnailBar*>();
+    check(thumbs != nullptr, "thumbnail bar exists");
+    if (thumbs != nullptr) {
+        check(thumbs->count() == 10, "thumbnail bar has one item per page");
+        // At least the first thumbnail should have loaded a non-placeholder icon
+        // (placeholders are pure white; a rendered page has ink).
+        const QIcon icon = thumbs->item(0)->icon();
+        const QImage img = icon.pixmap(ThumbnailBar::kThumbWidth,
+                                       ThumbnailBar::kThumbWidth * 4 / 3).toImage();
+        long ink = 0;
+        for (int y = 0; y < img.height(); y += 2)
+            for (int x = 0; x < img.width(); x += 2) {
+                const QRgb px = img.pixel(x, y);
+                if (qRed(px) < 200 && qGreen(px) < 200 && qBlue(px) < 200) ink++;
+            }
+        std::printf("      thumbnail 1 ink: %ld\n", ink);
+        check(ink > 20, "first thumbnail rendered a real page, not a placeholder");
+
+        // Clicking a thumbnail navigates.
+        thumbs->setCurrentRow(4);
+        pump(300);
+        check(view->currentPage() == 4, "clicking a thumbnail navigates");
+    }
 
     if (g_failures > 0) {
         std::printf("%d smoke check(s) failed\n", g_failures);

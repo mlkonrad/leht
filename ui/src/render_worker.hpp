@@ -64,6 +64,11 @@ public slots:
     /// `mode` is a leht::SelectMode cast to int. Emits selectionReady().
     void selectRegion(int page, QPointF aBase, QPointF bBase, int mode);
 
+    /// Renders a small thumbnail of `page`, scaled so its width is about
+    /// `targetWidth` px. Emits thumbnailReady(). Rendered outside the page
+    /// cache so it does not evict full-size pages.
+    void renderThumbnail(int page, int targetWidth);
+
 signals:
     void opened(int pageCount, QVector<QSize> baseSizes);
     void outlineReady(QVector<OutlineRow> rows);
@@ -72,6 +77,7 @@ signals:
     void pageMatches(int page, QVector<QRectF> boxes);
     void searchFinished(int totalMatches);
     void selectionReady(int page, QVector<QRectF> boxes, QString text);
+    void thumbnailReady(int page, QImage image);
 
 private:
     /// A text layer for `page`, built at zoom 1.0 and cached. Both search and
