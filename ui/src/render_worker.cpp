@@ -31,6 +31,16 @@ namespace {
 /// newest possible generation, so the worker never treats them as stale.
 constexpr quint64 kNoGeneration = std::numeric_limits<quint64>::max();
 
+/// How long the worker may take to produce each reply before it is killed and
+/// the file blamed. Generous: a legitimate open sizes every page, and 30 s
+/// covers documents far beyond any real one. LEHT_WORKER_TIMEOUT_MS overrides
+/// it (the tests use a short one).
+std::chrono::milliseconds requestTimeout() {
+    bool ok = false;
+    const int ms = qEnvironmentVariableIntValue("LEHT_WORKER_TIMEOUT_MS", &ok);
+    return std::chrono::milliseconds(ok && ms > 0 ? ms : 30'000);
+}
+
 /// The largest zoom the worker accepts; see ipc/src/protocol.cpp.
 constexpr double kMaxZoom = 64.0;
 
@@ -109,8 +119,8 @@ void addToQuarantine(const QString& path) {
 }
 
 const QString kCrashedMessage = QStringLiteral(
-    "Leht could not open this file safely: it crashed the document parser. "
-    "The file may be damaged or deliberately malformed.");
+    "Leht could not open this file safely: it crashed the document parser, or "
+    "stopped it responding. The file may be damaged or deliberately malformed.");
 
 const QString kTerminatedMessage = QStringLiteral(
     "The document worker was repeatedly terminated from outside Leht -- most "
@@ -201,8 +211,14 @@ std::optional<ipc::Frame> RenderWorker::receive() {
         return std::nullopt;
     }
     try {
-        return proc->channel().recv();
+        return proc->channel().recv(requestTimeout());
     } catch (const ipc::ProtocolError&) {
+        distrust();
+        return std::nullopt;
+    } catch (const ipc::Timeout&) {
+        // A parser stuck in a loop, or crawling through something built to be
+        // slow, is as much the file's doing as a crash -- and without this the
+        // document would simply never load.
         distrust();
         return std::nullopt;
     } catch (const std::exception&) {
@@ -211,8 +227,8 @@ std::optional<ipc::Frame> RenderWorker::receive() {
 }
 
 void RenderWorker::distrust() {
-    // Malformed output from the process that just parsed an untrusted file:
-    // assume it is compromised, never read from it again, and blame the file.
+    // Malformed output from the process that just parsed an untrusted file, or
+    // no answer at all: never read from it again, and blame the file.
     hostile_ = true;
     if (auto proc = proc_.load()) {
         proc->kill();

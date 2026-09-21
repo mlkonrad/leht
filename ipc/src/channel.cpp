@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "leht/ipc/channel.hpp"
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -144,9 +146,27 @@ void Channel::send(const Frame& frame, int pass_fd) {
 }
 
 bool Channel::read_exact(std::uint8_t* dst, std::size_t n, UniqueFd& got_fd,
-                         bool eof_ok) {
+                         bool eof_ok, Deadline deadline) {
     std::size_t done = 0;
     while (done < n) {
+        if (deadline) {
+            const auto left = std::chrono::ceil<std::chrono::milliseconds>(
+                *deadline - std::chrono::steady_clock::now());
+            pollfd pfd{sock_.get(), POLLIN, 0};
+            const int ready = left.count() <= 0
+                                  ? 0
+                                  : ::poll(&pfd, 1, static_cast<int>(std::min<long long>(
+                                                        left.count(), 1'000'000'000LL)));
+            if (ready < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw_errno("poll");
+            }
+            if (ready == 0) {
+                throw Timeout("peer did not answer in time");
+            }
+        }
         iovec iov{dst + done, n - done};
         msghdr msg{};
         msg.msg_iov = &iov;
@@ -190,10 +210,16 @@ bool Channel::read_exact(std::uint8_t* dst, std::size_t n, UniqueFd& got_fd,
     return true;
 }
 
-std::optional<Frame> Channel::recv() {
+std::optional<Frame> Channel::recv() { return recv_until(std::nullopt); }
+
+std::optional<Frame> Channel::recv(std::chrono::milliseconds timeout) {
+    return recv_until(std::chrono::steady_clock::now() + timeout);
+}
+
+std::optional<Frame> Channel::recv_until(Deadline deadline) {
     std::array<std::uint8_t, kHeaderBytes> hdr{};
     UniqueFd fd;
-    if (!read_exact(hdr.data(), hdr.size(), fd, /*eof_ok=*/true)) {
+    if (!read_exact(hdr.data(), hdr.size(), fd, /*eof_ok=*/true, deadline)) {
         return std::nullopt;
     }
 
@@ -213,7 +239,7 @@ std::optional<Frame> Channel::recv() {
     f.id = id;
     f.payload.resize(length);
     if (length > 0) {
-        read_exact(f.payload.data(), length, fd, /*eof_ok=*/false);
+        read_exact(f.payload.data(), length, fd, /*eof_ok=*/false, deadline);
     }
     // Only Open legitimately carries a descriptor.
     if (fd && f.type != MsgType::Open) {

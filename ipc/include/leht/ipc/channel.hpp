@@ -4,6 +4,7 @@
 #include "leht/ipc/protocol.hpp"
 #include "leht/ipc/wire.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -11,6 +12,12 @@
 #include <vector>
 
 namespace leht::ipc {
+
+/// Raised by Channel::recv when a whole frame did not arrive in time.
+class Timeout : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 /// Owns a file descriptor and closes it on destruction.
 class UniqueFd {
@@ -100,6 +107,11 @@ public:
     /// I/O failure.
     std::optional<Frame> recv();
 
+    /// As recv(), but throws Timeout unless the whole frame -- header and
+    /// payload -- arrives within `timeout`. A deadline on the frame rather
+    /// than on each read, so a peer trickling bytes cannot extend it.
+    std::optional<Frame> recv(std::chrono::milliseconds timeout);
+
     /// Shuts the socket down in both directions, waking a thread blocked in
     /// recv(). Safe to call from any thread.
     void shutdown() noexcept;
@@ -109,7 +121,11 @@ public:
 private:
     /// Reads exactly `n` bytes into `dst`, collecting any passed fd into
     /// `got_fd`. Returns false on EOF before the first byte when `eof_ok`.
-    bool read_exact(std::uint8_t* dst, std::size_t n, UniqueFd& got_fd, bool eof_ok);
+    using Deadline = std::optional<std::chrono::steady_clock::time_point>;
+
+    bool read_exact(std::uint8_t* dst, std::size_t n, UniqueFd& got_fd, bool eof_ok,
+                    Deadline deadline);
+    std::optional<Frame> recv_until(Deadline deadline);
 
     UniqueFd sock_;
     bool accept_fds_;

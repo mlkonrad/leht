@@ -135,7 +135,9 @@ private:
     bool openInWorker(bool silent);
 
     /// Receives one frame. Returns nullopt if the worker has gone -- EOF, I/O
-    /// failure, or a malformed frame, which is treated as a compromised worker.
+    /// failure, a malformed frame (treated as a compromised worker), or no
+    /// frame within the request timeout (the worker is killed and the file
+    /// blamed, as for a crash).
     std::optional<leht::ipc::Frame> receive();
 
     /// Sends a request; false if the worker has gone.

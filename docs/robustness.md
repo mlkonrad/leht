@@ -16,8 +16,9 @@ itself: see [Process isolation](#process-isolation).
 | `pdf_save_document` leaks ~874 bytes per call | upstream | **live** |
 | Stack overflow on deep indirect-reference chains | upstream | **live** |
 | Stack overflow loading a deeply nested outline | upstream | **live** — contained by M3 |
+| Quadratic page lookup on a broken page tree | upstream | **live** — contained by the request timeout |
 
-Three of the seven were ours. A robustness document that only catalogues other people's
+Three of the eight were ours. A robustness document that only catalogues other people's
 defects is marketing, so they are written up here at the same length as the upstream ones.
 
 ## Upstream: MuPDF aborts on five bytes — resolved
@@ -166,9 +167,22 @@ double-clicking this file killed the Leht viewer. Now it kills one `leht-worker`
 viewer reports that the file could not be opened safely, and the next file opens normally.
 It is the fixture the worker and viewer tests use to prove exactly that.
 
+## Upstream: quadratic page lookup on a broken page tree — live, contained
+
+Found by `fuzz_ops` as a timeout. One unparsable entry in a page tree's `/Kids` stops
+MuPDF building its page map. Every page lookup then walks the tree, and re-parses the
+broken object each time because failed parses are not cached. 16,000 pages take ~8–10 s
+to size, against 0.1 s without the bad entry, and the cost grows with the square of the
+page count. Generator and pure-C reproducer in
+[`../tests/crashes/README.md`](../tests/crashes/README.md); live in 1.28.2 and 1.28.4.
+
+It also exposed a gap in M3 as first built: nothing bounded how long the worker could
+take, so a stalled parser left a document that never loaded. The viewer now gives every
+reply a deadline and treats a miss like a crash — see below.
+
 ## Fuzzing coverage to date
 
-Against MuPDF 1.28.4, no defect has been found in Leht's own code by fuzzing.
+Against MuPDF 1.28.4, fuzzing has found no crash or memory error in Leht's own code.
 `fuzz_ipc` (M3) targets the viewer's decoder for worker output — raw bytes through
 `Channel::recv()` and every message decoder — since that is what a compromised worker
 controls:
@@ -180,6 +194,7 @@ controls:
 | `fuzz_open` | mutation driver | 64,000 | clean |
 | `fuzz_ops` | libFuzzer | 56,285 | clean |
 | `fuzz_ops` | mutation driver | 15,000+ | clean |
+| `fuzz_ops` | libFuzzer, MuPDF instrumented, ASan/UBSan | 14,302 (4 jobs x 30 min, 4,032 edges) | one timeout → quadratic page lookup (upstream); an encrypt-path leak under investigation |
 | `fuzz_ipc` | libFuzzer + ASan/UBSan | 6,751,008 (4 jobs x 15 min) | clean |
 | `fuzz_ipc` | mutation driver + ASan/UBSan | 200,000 | clean |
 
@@ -215,6 +230,10 @@ execution inside it. Isolation handles both:
 
 - **A crash** ends the worker. The viewer sees end-of-stream, never a half-written frame
   it acts on.
+- **A stall** — a parser loop, or input built to be slow — is bounded too: every reply
+  must arrive within 30 s (`LEHT_WORKER_TIMEOUT_MS` overrides it), the whole frame
+  inside that deadline so a worker trickling bytes cannot stretch it. A miss kills the
+  worker and counts against the file exactly as a crash does.
 - **Code execution** is trapped in a process that can do almost nothing (below). Its only
   channel out is the socket to the viewer, so the viewer treats that socket as hostile: the
   decoder in `ipc/` bounds every length, rejects element counts the payload cannot hold,
@@ -257,7 +276,7 @@ Debug and Release test runs.
 
 First the viewer decides whether the death is evidence against the file. A crash signal
 (`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGSYS` from the sandbox, ...), a non-zero exit (a
-sanitizer report), or a malformed frame it was killed for — **yes**. `SIGKILL`/`SIGTERM`
+sanitizer report), a malformed frame or a missed deadline it was killed for — **yes**. `SIGKILL`/`SIGTERM`
 from outside — the kernel OOM killer, a user's `kill` — **no**.
 
 | When | Blamed on the file | Killed from outside |
@@ -323,14 +342,16 @@ public `core/` header (the API surface *is* the wire format), and one independen
 - [x] ~~Verify `obj<<` upstream~~ — fixed in 1.28.4; no report needed
 - [x] ~~Install `libasan`/`libubsan`~~ — done; the first run found four defects of ours
 - [x] ~~Install `clang` for coverage-guided libFuzzer~~ — done; 644,039 executions, clean
-- [ ] **Report three live upstream bugs to Artifex** (bugs.ghostscript.com, MuPDF
+- [ ] **Report four live upstream bugs to Artifex** (bugs.ghostscript.com, MuPDF
       component): the `pdf_save_document` leak (pure-C reproducer + patch ready), the
-      indirect-reference-chain stack overflow (generator ready), and the outline-depth
-      stack overflow (pure-C reproducer + generator ready). None sent yet.
+      indirect-reference-chain stack overflow (generator ready), the outline-depth
+      stack overflow, and the quadratic page lookup (both: pure-C reproducer +
+      generator ready). None sent yet.
 - [ ] Install `llvm-symbolizer` (Fedora `llvm`) so LSan suppressions resolve under
       libFuzzer. Without it libFuzzer must run with `-detect_leaks=0`.
-- [ ] Give `fuzz_ops` far more time. At 133 executions per second it has had a fraction of
-      `fuzz_open`'s exercise, on the code that does more with attacker-shaped structure.
+- [ ] Give `fuzz_ops` far more time. The 2026-09-22 run (30 min, instrumented MuPDF) ran at
+      ~1 exec/s on the 500-page seed and still found a timeout; trim the seed corpus to
+      small files so it explores faster.
 - [x] ~~Decide when process isolation lands~~ — built in M3, straight after the viewer
 - [x] ~~Lazy page sizes~~ — `page_size` reads page bounds, not content; a 500-page open
       went from ~350 ms to ~20 ms

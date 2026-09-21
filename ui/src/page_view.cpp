@@ -460,8 +460,8 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
             painter.drawText(pageRect.adjusted(24, 24, -24, -24),
                              Qt::AlignCenter | Qt::TextWordWrap,
                              tr("This page could not be displayed safely.\n"
-                                "It crashed the document parser; the rest of the "
-                                "document is unaffected."));
+                                "It crashed or stalled the document parser; the rest "
+                                "of the document is unaffected."));
         } else if (it != rendered_.constEnd() && !it->image.isNull()) {
             // Scale a stale-zoom image to the current page rect; Qt does this
             // fast, and it is replaced the moment the sharp render lands.

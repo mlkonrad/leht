@@ -17,6 +17,7 @@
 #include <QImage>
 #include <QScrollBar>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QSet>
 #include <QStringList>
 
@@ -88,6 +89,43 @@ QString writeDeepOutline(const QString& path, int depth) {
         out += QByteArray::number(off).rightJustified(10, '0') + " 00000 n \n";
     }
     out += "trailer\n<< /Size " + QByteArray::number(offsets.size() + 1) +
+           " /Root 1 0 R >>\nstartxref\n" + QByteArray::number(xref) + "\n%%EOF\n";
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(out);
+    }
+    return path;
+}
+
+/// A PDF whose page tree lists an object that never parses. MuPDF re-parses it
+/// on every page lookup, so sizing all pages is quadratic: 16,000 pages take
+/// ~10 s to open where a clean file takes ~0.1 s. See tests/crashes/README.md.
+QString writeSlowPageTree(const QString& path, int pages) {
+    QByteArray out = "%PDF-1.7\n";
+    const int content = 4 + pages;
+    QVector<qsizetype> offsets(content + 1, 0);
+    auto add = [&](int num, const QByteArray& body) {
+        offsets[num] = out.size();
+        out += QByteArray::number(num) + " 0 obj\n" + body + "\nendobj\n";
+    };
+    add(1, "<< /Type /Catalog /Pages 2 0 R >>");
+    QByteArray kids = "3 0 R";
+    for (int i = 0; i < pages; ++i) {
+        kids += " " + QByteArray::number(4 + i) + " 0 R";
+    }
+    add(2, "<< /Type /Pages /Count " + QByteArray::number(pages) + " /Kids [" + kids + "] >>");
+    add(3, "[1 0 R 2 R]");  // fails to parse, every time
+    for (int i = 0; i < pages; ++i) {
+        add(4 + i, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents " +
+                       QByteArray::number(content) + " 0 R >>");
+    }
+    add(content, "<< /Length 0 >>\nstream\n\nendstream");
+    const qsizetype xref = out.size();
+    out += "xref\n0 " + QByteArray::number(content + 1) + "\n0000000000 65535 f \n";
+    for (int n = 1; n <= content; ++n) {
+        out += QByteArray::number(offsets[n]).rightJustified(10, '0') + " 00000 n \n";
+    }
+    out += "trailer\n<< /Size " + QByteArray::number(content + 1) +
            " /Root 1 0 R >>\nstartxref\n" + QByteArray::number(xref) + "\n%%EOF\n";
     QFile f(path);
     if (f.open(QIODevice::WriteOnly)) {
@@ -447,6 +485,25 @@ int main(int argc, char** argv) {
         pump(300);
         check(failures.size() == 2 && iso->workerPid() == 0,
               "reopening a quarantined file fails fast, without a worker");
+
+        // A file built to make the parser crawl: the worker misses its
+        // deadline, is killed, and the file is treated like a crasher.
+        {
+            qputenv("LEHT_WORKER_TIMEOUT_MS", "1000");
+            const QString slow = writeSlowPageTree(tmp.filePath(QStringLiteral("slow.pdf")), 16000);
+            QElapsedTimer clock;
+            clock.start();
+            openIn(slow);
+            while (failures.size() < 3 && clock.elapsed() < 8000) {
+                pump(100);
+            }
+            check(failures.size() == 3 && failures.last().contains(QStringLiteral("responding")),
+                  "a file that stalls the parser fails at the deadline");
+            check(clock.elapsed() < 5000, "the stalled open is abandoned promptly, not waited out");
+            check(iso->workerPid() == 0, "the stalled worker is killed");
+            qunsetenv("LEHT_WORKER_TIMEOUT_MS");
+            failures.removeLast();  // keep the counts below as they were
+        }
 
         // The kill cases below end with this document quarantined for the
         // session, so they use a private copy rather than the shared corpus file.

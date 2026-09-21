@@ -308,3 +308,42 @@ viewer survives a worker crash.
 Leht cannot cap it from `core/`: the recursion happens inside a single
 `fz_load_outline` call. Worth reporting to Artifex together with the other two.
 No artifact is committed; the generator stands in for it.
+
+## `mupdf_pagetree_quadratic.py` — quadratic page lookup on a broken page tree
+
+A page tree whose `/Kids` lists one object that never parses (`[1 0 R 2 R]`)
+alongside N ordinary pages makes every page lookup cost O(N). MuPDF cannot
+build its page map for the tree, so `pdf_lookup_page_obj` falls back to
+`pdf_lookup_page_loc`, walking the tree for each lookup. Because a failed
+parse is never cached, it re-parses the broken object on every walk. Anything
+that visits every page goes quadratic: a viewer sizing pages on open, page
+removal, merging.
+
+```sh
+python3 mupdf_pagetree_quadratic.py slow.pdf 16000        # ~1.9 MB
+gcc -O2 pure_mupdf_pagetree_repro.c -o repro /usr/lib64/libmupdf.so
+./repro slow.pdf
+```
+
+`pure_mupdf_pagetree_repro.c` is plain MuPDF: open, then `fz_load_page` +
+`fz_bound_page` for every page. `--clean` builds the same document without the
+broken entry:
+
+| pages | 1.28.2 | 1.28.4 | 1.28.4, `--clean` |
+|---|---|---|---|
+| 4,000 | 0.68 s | 0.58 s | — |
+| 8,000 | 2.68 s | 2.14 s | — |
+| 16,000 | 9.98 s | 8.21 s | 0.11 s |
+
+Found 2026-09-22 by `fuzz_ops` as a libFuzzer timeout. The fuzzed input was a
+mutated `text_500p.pdf` (156 KB) that took 2.4 s to remove one page and 5.0 s
+to merge with itself, against 0.14 s and 0.44 s for the original; `mutool pages`
+on it logged 1,250 failed attempts to load the same object. The generator is
+a distilled version of that mechanism, so the artifact is not committed.
+
+A denial of service, not memory corruption. In the viewer it is contained by
+the worker's request timeout (see "Process isolation" in
+[../../docs/robustness.md](../../docs/robustness.md)): a file that stalls the
+parser is abandoned and treated like one that crashes it. The CLI has no
+timeout; a slow `leht` command can be interrupted. Worth reporting to Artifex
+with the others.

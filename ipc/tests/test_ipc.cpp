@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -332,6 +333,44 @@ void test_unwanted_fds_are_rejected() {
     }
 }
 
+void test_recv_timeout() {
+    auto [a, b] = socket_pair();
+    Channel rx(std::move(a), false);
+    const int raw = b.get();
+
+    // Nothing arrives: Timeout, promptly.
+    const auto t0 = std::chrono::steady_clock::now();
+    bool timed_out = false;
+    try {
+        (void)rx.recv(std::chrono::milliseconds(50));
+    } catch (const Timeout&) {
+        timed_out = true;
+    }
+    CHECK(timed_out);
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));
+
+    // A whole frame in time is received normally.
+    Channel tx(std::move(b), false);
+    tx.send(3, SearchDone{4});
+    auto f = rx.recv(std::chrono::milliseconds(1000));
+    CHECK(f && decode_as<SearchDone>(*f).total == 4);
+
+    // Half a frame, then silence: the deadline covers the whole frame.
+    const auto full = make_frame(9, Failed{"stalled"});
+    Writer h;
+    h.u32(static_cast<std::uint32_t>(full.payload.size()));
+    h.u16(static_cast<std::uint16_t>(MsgType::Failed));
+    h.u64(9);
+    write_all(raw, h.buffer());
+    timed_out = false;
+    try {
+        (void)rx.recv(std::chrono::milliseconds(50));
+    } catch (const Timeout&) {
+        timed_out = true;
+    }
+    CHECK(timed_out);
+}
+
 }  // namespace
 
 int main() {
@@ -345,5 +384,6 @@ int main() {
     RUN(test_hostile_headers);
     RUN(test_fd_passing);
     RUN(test_unwanted_fds_are_rejected);
+    RUN(test_recv_timeout);
     return 0;
 }
