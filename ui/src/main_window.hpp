@@ -46,9 +46,11 @@ private slots:
     void onOutlineReady(const QVector<OutlineRow>& rows);
     void onOutlineClicked(QTreeWidgetItem* item, int column);
     void goToPageFromSpin();
+    void onPasswordRequired(bool retry);
 
 signals:
     void requestOpen(const QString& path);
+    void requestAuthenticate(const QString& password);
     void requestSearch(const QString& needle);
 
 private:

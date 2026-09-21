@@ -165,3 +165,11 @@ open("outlined.pdf", "wb").write(out)
 PY
     echo "  made  outlined.pdf (3 pages, 2-level outline)"
 fi
+
+# Encrypted fixture for the viewer's password-flow test. Built with the leht CLI
+# if one is present; the test skips when it is absent.
+LEHT_BIN="${LEHT_BIN:-$(command -v leht 2>/dev/null || echo ../../build/cli/leht)}"
+if [[ ! -f locked.pdf && -x "$LEHT_BIN" ]]; then
+    "$LEHT_BIN" encrypt text_10p.pdf --user-pw s3cret -o locked.pdf >/dev/null 2>&1 \
+        && echo "  made  locked.pdf (encrypted, password s3cret)"
+fi

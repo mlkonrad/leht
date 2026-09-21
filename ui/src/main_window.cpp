@@ -12,6 +12,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenuBar>
+#include <QInputDialog>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QDockWidget>
 #include <QHeaderView>
@@ -46,6 +48,10 @@ MainWindow::MainWindow() {
     connect(worker_, &RenderWorker::opened, this, &MainWindow::onOpened);
     connect(worker_, &RenderWorker::outlineReady, this,
             &MainWindow::onOutlineReady);
+    connect(worker_, &RenderWorker::passwordRequired, this,
+            &MainWindow::onPasswordRequired);
+    connect(this, &MainWindow::requestAuthenticate, worker_,
+            &RenderWorker::authenticate);
     connect(worker_, &RenderWorker::failed, this, &MainWindow::onFailed);
     connect(worker_, &RenderWorker::rendered, view_, &PageView::onRendered);
 
@@ -350,4 +356,23 @@ void MainWindow::goToPageFromSpin() {
         return;  // the change came from scrolling, not the user
     }
     view_->goToPage(pageSpin_->value() - 1);
+}
+
+void MainWindow::onPasswordRequired(bool retry) {
+    statusBar()->clearMessage();
+    bool ok = false;
+    const QString prompt =
+        retry ? tr("Wrong password. Try again for “%1”:").arg(currentTitle_)
+              : tr("“%1” is password-protected. Enter its password:")
+                    .arg(currentTitle_);
+    const QString password = QInputDialog::getText(
+        this, tr("Password required"), prompt, QLineEdit::Password, QString(), &ok);
+
+    if (!ok) {
+        // User cancelled: leave the viewer as it was.
+        statusBar()->showMessage(tr("Opening cancelled."), 3000);
+        return;
+    }
+    statusBar()->showMessage(tr("Unlocking…"));
+    emit requestAuthenticate(password);
 }

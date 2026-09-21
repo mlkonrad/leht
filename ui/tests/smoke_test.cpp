@@ -11,9 +11,12 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QEventLoop>
+#include <QFile>
 #include <QImage>
 #include <QScrollBar>
 #include <QTimer>
+
+#include <QThread>
 
 #include "render_worker.hpp"
 
@@ -247,6 +250,49 @@ int main(int argc, char** argv) {
     view->firstPage();
     pump(300);
     check(view->currentPage() == 0, "firstPage returns to the start");
+
+    // --- Password flow -----------------------------------------------------
+    // Test the worker's authentication logic on a STANDALONE worker+thread with
+    // no window attached, so the real modal password dialog never appears.
+    const std::string locked = std::string(LEHT_CORPUS_DIR) + "/locked.pdf";
+    if (!QFile::exists(QString::fromStdString(locked))) {
+        std::printf("      SKIP password flow: %s missing "
+                    "(run tests/corpus/generate.sh)\n", locked.c_str());
+    } else {
+        QThread thread;
+        auto* pw = new RenderWorker();
+        pw->moveToThread(&thread);
+        thread.start();
+
+        int prompts = 0;
+        bool retryFlag = false;
+        int openedPages = 0;
+        QObject::connect(pw, &RenderWorker::passwordRequired,
+                         [&](bool retry) { ++prompts; retryFlag = retry; });
+        QObject::connect(pw, &RenderWorker::opened,
+                         [&](int pages, QVector<QSize>) { openedPages = pages; });
+
+        QMetaObject::invokeMethod(pw, "open", Qt::QueuedConnection,
+                                  Q_ARG(QString, QString::fromStdString(locked)));
+        pump(1000);
+        check(prompts == 1, "encrypted document prompts for a password");
+        check(openedPages == 0, "encrypted document does not open unprompted");
+
+        QMetaObject::invokeMethod(pw, "authenticate", Qt::QueuedConnection,
+                                  Q_ARG(QString, QStringLiteral("wrong")));
+        pump(700);
+        check(prompts == 2 && retryFlag, "wrong password re-prompts with retry");
+        check(openedPages == 0, "wrong password does not open the document");
+
+        QMetaObject::invokeMethod(pw, "authenticate", Qt::QueuedConnection,
+                                  Q_ARG(QString, QStringLiteral("s3cret")));
+        pump(1000);
+        check(openedPages == 10, "correct password opens the document");
+
+        thread.quit();
+        thread.wait();
+        delete pw;
+    }
 
     if (g_failures > 0) {
         std::printf("%d smoke check(s) failed\n", g_failures);

@@ -51,42 +51,61 @@ void RenderWorker::open(const QString& path) {
             leht::Document::open(*ctx_, path.toStdString()));
 
         if (doc_->needs_password()) {
-            emit failed(QStringLiteral("This document is password-protected."));
-            doc_.reset();
+            // Keep the document open and wait for a password; do NOT reset it.
+            emit passwordRequired(false);
             return;
         }
 
-        renderer_ = std::make_unique<leht::Renderer>(*ctx_, *doc_);
-        cache_ = std::make_unique<leht::PageCache>();
-        textPages_.clear();
-
-        const int pages = doc_->page_count();
-        QVector<QSize> sizes;
-        sizes.reserve(pages);
-        for (int p = 0; p < pages; ++p) {
-            const leht::PageSize size = renderer_->page_size(p, 1.0F);
-            sizes.push_back(QSize(size.width, size.height));
-        }
-        emit opened(pages, sizes);
-
-        // Outline is optional; a document without one simply emits no rows.
-        QVector<OutlineRow> rows;
-        std::function<void(const std::vector<leht::OutlineItem>&, int)> flatten =
-            [&](const std::vector<leht::OutlineItem>& items, int depth) {
-                for (const leht::OutlineItem& item : items) {
-                    rows.push_back(OutlineRow{depth,
-                                              QString::fromStdString(item.title),
-                                              item.page, item.y});
-                    flatten(item.children, depth + 1);
-                }
-            };
-        flatten(doc_->outline(), 0);
-        emit outlineReady(rows);
+        finishOpen();
     } catch (const leht::Error& e) {
         emit failed(QString::fromUtf8(e.what()));
     } catch (const std::exception& e) {
         emit failed(QString::fromUtf8(e.what()));
     }
+}
+
+void RenderWorker::authenticate(const QString& password) {
+    if (doc_ == nullptr) {
+        return;
+    }
+    try {
+        if (doc_->authenticate(password.toStdString())) {
+            finishOpen();
+        } else {
+            emit passwordRequired(true);  // wrong password; ask again
+        }
+    } catch (const leht::Error& e) {
+        emit failed(QString::fromUtf8(e.what()));
+    }
+}
+
+void RenderWorker::finishOpen() {
+    renderer_ = std::make_unique<leht::Renderer>(*ctx_, *doc_);
+    cache_ = std::make_unique<leht::PageCache>();
+    textPages_.clear();
+
+    const int pages = doc_->page_count();
+    QVector<QSize> sizes;
+    sizes.reserve(pages);
+    for (int p = 0; p < pages; ++p) {
+        const leht::PageSize size = renderer_->page_size(p, 1.0F);
+        sizes.push_back(QSize(size.width, size.height));
+    }
+    emit opened(pages, sizes);
+
+    // Outline is optional; a document without one simply emits no rows.
+    QVector<OutlineRow> rows;
+    std::function<void(const std::vector<leht::OutlineItem>&, int)> flatten =
+        [&](const std::vector<leht::OutlineItem>& items, int depth) {
+            for (const leht::OutlineItem& item : items) {
+                rows.push_back(OutlineRow{depth,
+                                          QString::fromStdString(item.title),
+                                          item.page, item.y});
+                flatten(item.children, depth + 1);
+            }
+        };
+    flatten(doc_->outline(), 0);
+    emit outlineReady(rows);
 }
 
 void RenderWorker::render(int page, double zoom, int rotation,

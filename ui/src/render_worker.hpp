@@ -47,8 +47,15 @@ public:
     void setGeneration(quint64 generation) { generation_.storeRelease(generation); }
 
 public slots:
-    /// Opens a document (worker thread). Emits opened() or failed().
+    /// Opens a document (worker thread). Emits opened() on success, failed() on
+    /// a real error, or passwordRequired() if the file is encrypted -- in which
+    /// case the document is held open awaiting authenticate().
     void open(const QString& path);
+
+    /// Tries `password` on a document opened but awaiting one. Continues the
+    /// open on success (emits opened()); re-emits passwordRequired(retry=true)
+    /// on a wrong password.
+    void authenticate(const QString& password);
 
     /// Renders one page at `zoom` to RGB. Skipped if `generation` is behind the
     /// latest set via setGeneration(). Emits rendered() on success.
@@ -72,6 +79,7 @@ public slots:
 signals:
     void opened(int pageCount, QVector<QSize> baseSizes);
     void outlineReady(QVector<OutlineRow> rows);
+    void passwordRequired(bool retry);
     void failed(const QString& message);
     void rendered(int page, double zoom, int rotation, quint64 generation, QImage image);
     void pageMatches(int page, QVector<QRectF> boxes);
@@ -83,6 +91,10 @@ private:
     /// A text layer for `page`, built at zoom 1.0 and cached. Both search and
     /// selection use it; caching avoids re-extracting a page's text per query.
     leht::TextPage* textPage(int page);
+
+    /// Finishes opening an unlocked document: sets up the renderer and emits
+    /// opened() and outlineReady(). Shared by open() and authenticate().
+    void finishOpen();
 
     std::unique_ptr<leht::Context> ctx_;
     std::unique_ptr<leht::Document> doc_;
