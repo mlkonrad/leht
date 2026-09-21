@@ -130,8 +130,27 @@ private:
     template <typename Msg>
     bool sendRequest(const Msg& msg, int fd = -1);
 
-    /// The worker died while doing `phase` (on `page`, if a page request).
-    void workerLost(Phase phase, int page);
+    /// The worker has gone while doing `phase` (on `page`, for a page
+    /// request). Decides whether the document is to blame (see
+    /// lossWasTheDocument), acts on it, and returns true only when the worker
+    /// was killed from outside and a fresh one is ready: then, and only then,
+    /// the caller may retry the request once.
+    bool workerLost(Phase phase, int page);
+
+    /// Whether a lost worker's end is evidence against the document: a crash
+    /// signal, a non-zero exit, or garbage we killed it for -- yes; SIGKILL or
+    /// SIGTERM from outside (the OOM killer, a user) -- no. Reaps the process.
+    bool lossWasTheDocument(leht::ipc::WorkerProcess& proc);
+
+    /// Kills the worker for sending a malformed frame and marks the loss as
+    /// the document's fault.
+    void distrust();
+
+    /// Sends a request that has exactly one reply and returns it. Handles a
+    /// lost worker, retrying once if it was killed from outside; nullopt
+    /// means there is no reply and the loss has been dealt with.
+    template <typename Msg>
+    std::optional<leht::ipc::Frame> roundTrip(const Msg& msg, Phase phase, int page);
 
     /// Emits opened() and outlineReady() from the worker's replies.
     void publishOpened(const leht::ipc::Opened& result, const leht::ipc::Outline& outline);
@@ -151,7 +170,10 @@ private:
     std::optional<std::string> password_;  ///< kept to re-authenticate after a respawn
     QVector<QSize> baseSizes_;
     QSet<int> poisoned_;                   ///< pages that crashed a worker
-    int crashes_ = 0;                      ///< worker deaths in this document
+    int crashes_ = 0;                      ///< worker deaths blamed on this document
+    int externalKills_ = 0;                ///< worker deaths from outside (OOM, kill)
+    bool hostile_ = false;                 ///< the current worker was killed for sending garbage
+    static constexpr int kMaxExternalKills = 3;
 
     std::unique_ptr<leht::PageCache> cache_;
     QAtomicInteger<quint64> generation_ = 0;

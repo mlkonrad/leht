@@ -392,15 +392,29 @@ int main(int argc, char** argv) {
         pump(1500);
         check(openedPages == 10, "the viewer opens the next file normally after a crash");
 
-        // Kill the worker behind the viewer's back, as a crash on one page would.
+        // A worker killed from outside -- SIGKILL, as the OOM killer sends --
+        // is not the file's fault: no poisoned page, the request is retried
+        // in a fresh worker, and nothing is quarantined.
         const qint64 first = iso->workerPid();
         ::kill(static_cast<pid_t>(first), SIGKILL);
         pump(100);
+        renderIn(2);
+        pump(1500);
+        check(renderedPages.contains(2), "a page whose worker was killed from outside is retried");
+        check(iso->workerPid() != 0 && iso->workerPid() != first,
+              "a fresh worker replaces the killed one");
+        check(failures.size() == 2, "an outside kill is not reported as a bad file");
+
+        // A crash signal is evidence against the file. SIGSEGV stands in for
+        // a parser crash on this one page.
+        const qint64 second = iso->workerPid();
+        ::kill(static_cast<pid_t>(second), SIGSEGV);
+        pump(100);
         renderIn(3);
         pump(1500);
-        check(!renderedPages.contains(3), "the page being rendered at the crash stays blank");
-        check(iso->workerPid() != 0 && iso->workerPid() != first,
-              "a fresh worker replaces the dead one");
+        check(!renderedPages.contains(3), "the page being rendered at a crash stays blank");
+        check(iso->workerPid() != 0 && iso->workerPid() != second,
+              "a fresh worker replaces the crashed one");
         renderIn(4);
         pump(1500);
         check(renderedPages.contains(4), "other pages keep rendering after a respawn");
@@ -408,13 +422,70 @@ int main(int argc, char** argv) {
         pump(500);
         check(!renderedPages.contains(3), "the poisoned page is not retried");
 
-        // A second worker death in the same document gives up on it.
-        ::kill(static_cast<pid_t>(iso->workerPid()), SIGKILL);
+        // A crash during search: the matches so far stand, the search still
+        // finishes, and the document is restored rather than lost.
+        int searchesDone = 0;
+        QObject::connect(iso, &RenderWorker::searchFinished, [&](int) { ++searchesDone; });
+        ::kill(static_cast<pid_t>(iso->workerPid()), SIGSEGV);
         pump(100);
-        renderIn(5);
+        QMetaObject::invokeMethod(iso, "search", Qt::QueuedConnection,
+                                  Q_ARG(QString, QStringLiteral("quick")));
         pump(1500);
+        check(searchesDone == 1, "a search interrupted by a crash still finishes");
         check(failures.size() == 3 && iso->workerPid() == 0,
-              "a second crash in one document closes it");
+              "a second crash in one document closes it and says so");
+
+        // Reopening it now fails fast: two crashes quarantined it.
+        openIn(copy);
+        pump(300);
+        check(failures.size() == 4, "the twice-crashed document is quarantined");
+
+        // Encrypted documents: after a crash, the fresh worker is unlocked
+        // with the password the user already gave -- no second prompt.
+        const QString lockedCopy = tmp.filePath(QStringLiteral("locked-copy.pdf"));
+        QFile::copy(QString::fromStdString(std::string(LEHT_CORPUS_DIR) + "/locked.pdf"),
+                    lockedCopy);
+        int prompts = 0;
+        QObject::connect(iso, &RenderWorker::passwordRequired, [&](bool) { ++prompts; });
+        openedPages = 0;
+        openIn(lockedCopy);
+        pump(1000);
+        QMetaObject::invokeMethod(iso, "authenticate", Qt::QueuedConnection,
+                                  Q_ARG(QString, QStringLiteral("s3cret")));
+        pump(1000);
+        check(prompts == 1 && openedPages == 10, "the encrypted copy opens with its password");
+        renderedPages.clear();
+        ::kill(static_cast<pid_t>(iso->workerPid()), SIGSEGV);
+        pump(100);
+        renderIn(1);
+        pump(1500);
+        renderIn(6);
+        pump(1500);
+        check(!renderedPages.contains(1) && renderedPages.contains(6),
+              "after a crash, an encrypted document keeps rendering without re-prompting");
+        check(prompts == 1, "the user is not asked for the password again");
+
+        // A system that keeps killing the worker (memory pressure) eventually
+        // gets a plain explanation -- and the file is NOT quarantined for it.
+        const QString oomCopy = tmp.filePath(QStringLiteral("oom-copy.pdf"));
+        QFile::copy(QString::fromStdString(doc), oomCopy);
+        openedPages = 0;
+        openIn(oomCopy);
+        pump(1000);
+        const int failuresBefore = static_cast<int>(failures.size());
+        for (int k = 0; k < 4 && iso->workerPid() != 0; ++k) {
+            ::kill(static_cast<pid_t>(iso->workerPid()), SIGKILL);
+            pump(100);
+            renderIn(2 + k);  // distinct pages: a cache hit would never reach the worker
+            pump(800);
+        }
+        check(failures.size() == failuresBefore + 1 &&
+                  failures.last().contains(QStringLiteral("terminated")),
+              "repeated outside kills end with a 'terminated' message");
+        openedPages = 0;
+        openIn(oomCopy);
+        pump(1000);
+        check(openedPages == 10, "a file whose worker was killed from outside is not quarantined");
 
         thread.quit();
         thread.wait();

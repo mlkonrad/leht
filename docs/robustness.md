@@ -255,11 +255,18 @@ Debug and Release test runs.
 
 ### When a worker dies
 
-| When | What the viewer does |
-|---|---|
-| During open (or reading the outline) | `failed()`: "could not open this file safely"; the file is quarantined for the session |
-| During a page render or selection | that page stays blank and is never retried; a fresh worker reopens the document (re-authenticating if it was encrypted) and every other page keeps working |
-| A second time in the same document | the document is closed and quarantined |
+First the viewer decides whether the death is evidence against the file. A crash signal
+(`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGSYS` from the sandbox, ...), a non-zero exit (a
+sanitizer report), or a malformed frame it was killed for — **yes**. `SIGKILL`/`SIGTERM`
+from outside — the kernel OOM killer, a user's `kill` — **no**.
+
+| When | Blamed on the file | Killed from outside |
+|---|---|---|
+| During open (or reading the outline) | `failed()`: "could not open this file safely"; quarantined for the session | fresh worker, open retried |
+| During a page render or selection | that page stays blank, never retried; a fresh worker reopens the document (re-unlocking it with the password already given) and every other page keeps working | fresh worker, same request retried once |
+| During search | matches so far stand, search finishes; document restored | same |
+| A second time in one document | document closed and quarantined | — |
+| A fourth outside kill in one document | — | document closed with "repeatedly terminated from outside"; **not** quarantined |
 
 Quarantine is keyed on (device, inode, size, mtime), so reopening the same file fails
 fast without spawning anything, while an edited copy gets a fresh chance.

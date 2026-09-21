@@ -14,6 +14,8 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -110,6 +112,11 @@ const QString kCrashedMessage = QStringLiteral(
     "Leht could not open this file safely: it crashed the document parser. "
     "The file may be damaged or deliberately malformed.");
 
+const QString kTerminatedMessage = QStringLiteral(
+    "The document worker was repeatedly terminated from outside Leht -- most "
+    "likely the system ran out of memory. The file itself was not blamed and "
+    "can be opened again.");
+
 }  // namespace
 
 RenderWorker::RenderWorker() = default;
@@ -142,6 +149,8 @@ void RenderWorker::closeDocument() {
     baseSizes_.clear();
     poisoned_.clear();
     crashes_ = 0;
+    externalKills_ = 0;
+    hostile_ = false;
     if (cache_) {
         cache_->clear();
     }
@@ -183,24 +192,76 @@ std::optional<ipc::Frame> RenderWorker::receive() {
     try {
         return proc->channel().recv();
     } catch (const ipc::ProtocolError&) {
-        // Malformed output from the process that just parsed an untrusted file:
-        // assume it is compromised, and never read from it again.
-        proc->kill();
+        distrust();
         return std::nullopt;
     } catch (const std::exception&) {
         return std::nullopt;
     }
 }
 
-void RenderWorker::workerLost(Phase phase, int page) {
-    proc_.store(nullptr);
-    ++crashes_;
+void RenderWorker::distrust() {
+    // Malformed output from the process that just parsed an untrusted file:
+    // assume it is compromised, never read from it again, and blame the file.
+    hostile_ = true;
+    if (auto proc = proc_.load()) {
+        proc->kill();
+    }
+}
 
+bool RenderWorker::lossWasTheDocument(ipc::WorkerProcess& proc) {
+    if (std::exchange(hostile_, false)) {
+        return true;  // we killed it for sending garbage
+    }
+    auto status = proc.wait_for(std::chrono::milliseconds(500));
+    if (!status) {
+        proc.kill();  // alive but unusable: a broken worker is the file's doing
+        return true;
+    }
+    if (!status->signaled) {
+        // exit(0) means it saw the viewer hang up; any other code is a failure
+        // inside it (a sanitizer report, an uncaught error while parsing).
+        return status->code != 0;
+    }
+    switch (status->code) {
+    case SIGKILL:  // the kernel OOM killer, or a user's kill -9
+    case SIGTERM:
+    case SIGINT:
+    case SIGHUP:
+    case SIGQUIT:
+        return false;  // terminated from outside: not evidence against the file
+    default:
+        return true;   // SIGSEGV, SIGABRT, SIGBUS, SIGSYS (sandbox), ...
+    }
+}
+
+bool RenderWorker::workerLost(Phase phase, int page) {
+    std::shared_ptr<ipc::WorkerProcess> proc = proc_.exchange(nullptr);
+    const bool documentsFault = !proc || lossWasTheDocument(*proc);
+    proc.reset();  // reaps it
+
+    if (!documentsFault) {
+        // Killed from outside -- most likely the OOM killer. Nothing to hold
+        // against the file: no poisoned page, no quarantine. Restore and let
+        // the caller retry, a bounded number of times in case the system keeps
+        // killing it.
+        if (++externalKills_ > kMaxExternalKills) {
+            closeDocument();
+            emit failed(kTerminatedMessage);
+            return false;
+        }
+        if (!startWorker()) {
+            closeDocument();
+            return false;
+        }
+        return phase == Phase::Open || openInWorker(/*silent=*/true);
+    }
+
+    ++crashes_;
     if (phase == Phase::Open || crashes_ >= 2) {
         addToQuarantine(path_);
         closeDocument();
         emit failed(kCrashedMessage);
-        return;
+        return false;
     }
     if (phase == Phase::Page && page >= 0) {
         poisoned_.insert(page);  // this page stays blank from now on
@@ -209,6 +270,22 @@ void RenderWorker::workerLost(Phase phase, int page) {
     if (!startWorker() || !openInWorker(/*silent=*/true)) {
         closeDocument();
     }
+    return false;  // never retry what just crashed a worker
+}
+
+template <typename Msg>
+std::optional<ipc::Frame> RenderWorker::roundTrip(const Msg& msg, Phase phase, int page) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (sendRequest(msg)) {
+            if (auto reply = receive()) {
+                return reply;
+            }
+        }
+        if (!workerLost(phase, page)) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
 }
 
 void RenderWorker::publishOpened(const ipc::Opened& result, const ipc::Outline& outline) {
@@ -237,8 +314,10 @@ bool RenderWorker::openInWorker(bool silent) {
     ::close(fd);  // the worker has its own copy
 
     auto reply = sent ? receive() : std::nullopt;
+    bool triedPassword = false;
     if (reply && reply->type == ipc::MsgType::NeedsPassword && password_) {
         // A respawned worker: re-unlock with the password the user gave.
+        triedPassword = true;
         if (!sendRequest(ipc::Authenticate{*password_})) {
             reply.reset();
         } else {
@@ -246,14 +325,16 @@ bool RenderWorker::openInWorker(bool silent) {
         }
     }
     if (!reply) {
-        workerLost(Phase::Open, -1);
-        return false;
+        return workerLost(Phase::Open, -1) && openInWorker(silent);
     }
 
     try {
         switch (reply->type) {
         case ipc::MsgType::NeedsPassword:
-            emit passwordRequired(false);
+            if (triedPassword) {
+                password_.reset();  // it did not unlock after all
+            }
+            emit passwordRequired(triedPassword);
             return false;
         case ipc::MsgType::Failed:
             emit failed(QString::fromStdString(ipc::decode_as<ipc::Failed>(*reply).message));
@@ -262,8 +343,7 @@ bool RenderWorker::openInWorker(bool silent) {
             const ipc::Opened result = ipc::decode_as<ipc::Opened>(*reply);
             auto outlineFrame = receive();
             if (!outlineFrame) {
-                workerLost(Phase::Open, -1);
-                return false;
+                return workerLost(Phase::Open, -1) && openInWorker(silent);
             }
             const ipc::Outline outline = ipc::decode_as<ipc::Outline>(*outlineFrame);
             if (!silent) {
@@ -275,7 +355,8 @@ bool RenderWorker::openInWorker(bool silent) {
             throw ipc::ProtocolError("unexpected reply to Open");
         }
     } catch (const ipc::ProtocolError&) {
-        workerLost(Phase::Open, -1);
+        distrust();
+        (void)workerLost(Phase::Open, -1);
         return false;
     }
 }
@@ -304,13 +385,14 @@ void RenderWorker::authenticate(const QString& password) {
         return;
     }
     const std::string pw = password.toStdString();
-    if (!sendRequest(ipc::Authenticate{pw})) {
-        workerLost(Phase::Open, -1);
-        return;
-    }
-    auto reply = receive();
+    auto reply = sendRequest(ipc::Authenticate{pw}) ? receive() : std::nullopt;
     if (!reply) {
-        workerLost(Phase::Open, -1);
+        if (workerLost(Phase::Open, -1)) {
+            // Killed from outside mid-unlock: reopen in the fresh worker and
+            // try the same password there (openInWorker unlocks with it).
+            password_ = pw;
+            (void)openInWorker(/*silent=*/false);
+        }
         return;
     }
     try {
@@ -325,13 +407,17 @@ void RenderWorker::authenticate(const QString& password) {
         const ipc::Opened result = ipc::decode_as<ipc::Opened>(*reply);
         auto outlineFrame = receive();
         if (!outlineFrame) {
-            workerLost(Phase::Open, -1);
+            if (workerLost(Phase::Open, -1)) {
+                password_ = pw;
+                (void)openInWorker(/*silent=*/false);
+            }
             return;
         }
         password_ = pw;
         publishOpened(result, ipc::decode_as<ipc::Outline>(*outlineFrame));
     } catch (const ipc::ProtocolError&) {
-        workerLost(Phase::Open, -1);
+        distrust();
+        (void)workerLost(Phase::Open, -1);
     }
 }
 
@@ -355,13 +441,8 @@ void RenderWorker::render(int page, double zoom, int rotation, quint64 generatio
         return;
     }
 
-    if (!sendRequest(ipc::Render{page, z, rotation, generation})) {
-        workerLost(Phase::Page, page);
-        return;
-    }
-    auto reply = receive();
+    auto reply = roundTrip(ipc::Render{page, z, rotation, generation}, Phase::Page, page);
     if (!reply) {
-        workerLost(Phase::Page, page);
         return;
     }
     try {
@@ -379,10 +460,8 @@ void RenderWorker::render(int page, double zoom, int rotation, quint64 generatio
             emit rendered(page, zoom, rotation, generation, image);
         }
     } catch (const ipc::ProtocolError&) {
-        if (auto proc = proc_.load()) {
-            proc->kill();
-        }
-        workerLost(Phase::Page, page);
+        distrust();
+        (void)workerLost(Phase::Page, page);
     }
 }
 
@@ -395,7 +474,7 @@ void RenderWorker::search(const QString& needle) {
         return;
     }
     if (!sendRequest(ipc::Search{needle.toStdString()})) {
-        workerLost(Phase::Search, -1);
+        (void)workerLost(Phase::Search, -1);
         emit searchFinished(0);
         return;
     }
@@ -404,7 +483,9 @@ void RenderWorker::search(const QString& needle) {
     for (;;) {
         auto reply = receive();
         if (!reply) {
-            workerLost(Phase::Search, -1);
+            // The document is restored in a fresh worker either way; the
+            // matches found so far stand, and the user can search again.
+            (void)workerLost(Phase::Search, -1);
             break;
         }
         try {
@@ -417,10 +498,8 @@ void RenderWorker::search(const QString& needle) {
             total += static_cast<int>(boxes.size());
             emit pageMatches(m.page, boxes);
         } catch (const ipc::ProtocolError&) {
-            if (auto proc = proc_.load()) {
-                proc->kill();
-            }
-            workerLost(Phase::Search, -1);
+            distrust();
+            (void)workerLost(Phase::Search, -1);
             break;
         }
     }
@@ -439,13 +518,8 @@ void RenderWorker::selectRegion(int page, QPointF aBase, QPointF bBase, int mode
     s.bx = static_cast<float>(bBase.x());
     s.by = static_cast<float>(bBase.y());
     s.mode = static_cast<leht::SelectMode>(mode);
-    if (!sendRequest(s)) {
-        workerLost(Phase::Page, page);
-        return;
-    }
-    auto reply = receive();
+    auto reply = roundTrip(s, Phase::Page, page);
     if (!reply) {
-        workerLost(Phase::Page, page);
         return;
     }
     try {
@@ -455,10 +529,8 @@ void RenderWorker::selectRegion(int page, QPointF aBase, QPointF bBase, int mode
         const ipc::SelectionResult sel = ipc::decode_as<ipc::SelectionResult>(*reply);
         emit selectionReady(page, toRects(sel.quads), QString::fromStdString(sel.text));
     } catch (const ipc::ProtocolError&) {
-        if (auto proc = proc_.load()) {
-            proc->kill();
-        }
-        workerLost(Phase::Page, page);
+        distrust();
+        (void)workerLost(Phase::Page, page);
     }
 }
 
@@ -467,13 +539,9 @@ QImage RenderWorker::renderUncached(int page, double zoom) {
         zoom > kMaxZoom) {
         return {};
     }
-    if (!sendRequest(ipc::Render{page, static_cast<float>(zoom), 0, kNoGeneration})) {
-        workerLost(Phase::Page, page);
-        return {};
-    }
-    auto reply = receive();
+    auto reply = roundTrip(ipc::Render{page, static_cast<float>(zoom), 0, kNoGeneration},
+                           Phase::Page, page);
     if (!reply) {
-        workerLost(Phase::Page, page);
         return {};
     }
     try {
@@ -482,10 +550,8 @@ QImage RenderWorker::renderUncached(int page, double zoom) {
         }
         return toQImage(ipc::decode_as<ipc::Rendered>(*reply).bitmap);
     } catch (const ipc::ProtocolError&) {
-        if (auto proc = proc_.load()) {
-            proc->kill();
-        }
-        workerLost(Phase::Page, page);
+        distrust();
+        (void)workerLost(Phase::Page, page);
         return {};
     }
 }
