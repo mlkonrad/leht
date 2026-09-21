@@ -260,10 +260,11 @@ had a bug of this shape; it is a known class.
 Leht cannot fix this from `core/`: the recursion is inside MuPDF, and MuPDF
 exposes no depth limit to cap it. The only real defenses are (a) MuPDF growing an
 internal limit, and (b) **process isolation**, so a parser crash on a hostile
-file costs a worker process rather than the application. It is the strongest
-argument yet for the isolation direction in
-[../../docs/robustness.md](../../docs/robustness.md), because here there is no
-in-process fix available at all.
+file costs a worker process rather than the application. That is now built for
+the viewer (M3, see "Process isolation" in
+[../../docs/robustness.md](../../docs/robustness.md)). This overflow fires on
+save and `compress`, which still run in-process in the CLI, so there it costs
+one command rather than an open session.
 
 Worth reporting to Artifex alongside the save leak. No artifact is committed —
 the triggering file is multi-megabyte — so the generator stands in for it.

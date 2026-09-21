@@ -2,7 +2,8 @@
 
 A PDF is an untrusted input. People open files that arrived by email, from a scanner they
 don't control, or off a website. This file records what we know about how the engine
-behaves on hostile input, and what the plan is.
+behaves on hostile input, and what Leht does about it. Since M3 the viewer parses nothing
+itself: see [Process isolation](#process-isolation).
 
 ## What has been found
 
@@ -14,8 +15,9 @@ behaves on hostile input, and what the plan is.
 | Three leaked MuPDF object references in the ops layer | **ours** | fixed |
 | `pdf_save_document` leaks ~874 bytes per call | upstream | **live** |
 | Stack overflow on deep indirect-reference chains | upstream | **live** |
+| Stack overflow loading a deeply nested outline | upstream | **live** — contained by M3 |
 
-Three of the six were ours. A robustness document that only catalogues other people's
+Three of the seven were ours. A robustness document that only catalogues other people's
 defects is marketing, so they are written up here at the same length as the upstream ones.
 
 ## Upstream: MuPDF aborts on five bytes — resolved
@@ -142,12 +144,34 @@ Details and a generator: [`../tests/crashes/README.md`](../tests/crashes/README.
 Lower severity than the others — a crash / DoS, not corruption, and it needs a
 multi-megabyte crafted file. But it is the sharpest case for process isolation,
 because there is **no in-process fix**: the recursion is MuPDF's and MuPDF
-exposes no depth limit for Leht to cap. This is exactly the situation the
-isolation direction exists for.
+exposes no depth limit for Leht to cap. This is exactly the situation
+process isolation exists for.
+
+It only fires when something walks the whole object graph — save, `compress` — so it is
+reached from the CLI and the write-side ops, which by design still run in-process (see
+below). A crash there costs one `leht` command, not an open session.
+
+## Upstream: stack overflow loading a deep outline — live, contained
+
+Found 2026-09-21 while looking for a real viewer-path crash to test M3 against. An outline
+nested ~75,000 levels deep (each item's `/First` is the next; a ~8 MB file) overflows the
+stack inside a single `fz_load_outline` call: `pdf_test_outline` validates the tree by
+recursing once per level with no cap. Pure MuPDF crashes identically — reproducer and
+generator in [`../tests/crashes/README.md`](../tests/crashes/README.md) — in both 1.28.2 and
+1.28.4.
+
+Same class and severity as the reference chain, but it is **on every viewer's path**:
+loading the outline is what a viewer does straight after opening a file. Before M3,
+double-clicking this file killed the Leht viewer. Now it kills one `leht-worker`, the
+viewer reports that the file could not be opened safely, and the next file opens normally.
+It is the fixture the worker and viewer tests use to prove exactly that.
 
 ## Fuzzing coverage to date
 
-Against MuPDF 1.28.4, no defect has been found in Leht's own code by fuzzing:
+Against MuPDF 1.28.4, no defect has been found in Leht's own code by fuzzing.
+`fuzz_ipc` (M3) targets the viewer's decoder for worker output — raw bytes through
+`Channel::recv()` and every message decoder — since that is what a compromised worker
+controls:
 
 | Target | Driver | Executions | Result |
 |---|---|---|---|
@@ -156,6 +180,8 @@ Against MuPDF 1.28.4, no defect has been found in Leht's own code by fuzzing:
 | `fuzz_open` | mutation driver | 64,000 | clean |
 | `fuzz_ops` | libFuzzer | 56,285 | clean |
 | `fuzz_ops` | mutation driver | 15,000+ | clean |
+| `fuzz_ipc` | libFuzzer + ASan/UBSan | 6,751,008 (4 jobs x 15 min) | clean |
+| `fuzz_ipc` | mutation driver + ASan/UBSan | 200,000 | clean |
 
 "Nothing found yet", not "nothing there". Two caveats matter:
 
@@ -169,22 +195,104 @@ Against MuPDF 1.28.4, no defect has been found in Leht's own code by fuzzing:
   Structural pathologies — deep chains, huge declared dimensions — are hard for a byte
   mutator to stumble onto, which is why targeted probing still earns its place.
 
-## Direction: process isolation
+## Process isolation
 
-Untrusted input eventually wants to be parsed in a separate process, so a parser crash
-costs a subprocess rather than the whole application — the model Chrome uses for pdfium.
-That is the right long-term answer and it is not yet built.
+**Built in M3.** The viewer never parses a document. Each open spawns a fresh
+`leht-worker` process, passes it the already-open file descriptor, and receives only plain
+values back. A crash inside MuPDF costs that process; the viewer survives it.
 
-`core/` is already shaped for it, by accident of two earlier decisions:
+```
+leht-viewer (trusted)                    leht-worker (sandboxed, one per document)
+  opens the file, passes the fd  ─────►   Document::open_fd, then MuPDF
+  page cache, UI, clipboard      ◄─────   page sizes, outline rows, RGB bitmaps,
+  validates every frame                   text quads, selection text -- nothing else
+```
 
-- No MuPDF type crosses the public API — only forward-declared opaque pointers — so the
-  boundary a subprocess would sit on already exists.
-- Batch work already uses one independent `leht::Context` per worker rather than shared
-  cloned contexts (see [threading.md](threading.md)), so there is no shared parser state to
-  untangle.
+### Threat model
 
-Preserve both properties. They are what keeps isolation an incremental change rather than a
-rewrite.
+A hostile PDF may crash MuPDF (as the two live overflows above do) or, worse, achieve code
+execution inside it. Isolation handles both:
+
+- **A crash** ends the worker. The viewer sees end-of-stream, never a half-written frame
+  it acts on.
+- **Code execution** is trapped in a process that can do almost nothing (below). Its only
+  channel out is the socket to the viewer, so the viewer treats that socket as hostile: the
+  decoder in `ipc/` bounds every length, rejects element counts the payload cannot hold,
+  requires finite floats and sane pages, rotations and zooms, and checks that a bitmap's
+  stride × height accounts for exactly the bytes it carries. A malformed frame is taken as
+  proof the worker is compromised: it is killed and never read from again. The decoder has
+  its own fuzz target, `fuzz_ipc`.
+- **Cross-document leakage** is prevented by giving every document a fresh worker: nothing
+  one file does to a worker can reach the next file opened.
+
+### The sandbox
+
+Applied by the worker after MuPDF initialises and before the first untrusted byte arrives
+(`worker/src/sandbox.cpp`):
+
+1. `PR_SET_NO_NEW_PRIVS`.
+2. rlimits: no core dumps; 16 descriptors; 4 GB of address space, which also turns an
+   allocation bomb into `bad_alloc` and an ordinary "out of memory" reply.
+3. New user, network and IPC namespaces — best effort, since unprivileged user namespaces
+   can be disabled by policy. The tests report whether the network namespace took.
+4. A seccomp-bpf allowlist, **killing the process** on anything else: I/O on descriptors
+   already held; memory, never executable; threads via `clone` with `CLONE_THREAD` only
+   (`clone3` gets `ENOSYS` so glibc falls back to the filterable call); futexes; the signal
+   calls `abort()` needs; time and entropy. No `open`, `socket`, `exec`, `fork`, or
+   executable mapping. `fstatat`/`statx` are allowed only in their `AT_EMPTY_PATH` form, so
+   no path can even be probed.
+
+MuPDF here compiles its fonts in and links no fontconfig, so text in non-embedded fonts —
+CJK included — renders with no filesystem access; that was checked under the sandbox.
+
+Each forbidden action has a CTest (`worker_sandbox_denies_*`) requiring death by `SIGSYS`
+specifically. To extend the list after a MuPDF upgrade, run with
+`LEHT_WORKER_SECCOMP_DEBUG=1`: refusals then print the syscall number instead of killing
+silently. `--no-sandbox` / `LEHT_WORKER_NO_SANDBOX=1` exist for debugging. **Sanitizer
+builds run the worker unsandboxed** — LSan's ptrace stop-the-world and ASan's shadow
+reservation are incompatible with the policy — so the sandbox is exercised by the ordinary
+Debug and Release test runs.
+
+### When a worker dies
+
+| When | What the viewer does |
+|---|---|
+| During open (or reading the outline) | `failed()`: "could not open this file safely"; the file is quarantined for the session |
+| During a page render or selection | that page stays blank and is never retried; a fresh worker reopens the document (re-authenticating if it was encrypted) and every other page keeps working |
+| A second time in the same document | the document is closed and quarantined |
+
+Quarantine is keyed on (device, inode, size, mtime), so reopening the same file fails
+fast without spawning anything, while an edited copy gets a fresh chance.
+
+### What it costs
+
+`bench/worker_latency.cpp`, Release, i7-13700H, median of 7:
+
+| | in-process | worker | overhead |
+|---|---|---|---|
+| open + first page, `text_10p` | 10.8 ms | 24.3 ms | +13.5 ms |
+| open + first page, `text_500p` | 193.0 ms | 207.3 ms | +14.3 ms |
+| uncached page turn (3.1 MB bitmap) | 1.2–1.9 ms | 4.4–4.7 ms | ~+3 ms |
+| cached page turn | — | — | none: the cache lives in the viewer |
+
+The open overhead is almost all process start (~15 ms for spawn + handshake); the
+per-page overhead is copying the bitmap across. Two tempting fixes were measured and
+dropped as noise: a pre-spawned spare worker (with a built-in warm-up page), and larger
+socket buffers. Shared-memory bitmap transport is the next lever if a target is ever missed.
+The 500-page cold open was already at 193 ms in-process because the viewer computes every
+page size up front — lazy sizes would win back far more than isolation costs.
+
+### What is deliberately not isolated
+
+- **The CLI and write-side ops** (`merge`, `compress`, `encrypt`, ...) run in-process with
+  one independent `Context` each, as before. A crash costs one command, and the batch
+  model already confines it.
+- **Windows and macOS** equivalents (job objects and restricted tokens; App Sandbox) are
+  scoped with those platforms.
+
+Both properties that made this incremental still matter, so keep them: no MuPDF type in a
+public `core/` header (the API surface *is* the wire format), and one independent
+`leht::Context` per thread or process (see [threading.md](threading.md)).
 
 ## Standing rules
 
@@ -203,12 +311,14 @@ rewrite.
 - [x] ~~Verify `obj<<` upstream~~ — fixed in 1.28.4; no report needed
 - [x] ~~Install `libasan`/`libubsan`~~ — done; the first run found four defects of ours
 - [x] ~~Install `clang` for coverage-guided libFuzzer~~ — done; 644,039 executions, clean
-- [ ] **Report two live upstream bugs to Artifex** (bugs.ghostscript.com, MuPDF
-      component): the `pdf_save_document` leak (pure-C reproducer + patch ready) and the
-      indirect-reference-chain stack overflow (generator ready). Neither sent yet.
+- [ ] **Report three live upstream bugs to Artifex** (bugs.ghostscript.com, MuPDF
+      component): the `pdf_save_document` leak (pure-C reproducer + patch ready), the
+      indirect-reference-chain stack overflow (generator ready), and the outline-depth
+      stack overflow (pure-C reproducer + generator ready). None sent yet.
 - [ ] Install `llvm-symbolizer` (Fedora `llvm`) so LSan suppressions resolve under
       libFuzzer. Without it libFuzzer must run with `-detect_leaks=0`.
 - [ ] Give `fuzz_ops` far more time. At 133 executions per second it has had a fraction of
       `fuzz_open`'s exercise, on the code that does more with attacker-shaped structure.
-- [ ] Decide when process isolation lands — M2 (viewer opens arbitrary files) is the
-      natural forcing point
+- [x] ~~Decide when process isolation lands~~ — built in M3, straight after the viewer
+- [ ] Lazy page sizes in the viewer: a 500-page cold open spends ~190 ms sizing every page
+      before the first one is shown

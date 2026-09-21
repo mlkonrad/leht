@@ -16,6 +16,7 @@ endif()
 
 option(LEHT_BUILD_CLI    "Build the leht command-line tool"  ON)
 option(LEHT_BUILD_UI     "Build the Qt6 desktop application" OFF)
+option(LEHT_BUILD_WORKER "Build leht-worker, the sandboxed parser process (needs libseccomp)" ON)
 option(LEHT_BUILD_TESTS  "Build the test suite"              ON)
 option(LEHT_BUILD_BENCH  "Build the benchmark harness"       ON)
 option(LEHT_SANITIZE     "Enable AddressSanitizer + UBSan"   OFF)
@@ -41,7 +42,12 @@ add_subdirectory(core)
 # The viewer <-> leht-worker wire format (M3). Always built: it is small,
 # has no dependency beyond core/, and its tests guard the process boundary.
 add_subdirectory(ipc)
-add_subdirectory(worker)
+if(LEHT_BUILD_WORKER)
+    add_subdirectory(worker)
+elseif(LEHT_BUILD_UI)
+    message(FATAL_ERROR "LEHT_BUILD_UI requires LEHT_BUILD_WORKER: the viewer parses "
+                        "every document in leht-worker and has no in-process fallback.")
+endif()
 
 if(LEHT_BUILD_CLI)
     add_subdirectory(cli)
@@ -61,5 +67,5 @@ endif()
 
 message(STATUS "")
 message(STATUS "leht ${PROJECT_VERSION}  (${CMAKE_BUILD_TYPE})")
-message(STATUS "  cli=${LEHT_BUILD_CLI}  ui=${LEHT_BUILD_UI}  tests=${LEHT_BUILD_TESTS}  bench=${LEHT_BUILD_BENCH}  fuzz=${LEHT_BUILD_FUZZ}  sanitize=${LEHT_SANITIZE}")
+message(STATUS "  cli=${LEHT_BUILD_CLI}  ui=${LEHT_BUILD_UI}  worker=${LEHT_BUILD_WORKER}  tests=${LEHT_BUILD_TESTS}  bench=${LEHT_BUILD_BENCH}  fuzz=${LEHT_BUILD_FUZZ}  sanitize=${LEHT_SANITIZE}")
 message(STATUS "")

@@ -7,9 +7,10 @@ toolbox in one: view, merge, split, compress, annotate, redact, fill forms and s
 locally, with no account and no upload. It looks correct on GNOME, KDE, XFCE and
 everything else, because it favours no desktop.
 
-> **Status: pre-alpha, Milestone 1.** The engine and the `leht` command-line tool work.
-> The Qt6 desktop application (`ui/`) has not been started — it is Milestone 2, and
-> `LEHT_BUILD_UI` is `OFF` by default. Expect the CLI surface to shift before 1.0.
+> **Status: pre-alpha.** The engine, the `leht` command-line tool and a Qt6 viewer work.
+> The viewer parses every document in a sandboxed worker process, so a malicious PDF costs
+> a respawn, not the application. `LEHT_BUILD_UI` is still `OFF` by default. Expect the CLI
+> surface to shift before 1.0.
 
 ## Why
 
@@ -75,13 +76,19 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
 
 ## Scope
 
-**Milestone 1 (current) — core + CLI.** Done: context, document model, renderer, page
-cache, and the ops layer behind the commands above. Remaining: polish and the fuzz target.
+**Done**
+- **M1 — core + CLI:** context, document model, renderer, page cache, and the ops layer
+  behind the commands above; fuzz targets and sanitizer runs.
+- **M2 — Qt6 viewer:** scroll, zoom, rotate, search, text selection, outline, thumbnails,
+  encrypted documents, printing.
+- **M3 — process isolation:** the viewer never parses a PDF. A fresh `leht-worker` per
+  document does, under seccomp-bpf, rlimits and namespaces, and a crash in it is contained
+  and reported. Design, threat model and measured cost:
+  [docs/robustness.md](docs/robustness.md#process-isolation).
 
-**Later** — M2 the Qt6 viewer (scroll, zoom, search, text selection, outline, thumbnails);
-M3 editing (annotations, form filling, true redaction where content is removed rather than
-covered, watermarks, crop); M4 signatures (visible stamp, plus cryptographic PAdES signing
-and a verification panel); M5 packaging as Flatpak, RPM and DEB.
+**Next** — M4 editing (annotations, form filling, true redaction where content is removed
+rather than covered, watermarks, crop); M5 signatures (visible stamp, plus cryptographic
+PAdES signing and a verification panel); M6 packaging as Flatpak, RPM and DEB.
 
 **Explicitly out of scope for v1: in-place text editing.** It requires font matching
 against subsetted embedded fonts plus line reflow, works only on simple documents, and
@@ -96,7 +103,9 @@ Windows and macOS are not v1 targets. Qt6 keeps that door open at no extra cost 
 |---|---|
 | `core/` | The engine: context, document, renderer, page cache, ops. **Never links Qt.** |
 | `cli/` | `leht`, the headless command-line tool over the full core surface. |
-| `ui/` | The Qt6 Widgets desktop application (M2). Off by default at build time. |
+| `ui/` | The Qt6 Widgets viewer. Parses nothing itself. Off by default at build time. |
+| `worker/` | `leht-worker`: the sandboxed process that parses documents for the viewer. |
+| `ipc/` | The viewer ⇄ worker wire format. Decodes as if the worker were hostile. |
 | `bench/` | Benchmark harness — timings against a real-world corpus. |
 | `tests/corpus/` | Generated test PDFs. Unit tests live in `core/tests/`. |
 
@@ -111,7 +120,8 @@ measured constraint, not a style choice. See [docs/threading.md](docs/threading.
 
 ## Building
 
-Requires CMake 3.28+, Ninja, a C++20 compiler and MuPDF. Qt6 only for the GUI, later.
+Requires CMake 3.28+, Ninja, a C++20 compiler, MuPDF and libseccomp (for `leht-worker`).
+Qt6 only for the viewer.
 
 **MuPDF 1.28.4 or newer is strongly recommended.** Older versions — including the 1.28.2
 that Fedora 44 ships — abort the process on some malformed files. Leht still builds and
@@ -120,10 +130,12 @@ works against them, and the build warns; don't open untrusted PDFs on one. See
 
 ```sh
 # Fedora
-sudo dnf install gcc-c++ cmake ninja-build mupdf-devel
+sudo dnf install gcc-c++ cmake ninja-build mupdf-devel libseccomp-devel
+sudo dnf install qt6-qtbase-devel            # only for the viewer
 
 # Debian / Ubuntu
-sudo apt install g++ cmake ninja-build libmupdf-dev
+sudo apt install g++ cmake ninja-build libmupdf-dev libseccomp-dev
+sudo apt install qt6-base-dev                # only for the viewer
 ```
 
 ```sh
@@ -140,7 +152,8 @@ Build options — all default as shown:
 | Option | Default | Effect |
 |---|---|---|
 | `LEHT_BUILD_CLI` | `ON` | Build the `leht` command-line tool |
-| `LEHT_BUILD_UI` | `OFF` | Build the Qt6 desktop application (M2, not yet started) |
+| `LEHT_BUILD_UI` | `OFF` | Build the Qt6 viewer (requires `LEHT_BUILD_WORKER`) |
+| `LEHT_BUILD_WORKER` | `ON` | Build `leht-worker`, the sandboxed parser process (needs libseccomp) |
 | `LEHT_BUILD_TESTS` | `ON` | Build the test suite |
 | `LEHT_BUILD_BENCH` | `ON` | Build the benchmark harness |
 | `LEHT_SANITIZE` | `OFF` | AddressSanitizer + UBSan |
