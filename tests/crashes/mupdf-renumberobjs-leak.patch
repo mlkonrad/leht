@@ -1,0 +1,35 @@
+--- a/source/pdf/pdf-write.c
++++ b/source/pdf/pdf-write.c
+@@ -526,7 +526,11 @@
+ 		pdf_obj *trailer = pdf_trailer(ctx, doc);
+ 		nval = renumberobj(ctx, doc, opts, trailer);
+ 		if (nval != trailer)
++		{
++			/* pdf_set_trailer keeps its own reference. */
+ 			pdf_set_trailer(ctx, doc, nval);
++			pdf_drop_obj(ctx, nval);
++		}
+ 		nval = NULL;
+ 		for (num = 0; num < xref_len; num++)
+ 		{
+@@ -546,14 +550,20 @@
+ 					nval = PDF_NULL;
+ 				else
+ 					nval = pdf_new_indirect(ctx, doc, opts->renumber_map[o], 0);
++				/* pdf_update_object keeps its own reference. */
+ 				pdf_update_object(ctx, doc, num, nval);
++				pdf_drop_obj(ctx, nval);
+ 				nval = NULL;
+ 			}
+ 			else
+ 			{
+ 				nval = renumberobj(ctx, doc, opts, obj);
+ 				if (nval != obj)
++				{
++					/* pdf_update_object keeps its own reference. */
+ 					pdf_update_object(ctx, doc, num, nval);
++					pdf_drop_obj(ctx, nval);
++				}
+ 				nval = NULL;
+ 			}
+ 		}

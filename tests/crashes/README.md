@@ -123,6 +123,65 @@ and it is present in **both** MuPDF 1.28.2 and 1.28.4, so it is long-standing
 rather than a recent regression. Unlike the `obj<<` crash above, **this one is
 still live in current upstream and is worth reporting to Artifex.**
 
+### Root cause
+
+In `renumberobjs()` (`source/pdf/pdf-write.c`), `renumberobj()` returns either the
+object it was given (borrowed) or a modified copy from `pdf_copy_dict` /
+`pdf_copy_array` (owned). When it returns a copy, the caller hands it on:
+
+```c
+nval = renumberobj(ctx, doc, opts, obj);
+if (nval != obj)
+    pdf_update_object(ctx, doc, num, nval);
+nval = NULL;
+```
+
+`nval = NULL` is there to stop the function's `fz_always { pdf_drop_obj(nval) }`
+from dropping it, which reads as though the hand-off transfers ownership. It does
+not: both `pdf_update_object` and `pdf_set_trailer` take **their own** reference
+with `pdf_keep_obj`. So the caller's reference to the copy is discarded without
+ever being dropped. The same pattern appears three times — the trailer, the
+general object case, and the indirect-reference case.
+
+`nval` cannot simply stop being nulled, because when `renumberobj` returns its
+input unchanged, `nval` is borrowed and dropping it would over-release.
+
+This is exactly the bug class Leht had in its own code — `pdf_dict_put` with a
+freshly created `pdf_new_int` — so it is an easy mistake to make against this API.
+
+### Patch
+
+[`mupdf-renumberobjs-leak.patch`](mupdf-renumberobjs-leak.patch), ten lines against
+1.28.4: drop the reference after each hand-off, and only when it is owned. It
+applies cleanly to the pristine 1.28.4 tarball (`patch -p1`).
+
+Validated three ways against an ASan build of patched 1.28.4:
+
+| check | unpatched | patched |
+|---|---|---|
+| reproducer, `do_garbage` 2 | 642 bytes leaked | clean |
+| reproducer, `do_garbage` 3 | 874 bytes leaked | clean |
+| 50 consecutive saves | 43,700 bytes leaked | clean |
+
+And the stronger test: Leht's entire sanitized suite — 76 cases across 9
+executables, heavy on merge, compress and encrypt, all of which save with
+`do_garbage = 3` — run against the patched library **with `tests/lsan.supp`
+disabled**. Zero leaks, zero ASan errors, zero UBSan errors. An over-release
+would have shown up there as a use-after-free, and did not.
+
+As a control, the same configuration against unpatched 1.28.4 leaks in
+`test_compress` (874 bytes) and `test_encrypt` (14,166 bytes), so the harness
+does detect this leak; "clean" is a real result, not a blind spot.
+
+### Status
+
+- Root cause identified and patch validated 2026-09-21.
+- **Not yet reported.** MuPDF's README says to report on
+  <https://bugs.ghostscript.com/> with *MuPDF* as the component and the relevant
+  file attached.
+- When upstream ships a fix, delete the `renumberobj` entries from
+  `tests/lsan.supp` and re-run the sanitized suite.
+
 ### Why Leht keeps `do_garbage = 3` anyway
 
 De-duplication is worth far more than 874 bytes. Merging four copies of one file
