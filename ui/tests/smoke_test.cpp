@@ -12,6 +12,8 @@
 #include <QClipboard>
 #include <QEventLoop>
 #include <QFile>
+#include <QPrinter>
+#include <QTemporaryDir>
 #include <QImage>
 #include <QScrollBar>
 #include <QTimer>
@@ -19,6 +21,10 @@
 #include <QThread>
 
 #include "render_worker.hpp"
+
+#include "leht/context.hpp"
+#include "leht/document.hpp"
+#include "leht/error.hpp"
 
 #include <QDockWidget>
 #include <QScrollBar>
@@ -292,6 +298,35 @@ int main(int argc, char** argv) {
         thread.quit();
         thread.wait();
         delete pw;
+    }
+
+    // --- Print -------------------------------------------------------------
+    // Print a page range to a PDF and check the output is a valid document with
+    // the right number of pages. Exercises the whole print path headlessly.
+    window.openPath(QString::fromStdString(doc));  // the 10-page text doc
+    pump(1500);
+    {
+        QTemporaryDir tmp;
+        const QString out = tmp.filePath(QStringLiteral("printed.pdf"));
+        QPrinter printer(QPrinter::HighResolution);
+        printer.setOutputFormat(QPrinter::PdfFormat);
+        printer.setOutputFileName(out);
+
+        const bool ok = window.printDocument(printer, 2, 5);  // pages 2..5
+        check(ok, "printDocument reports success");
+        check(QFile::exists(out) && QFile(out).size() > 0,
+              "print produced a non-empty PDF");
+
+        // Reopen the printed PDF through core and count its pages.
+        try {
+            leht::Context ctx;
+            leht::Document printed = leht::Document::open(ctx, out.toStdString());
+            std::printf("      printed PDF has %d pages\n", printed.page_count());
+            check(printed.page_count() == 4, "printed the requested 4-page range");
+        } catch (const leht::Error& e) {
+            check(false, "printed PDF opens cleanly");
+            std::printf("      open error: %s\n", e.what());
+        }
     }
 
     if (g_failures > 0) {

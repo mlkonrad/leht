@@ -76,6 +76,12 @@ public slots:
     /// cache so it does not evict full-size pages.
     void renderThumbnail(int page, int targetWidth);
 
+    /// Renders `page` at `zoom` and RETURNS the image, for callers that need it
+    /// synchronously (printing). Invoked from the GUI thread with a blocking
+    /// queued connection; returns a null image on failure. Does not touch the
+    /// page cache or the generation.
+    Q_INVOKABLE QImage renderAt(int page, double zoom);
+
 signals:
     void opened(int pageCount, QVector<QSize> baseSizes);
     void outlineReady(QVector<OutlineRow> rows);

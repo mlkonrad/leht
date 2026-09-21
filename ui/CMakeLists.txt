@@ -1,4 +1,4 @@
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport)
 
 qt_standard_project_setup()
 
@@ -13,7 +13,7 @@ qt_add_library(leht_viewer_lib STATIC
 target_include_directories(leht_viewer_lib PUBLIC src)
 # leht::warnings is deliberately not applied: Qt's moc output and headers do not
 # pass our -Werror pedantic set, and they are not ours to fix. core/ stays strict.
-target_link_libraries(leht_viewer_lib PUBLIC leht::core Qt6::Widgets)
+target_link_libraries(leht_viewer_lib PUBLIC leht::core Qt6::Widgets Qt6::PrintSupport)
 
 qt_add_executable(leht_viewer src/main.cpp)
 set_target_properties(leht_viewer PROPERTIES OUTPUT_NAME leht-viewer)

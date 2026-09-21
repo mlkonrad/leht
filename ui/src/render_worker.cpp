@@ -234,3 +234,17 @@ void RenderWorker::renderThumbnail(int page, int targetWidth) {
         // A bad page simply gets no thumbnail.
     }
 }
+
+QImage RenderWorker::renderAt(int page, double zoom) {
+    if (renderer_ == nullptr || page < 0) {
+        return {};
+    }
+    try {
+        if (auto bmp = renderer_->render(page, static_cast<float>(zoom))) {
+            return toQImage(*bmp);
+        }
+    } catch (const leht::Error&) {
+        // Null image; the print loop leaves that page blank rather than aborting.
+    }
+    return {};
+}

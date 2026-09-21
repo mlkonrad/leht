@@ -4,6 +4,8 @@
 #include "page_view.hpp"
 #include "render_worker.hpp"
 
+#include <algorithm>
+
 #include <QApplication>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -21,6 +23,10 @@
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QToolBar>
+
+#include <QPainter>
+#include <QPrintDialog>
+#include <QPrinter>
 #include <QTreeWidget>
 
 #include "outline_model.hpp"
@@ -166,6 +172,10 @@ void MainWindow::buildActions() {
     QAction* open = bar->addAction(tr("Open"));
     open->setShortcut(QKeySequence::Open);
     connect(open, &QAction::triggered, this, &MainWindow::openDialog);
+
+    QAction* print = bar->addAction(tr("Print"));
+    print->setShortcut(QKeySequence::Print);
+    connect(print, &QAction::triggered, this, &MainWindow::printDialog);
 
     bar->addSeparator();
 
@@ -375,4 +385,67 @@ void MainWindow::onPasswordRequired(bool retry) {
     }
     statusBar()->showMessage(tr("Unlocking…"));
     emit requestAuthenticate(password);
+}
+
+void MainWindow::printDialog() {
+    if (pageCount_ <= 0) {
+        return;
+    }
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setDocName(currentTitle_);
+    printer.setFromTo(1, pageCount_);
+
+    QPrintDialog dialog(&printer, this);
+    dialog.setOption(QAbstractPrintDialog::PrintPageRange, true);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    statusBar()->showMessage(tr("Printing…"));
+    printDocument(printer, printer.fromPage(), printer.toPage());
+    statusBar()->showMessage(tr("Printed %1").arg(currentTitle_), 3000);
+}
+
+bool MainWindow::printDocument(QPrinter& printer, int fromPage, int toPage) {
+    if (pageCount_ <= 0 || worker_ == nullptr) {
+        return false;
+    }
+    const int first = fromPage > 0 ? fromPage : 1;
+    const int last = toPage > 0 ? std::min(toPage, pageCount_) : pageCount_;
+    if (first > last) {
+        return false;
+    }
+
+    QPainter painter;
+    if (!painter.begin(&printer)) {
+        return false;
+    }
+
+    // Render each page at ~150 DPI (zoom = 150/72) -- good print quality without
+    // enormous images -- then scale it to fill the printable area, preserving
+    // aspect ratio. The render happens on the worker thread; a blocking queued
+    // call fetches the image synchronously, which is fine for a print operation.
+    constexpr double kPrintZoom = 150.0 / 72.0;
+    bool first_page = true;
+    for (int p = first; p <= last; ++p) {
+        QImage image;
+        QMetaObject::invokeMethod(worker_, "renderAt", Qt::BlockingQueuedConnection,
+                                  Q_RETURN_ARG(QImage, image), Q_ARG(int, p - 1),
+                                  Q_ARG(double, kPrintZoom));
+        if (!first_page) {
+            printer.newPage();
+        }
+        first_page = false;
+        if (image.isNull()) {
+            continue;  // a bad page prints blank rather than aborting the job
+        }
+
+        const QRectF target = printer.pageRect(QPrinter::DevicePixel);
+        QSizeF drawn = QSizeF(image.size()).scaled(target.size(), Qt::KeepAspectRatio);
+        const QRectF where(target.x() + (target.width() - drawn.width()) / 2,
+                           target.y() + (target.height() - drawn.height()) / 2,
+                           drawn.width(), drawn.height());
+        painter.drawImage(where, image);
+    }
+    painter.end();
+    return true;
 }

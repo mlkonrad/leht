@@ -47,6 +47,13 @@ private slots:
     void onOutlineClicked(QTreeWidgetItem* item, int column);
     void goToPageFromSpin();
     void onPasswordRequired(bool retry);
+    void printDialog();
+
+public:
+    /// Prints pages [fromPage, toPage] (1-based; 0,0 = all) to `printer`.
+    /// Public so the headless test can print to a PDF. Returns false if nothing
+    /// was printed.
+    bool printDocument(class QPrinter& printer, int fromPage = 0, int toPage = 0);
 
 signals:
     void requestOpen(const QString& path);
