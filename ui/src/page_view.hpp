@@ -4,7 +4,11 @@
 #include <QAbstractScrollArea>
 #include <QHash>
 #include <QImage>
+#include <QPointF>
+#include <QRectF>
 #include <QSize>
+#include <QString>
+#include <QPair>
 #include <QVector>
 
 /// Continuous vertical page view.
@@ -35,6 +39,24 @@ public:
     /// The page currently nearest the top of the viewport, 0-based.
     [[nodiscard]] int currentPage() const;
 
+    // --- Find ---------------------------------------------------------------
+    /// Drops all current matches and the selection; call before a new search.
+    void clearMatches();
+    /// Match boxes for one page, in base (zoom-1.0) coordinates.
+    void addMatches(int page, const QVector<QRectF>& boxes);
+    /// Called when a search completes; moves to the first match.
+    void finishMatches(int total);
+    void nextMatch();
+    void prevMatch();
+    [[nodiscard]] int matchCount() const { return matchOrder_.size(); }
+    [[nodiscard]] int currentMatchIndex() const { return currentMatch_; }
+
+    // --- Selection ----------------------------------------------------------
+    /// Selection boxes + text for one page, in base coordinates, from the worker.
+    void setSelection(int page, const QVector<QRectF>& boxes, const QString& text);
+    [[nodiscard]] QString selectedText() const { return selectionText_; }
+    void copySelection() const;
+
 public slots:
     /// A finished render from the worker. Ignored if the zoom has since changed.
     void onRendered(int page, double zoom, quint64 generation, QImage image);
@@ -46,12 +68,19 @@ signals:
     /// The generation advanced (scroll or zoom); the worker should catch up.
     void generationChanged(quint64 generation);
     void currentPageChanged(int page);
+    /// A drag or double-click wants text selected on `page`, in base coords.
+    void selectRequested(int page, QPointF aBase, QPointF bBase, int mode);
+    void matchNavigated(int index, int total);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void scrollContentsBy(int dx, int dy) override;
     void wheelEvent(QWheelEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:
     static constexpr int kGap = 12;      // px between pages, at any zoom
@@ -65,6 +94,15 @@ private:
     void relayout();
     void requestVisible();
     void bumpGeneration();
+
+    /// Where page `page` is drawn right now, in viewport coordinates.
+    [[nodiscard]] QRect pageRectInViewport(int page) const;
+    /// A base-coord rect on `page` mapped to viewport coordinates.
+    [[nodiscard]] QRectF baseRectToViewport(int page, const QRectF& base) const;
+    /// A viewport point mapped to (page, base coordinates). Returns page -1 if
+    /// the point is not over any page.
+    void viewportToPage(QPoint pos, int& page, QPointF& base) const;
+    void scrollToCurrentMatch();
 
     QVector<QSize> baseSizes_;             // at zoom 1.0
     double zoom_ = 1.0;
@@ -80,4 +118,18 @@ private:
     };
     QHash<int, Rendered> rendered_;
     QSet<int> requested_;                  // in flight at the current generation
+
+    // Find: match boxes per page (base coords), plus a flat page-ordered list
+    // for next/prev navigation.
+    QHash<int, QVector<QRectF>> matches_;
+    QVector<QPair<int, int>> matchOrder_;  // (page, index-within-page)
+    int currentMatch_ = -1;
+
+    // Selection: boxes on one page (base coords) plus the covered text.
+    int selectionPage_ = -1;
+    QVector<QRectF> selectionBoxes_;
+    QString selectionText_;
+    bool selecting_ = false;
+    int selectAnchorPage_ = -1;
+    QPointF selectAnchorBase_;
 };

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "page_view.hpp"
 
+#include <QApplication>
+#include <QClipboard>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QResizeEvent>
@@ -29,6 +32,7 @@ void PageView::clear() {
     baseSizes_.clear();
     rendered_.clear();
     requested_.clear();
+    clearMatches();
     relayout();
     viewport()->update();
 }
@@ -170,6 +174,172 @@ void PageView::onRendered(int page, double zoom, quint64 /*generation*/,
     viewport()->update();
 }
 
+QRect PageView::pageRectInViewport(int page) const {
+    const QSize size = scaledSize(page);
+    const int x = kMargin + (columnWidth() - size.width()) / 2 -
+                  horizontalScrollBar()->value();
+    const int y = pageTop(page) - verticalScrollBar()->value();
+    return QRect(x, y, size.width(), size.height());
+}
+
+QRectF PageView::baseRectToViewport(int page, const QRectF& base) const {
+    const QRect pr = pageRectInViewport(page);
+    return QRectF(pr.x() + base.x() * zoom_, pr.y() + base.y() * zoom_,
+                  base.width() * zoom_, base.height() * zoom_);
+}
+
+void PageView::viewportToPage(QPoint pos, int& page, QPointF& base) const {
+    page = -1;
+    for (int p = 0; p < baseSizes_.size(); ++p) {
+        const QRect pr = pageRectInViewport(p);
+        if (pr.top() > pos.y()) {
+            break;  // pages are top-to-bottom; past the cursor already
+        }
+        if (pr.contains(pos)) {
+            page = p;
+            base = QPointF((pos.x() - pr.x()) / zoom_, (pos.y() - pr.y()) / zoom_);
+            return;
+        }
+    }
+}
+
+// --- Find -------------------------------------------------------------------
+
+void PageView::clearMatches() {
+    matches_.clear();
+    matchOrder_.clear();
+    currentMatch_ = -1;
+    selectionPage_ = -1;
+    selectionBoxes_.clear();
+    selectionText_.clear();
+    viewport()->update();
+}
+
+void PageView::addMatches(int page, const QVector<QRectF>& boxes) {
+    matches_[page] = boxes;
+    viewport()->update();
+}
+
+void PageView::finishMatches(int /*total*/) {
+    // Build a page-ordered flat list for next/prev.
+    matchOrder_.clear();
+    QList<int> pages = matches_.keys();
+    std::sort(pages.begin(), pages.end());
+    for (int p : pages) {
+        for (int i = 0; i < matches_[p].size(); ++i) {
+            matchOrder_.push_back({p, i});
+        }
+    }
+    currentMatch_ = matchOrder_.isEmpty() ? -1 : 0;
+    if (currentMatch_ >= 0) {
+        scrollToCurrentMatch();
+    }
+    emit matchNavigated(currentMatch_, matchOrder_.size());
+    viewport()->update();
+}
+
+void PageView::nextMatch() {
+    if (matchOrder_.isEmpty()) {
+        return;
+    }
+    currentMatch_ = (currentMatch_ + 1) % matchOrder_.size();
+    scrollToCurrentMatch();
+    emit matchNavigated(currentMatch_, matchOrder_.size());
+    viewport()->update();
+}
+
+void PageView::prevMatch() {
+    if (matchOrder_.isEmpty()) {
+        return;
+    }
+    currentMatch_ =
+        (currentMatch_ - 1 + matchOrder_.size()) % matchOrder_.size();
+    scrollToCurrentMatch();
+    emit matchNavigated(currentMatch_, matchOrder_.size());
+    viewport()->update();
+}
+
+void PageView::scrollToCurrentMatch() {
+    if (currentMatch_ < 0 || currentMatch_ >= matchOrder_.size()) {
+        return;
+    }
+    const auto [page, idx] = matchOrder_.at(currentMatch_);
+    const QRectF box = matches_.value(page).value(idx);
+    // Put the match a third of the way down the viewport.
+    const int targetY = pageTop(page) + int(box.center().y() * zoom_) -
+                        viewport()->height() / 3;
+    verticalScrollBar()->setValue(targetY);
+    requestVisible();
+}
+
+// --- Selection --------------------------------------------------------------
+
+void PageView::setSelection(int page, const QVector<QRectF>& boxes,
+                            const QString& text) {
+    selectionPage_ = page;
+    selectionBoxes_ = boxes;
+    selectionText_ = text;
+    viewport()->update();
+}
+
+void PageView::copySelection() const {
+    if (!selectionText_.isEmpty()) {
+        QApplication::clipboard()->setText(selectionText_);
+    }
+}
+
+void PageView::mousePressEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton) {
+        QAbstractScrollArea::mousePressEvent(event);
+        return;
+    }
+    int page = -1;
+    QPointF base;
+    viewportToPage(event->pos(), page, base);
+    if (page < 0) {
+        return;
+    }
+    selecting_ = true;
+    selectAnchorPage_ = page;
+    selectAnchorBase_ = base;
+    selectionPage_ = -1;
+    selectionBoxes_.clear();
+    selectionText_.clear();
+    viewport()->update();
+}
+
+void PageView::mouseMoveEvent(QMouseEvent* event) {
+    if (!selecting_) {
+        return;
+    }
+    int page = -1;
+    QPointF base;
+    viewportToPage(event->pos(), page, base);
+    // Selection stays on the anchor page; clamp the far point to it.
+    if (page != selectAnchorPage_) {
+        return;
+    }
+    emit selectRequested(selectAnchorPage_, selectAnchorBase_, base,
+                         /*Chars=*/0);
+}
+
+void PageView::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton) {
+        selecting_ = false;
+    }
+}
+
+void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
+    int page = -1;
+    QPointF base;
+    viewportToPage(event->pos(), page, base);
+    if (page < 0) {
+        return;
+    }
+    // Word select: same point twice, Words mode.
+    emit selectRequested(page, base, base, /*Words=*/1);
+}
+
 void PageView::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(viewport());
     painter.fillRect(viewport()->rect(), palette().dark());
@@ -208,6 +378,26 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
         }
         painter.setPen(QColor(0, 0, 0, 60));
         painter.drawRect(pageRect);
+
+        // Search matches on this page: translucent yellow, current one orange.
+        const auto mit = matches_.constFind(p);
+        if (mit != matches_.constEnd()) {
+            for (int i = 0; i < mit->size(); ++i) {
+                const QRectF box = baseRectToViewport(p, mit->at(i));
+                const bool isCurrent =
+                    currentMatch_ >= 0 &&
+                    matchOrder_.value(currentMatch_) == qMakePair(p, i);
+                painter.fillRect(box, isCurrent ? QColor(255, 150, 0, 160)
+                                                : QColor(255, 235, 0, 110));
+            }
+        }
+
+        // Selection on this page: translucent blue.
+        if (selectionPage_ == p) {
+            for (const QRectF& b : selectionBoxes_) {
+                painter.fillRect(baseRectToViewport(p, b), QColor(60, 120, 220, 90));
+            }
+        }
     }
 
     const int page = currentPage();

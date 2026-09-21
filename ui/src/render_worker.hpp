@@ -2,8 +2,11 @@
 #pragma once
 
 #include <QAtomicInteger>
+#include <QHash>
 #include <QImage>
 #include <QObject>
+#include <QPointF>
+#include <QRectF>
 #include <QSize>
 #include <QString>
 #include <QVector>
@@ -15,6 +18,7 @@ class Context;
 class Document;
 class Renderer;
 class PageCache;
+class TextPage;
 }  // namespace leht
 
 /// Owns the whole engine and runs it on its own thread.
@@ -48,15 +52,33 @@ public slots:
     /// latest set via setGeneration(). Emits rendered() on success.
     void render(int page, double zoom, quint64 generation);
 
+    /// Searches every page for `needle`. Emits pageMatches() per page as it goes
+    /// (so highlights appear progressively) then searchFinished(). Match boxes
+    /// are in BASE coordinates — page pixels at zoom 1.0 — so the view scales
+    /// them to the current zoom and they survive zoom changes without re-search.
+    void search(const QString& needle);
+
+    /// Selects text between two points, given in base coordinates, on one page.
+    /// `mode` is a leht::SelectMode cast to int. Emits selectionReady().
+    void selectRegion(int page, QPointF aBase, QPointF bBase, int mode);
+
 signals:
     void opened(int pageCount, QVector<QSize> baseSizes);
     void failed(const QString& message);
     void rendered(int page, double zoom, quint64 generation, QImage image);
+    void pageMatches(int page, QVector<QRectF> boxes);
+    void searchFinished(int totalMatches);
+    void selectionReady(int page, QVector<QRectF> boxes, QString text);
 
 private:
+    /// A text layer for `page`, built at zoom 1.0 and cached. Both search and
+    /// selection use it; caching avoids re-extracting a page's text per query.
+    leht::TextPage* textPage(int page);
+
     std::unique_ptr<leht::Context> ctx_;
     std::unique_ptr<leht::Document> doc_;
     std::unique_ptr<leht::Renderer> renderer_;
     std::unique_ptr<leht::PageCache> cache_;
+    QHash<int, std::shared_ptr<leht::TextPage>> textPages_;
     QAtomicInteger<quint64> generation_ = 0;
 };

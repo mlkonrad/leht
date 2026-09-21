@@ -9,10 +9,13 @@
 #include "page_view.hpp"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QEventLoop>
 #include <QImage>
 #include <QScrollBar>
 #include <QTimer>
+
+#include "render_worker.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -94,6 +97,58 @@ int main(int argc, char** argv) {
     check(view->zoom() > before, "zoom increases the scale");
     const QImage zoomed = grabView(window);
     check(inkSamples(zoomed) > 200, "content still renders after zoom");
+
+    // --- Find --------------------------------------------------------------
+    // Drive search directly against the view+worker path. "quick" appears once
+    // per line, 50 per page, 10 pages -> 500 matches.
+    view->verticalScrollBar()->setValue(0);
+    view->setZoom(1.0);
+    pump(300);
+
+    int lastTotal = -1;
+    QObject::connect(view, &PageView::matchNavigated,
+                     [&](int, int total) { lastTotal = total; });
+
+    RenderWorker* worker = window.worker();
+    check(worker != nullptr, "worker reachable");
+    view->clearMatches();
+    QMetaObject::invokeMethod(worker, "search", Qt::QueuedConnection,
+                              Q_ARG(QString, QStringLiteral("quick")));
+    pump(2500);
+    std::printf("      matches for \"quick\": %d\n", view->matchCount());
+    check(view->matchCount() == 500, "found 500 matches for a per-line word");
+    check(lastTotal == 500, "match-navigated total reported to the UI");
+
+    const QImage withMatches = grabView(window);
+    check(withMatches != first, "match highlights change the drawing");
+
+    // Navigate: next should advance the current match index.
+    const int beforeIdx = view->currentMatchIndex();
+    view->nextMatch();
+    pump(200);
+    check(view->currentMatchIndex() != beforeIdx, "next-match advances");
+
+    // --- Selection ---------------------------------------------------------
+    // Select a word region on page 1 via the worker, check text comes back.
+    view->verticalScrollBar()->setValue(0);
+    view->setZoom(1.0);
+    pump(300);
+    QString selText;
+    // The worker's selectionReady is already wired to the view by MainWindow, so
+    // invoking selectRegion drives the real path end to end.
+    QMetaObject::invokeMethod(worker, "selectRegion", Qt::QueuedConnection,
+                              Q_ARG(int, 0),
+                              Q_ARG(QPointF, QPointF(60, 40)),
+                              Q_ARG(QPointF, QPointF(60, 40)),
+                              Q_ARG(int, 1 /*Words*/));
+    pump(800);
+    selText = view->selectedText();
+    std::printf("      selected text: \"%s\"\n", selText.toUtf8().constData());
+    check(!selText.isEmpty(), "word selection returns text");
+
+    view->copySelection();
+    check(QApplication::clipboard()->text() == selText,
+          "copy puts the selection on the clipboard");
 
     if (g_failures > 0) {
         std::printf("%d smoke check(s) failed\n", g_failures);

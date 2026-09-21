@@ -6,8 +6,11 @@
 #include "leht/error.hpp"
 #include "leht/page_cache.hpp"
 #include "leht/renderer.hpp"
+#include "leht/text.hpp"
 
 #include <QThread>
+
+#include <utility>
 
 namespace {
 
@@ -43,6 +46,7 @@ void RenderWorker::open(const QString& path) {
 
         renderer_ = std::make_unique<leht::Renderer>(*ctx_, *doc_);
         cache_ = std::make_unique<leht::PageCache>();
+        textPages_.clear();
 
         const int pages = doc_->page_count();
         QVector<QSize> sizes;
@@ -87,5 +91,75 @@ void RenderWorker::render(int page, double zoom, quint64 generation) {
         }
     } catch (const leht::Error&) {
         // A single bad page must not take the viewer down; leave it blank.
+    }
+}
+
+leht::TextPage* RenderWorker::textPage(int page) {
+    if (auto it = textPages_.constFind(page); it != textPages_.constEnd()) {
+        return it->get();
+    }
+    // Built at zoom 1.0: match and selection coordinates come out in base page
+    // pixels, which the view scales to whatever zoom it is showing.
+    auto tp = std::make_shared<leht::TextPage>(*ctx_, *doc_, page, 1.0F);
+    return textPages_.insert(page, std::move(tp)).value().get();
+}
+
+void RenderWorker::search(const QString& needle) {
+    if (doc_ == nullptr) {
+        return;
+    }
+    if (needle.isEmpty()) {
+        emit searchFinished(0);
+        return;
+    }
+
+    const std::string q = needle.toStdString();
+    const int pages = doc_->page_count();
+    int total = 0;
+
+    for (int p = 0; p < pages; ++p) {
+        QVector<QRectF> boxes;
+        try {
+            for (const leht::SearchHit& hit : textPage(p)->search(q)) {
+                // One box per quad, so a line-wrapped match highlights each run
+                // without covering the gap. Bounding rect of the quad is the
+                // usual highlight shape for text.
+                for (const leht::TextQuad& quad : hit.quads) {
+                    boxes.push_back(QRectF(quad.min_x(), quad.min_y(),
+                                           quad.max_x() - quad.min_x(),
+                                           quad.max_y() - quad.min_y()));
+                }
+            }
+        } catch (const leht::Error&) {
+            continue;  // an unreadable page just contributes no matches
+        }
+        if (!boxes.isEmpty()) {
+            total += static_cast<int>(boxes.size());
+            emit pageMatches(p, boxes);
+        }
+    }
+    emit searchFinished(total);
+}
+
+void RenderWorker::selectRegion(int page, QPointF aBase, QPointF bBase,
+                                int mode) {
+    if (doc_ == nullptr || page < 0) {
+        return;
+    }
+    try {
+        const leht::Selection sel = textPage(page)->select(
+            static_cast<float>(aBase.x()), static_cast<float>(aBase.y()),
+            static_cast<float>(bBase.x()), static_cast<float>(bBase.y()),
+            static_cast<leht::SelectMode>(mode));
+
+        QVector<QRectF> boxes;
+        boxes.reserve(static_cast<int>(sel.quads.size()));
+        for (const leht::TextQuad& q : sel.quads) {
+            boxes.push_back(QRectF(q.min_x(), q.min_y(), q.max_x() - q.min_x(),
+                                   q.max_y() - q.min_y()));
+        }
+        emit selectionReady(page, boxes, QString::fromStdString(sel.text));
+    } catch (const leht::Error&) {
+        // No selection rather than a crash.
     }
 }
