@@ -12,6 +12,7 @@
 #include "leht/ops/encrypt.hpp"
 #include "leht/ops/merge.hpp"
 #include "leht/ops/pages.hpp"
+#include "leht/text.hpp"
 #include "leht/renderer.hpp"
 
 #include <array>
@@ -36,6 +37,7 @@ constexpr const char* kUsage =
     "\n"
     "commands:\n"
     "  info      FILE...                      pages, size, metadata, encryption\n"
+    "  text      FILE [-p N] [--search TERM]  extract text, or search for TERM\n"
     "  render    FILE -o OUT.png [-p N] [-z Z]  render one page to PNG\n"
     "  merge     FILE... -o OUT.pdf           merge PDFs and images, in order\n"
     "  split     FILE -o 'part-%03d.pdf' [-n N]  split into chunks\n"
@@ -129,7 +131,7 @@ struct Args {
 bool takes_value(const std::string& name) {
     static const std::vector<std::string> kValued{
         "-o", "-p", "-z", "-n", "-d", "-q", "--preset",
-        "--method", "--user-pw", "--owner-pw", "--password"};
+        "--method", "--user-pw", "--owner-pw", "--password", "--search"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -207,6 +209,45 @@ leht::ops::Encryption parse_method(const std::string& name) {
 }
 
 // -- commands ---------------------------------------------------------------
+
+int cmd_text(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    leht::Document doc = leht::Document::open(ctx, input);
+
+    const int page = args.int_flag("-p", 0);  // 0 = all pages
+    const std::string needle = args.flag("--search");
+
+    const int first = page > 0 ? page : 1;
+    const int last = page > 0 ? page : doc.page_count();
+    if (page != 0 && (page < 1 || page > doc.page_count())) {
+        throw leht::Error(0, "page " + std::to_string(page) + " is out of range (" +
+                                 std::to_string(doc.page_count()) + " pages)");
+    }
+
+    int total_hits = 0;
+    for (int p = first; p <= last; ++p) {
+        leht::TextPage tp{ctx, doc, p - 1};
+        if (needle.empty()) {
+            std::printf("%s", tp.text().c_str());
+        } else {
+            const auto hits = tp.search(needle);
+            for (const auto& hit : hits) {
+                if (!hit.quads.empty()) {
+                    const leht::TextQuad& q = hit.quads.front();
+                    std::printf("page %d  (%.0f, %.0f)\n", p,
+                                static_cast<double>(q.min_x()),
+                                static_cast<double>(q.min_y()));
+                }
+            }
+            total_hits += static_cast<int>(hits.size());
+        }
+    }
+    if (!needle.empty()) {
+        std::fprintf(stderr, "%d match%s for \"%s\"\n", total_hits,
+                     total_hits == 1 ? "" : "es", needle.c_str());
+    }
+    return 0;
+}
 
 int cmd_info(const leht::Context& ctx, const Args& args) {
     if (args.positional.empty()) {
@@ -400,6 +441,7 @@ int main(int argc, char** argv) {
         leht::Context ctx;
 
         if (cmd == "info")     { return cmd_info(ctx, args); }
+        if (cmd == "text")     { return cmd_text(ctx, args); }
         if (cmd == "render")   { return cmd_render(ctx, args); }
         if (cmd == "merge")    { return cmd_merge(ctx, args); }
         if (cmd == "compress") { return cmd_compress(ctx, args); }

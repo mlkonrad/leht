@@ -13,6 +13,7 @@ add_library(lehtcore
     src/context.cpp
     src/document.cpp
     src/renderer.cpp
+    src/text.cpp
     src/page_cache.cpp
     src/ops/merge.cpp
     src/ops/compress.cpp

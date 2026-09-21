@@ -31,6 +31,7 @@ endfunction()
 leht_add_test(test_context)
 leht_add_test(test_error)
 leht_add_test(test_renderer)
+leht_add_test(test_text)
 leht_add_test(test_page_cache)
 leht_add_test(test_merge)
 leht_add_test(test_compress)
@@ -56,6 +57,16 @@ if(Python3_FOUND AND LEHT_BUILD_CLI)
                 ENVIRONMENT "${LEHT_SANITIZER_ENV}")
         endif()
     endforeach()
+
+    add_test(NAME text_crosscheck
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tests/text_crosscheck.py
+                     $<TARGET_FILE:leht_cli>
+                     ${CMAKE_SOURCE_DIR}/tests/corpus/text_10p.pdf)
+    set_tests_properties(text_crosscheck PROPERTIES SKIP_RETURN_CODE 77)
+    if(LEHT_SANITIZE)
+        set_tests_properties(text_crosscheck PROPERTIES ENVIRONMENT "${LEHT_SANITIZER_ENV}")
+    endif()
 endif()
 
 # Corpus replay only -- every corpus file must open or be rejected cleanly.

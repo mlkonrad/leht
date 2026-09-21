@@ -54,6 +54,12 @@ expect 1 "missing input"                   info
 expect 1 "split %s pattern rejected"       split "$IN" -o "$OUT/%s.pdf"
 expect 1 "split %n pattern rejected"       split "$IN" -o "$OUT/%n.pdf"
 
+# Text command.
+expect 0 "text extract all pages"        text "$IN"
+expect 0 "text extract one page"         text "$IN" -p 1
+expect 0 "text search"                   text "$IN" --search line
+expect 1 "text page out of range"        text "$IN" -p 999
+
 # Valid invocations still succeed.
 expect 0 "rotate -d 90"                    rotate "$IN" -d 90 -o "$OUT/r.pdf"
 expect 0 "rotate -d -90"                   rotate "$IN" -d -90 -o "$OUT/r.pdf"
