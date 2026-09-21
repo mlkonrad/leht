@@ -28,6 +28,9 @@ if(LEHT_BUILD_TESTS)
 endif()
 
 add_subdirectory(core)
+# The viewer <-> leht-worker wire format (M3). Always built: it is small,
+# has no dependency beyond core/, and its tests guard the process boundary.
+add_subdirectory(ipc)
 
 if(LEHT_BUILD_CLI)
     add_subdirectory(cli)

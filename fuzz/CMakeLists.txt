@@ -16,6 +16,8 @@ endfunction()
 
 leht_add_fuzz_target(leht_fuzz_open fuzz_open.cpp)
 leht_add_fuzz_target(leht_fuzz_ops  fuzz_ops.cpp)
+leht_add_fuzz_target(leht_fuzz_ipc  fuzz_ipc.cpp)
+target_link_libraries(leht_fuzz_ipc PRIVATE leht::ipc)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(STATUS "  fuzz: libFuzzer (coverage-guided)")
