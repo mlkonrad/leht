@@ -17,6 +17,10 @@
 #include <QImage>
 #include <QScrollBar>
 #include <QTimer>
+#include <QSet>
+#include <QStringList>
+
+#include <signal.h>
 
 #include <QThread>
 
@@ -53,6 +57,43 @@ void pump(int ms) {
     QEventLoop loop;
     QTimer::singleShot(ms, &loop, &QEventLoop::quit);
     loop.exec();
+}
+
+/// A PDF whose outline nests `depth` levels deep. Loading it overflows MuPDF's
+/// stack (pdf_test_outline, live in 1.28.4): the file that, before M3, killed
+/// the viewer on open. See tests/crashes/README.md.
+QString writeDeepOutline(const QString& path, int depth) {
+    QByteArray out = "%PDF-1.7\n";
+    QVector<qsizetype> offsets;
+    auto add = [&](const QByteArray& body) {
+        offsets.push_back(out.size());
+        out += QByteArray::number(offsets.size()) + " 0 obj\n" + body + "\nendobj\n";
+    };
+    add("<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>");
+    add("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    add("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>");
+    add("<< /Type /Outlines /First 5 0 R /Last 5 0 R >>");
+    for (int k = 0; k < depth; ++k) {
+        const int num = 5 + k;
+        QByteArray o = "<< /Title (x) /Parent " + QByteArray::number(num - 1) + " 0 R";
+        if (k < depth - 1) {
+            o += " /First " + QByteArray::number(num + 1) + " 0 R /Last " +
+                 QByteArray::number(num + 1) + " 0 R";
+        }
+        add(o + " >>");
+    }
+    const qsizetype xref = out.size();
+    out += "xref\n0 " + QByteArray::number(offsets.size() + 1) + "\n0000000000 65535 f \n";
+    for (qsizetype off : offsets) {
+        out += QByteArray::number(off).rightJustified(10, '0') + " 00000 n \n";
+    }
+    out += "trailer\n<< /Size " + QByteArray::number(offsets.size() + 1) +
+           " /Root 1 0 R >>\nstartxref\n" + QByteArray::number(xref) + "\n%%EOF\n";
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(out);
+    }
+    return path;
 }
 
 QImage grabView(MainWindow& w) { return w.centralWidget()->grab().toImage(); }
@@ -298,6 +339,86 @@ int main(int argc, char** argv) {
         thread.quit();
         thread.wait();
         delete pw;
+    }
+
+    // --- Process isolation (M3) -------------------------------------------
+    // A standalone worker+thread, as for the password flow, so failures are
+    // observed as signals rather than as modal message boxes.
+    {
+        QThread thread;
+        auto* iso = new RenderWorker();
+        iso->moveToThread(&thread);
+        thread.start();
+
+        int openedPages = 0;
+        QStringList failures;
+        QSet<int> renderedPages;
+        QObject::connect(iso, &RenderWorker::opened,
+                         [&](int pages, QVector<QSize>) { openedPages = pages; });
+        QObject::connect(iso, &RenderWorker::failed,
+                         [&](const QString& msg) { failures << msg; });
+        QObject::connect(iso, &RenderWorker::rendered,
+                         [&](int page, double, int, quint64, QImage) {
+                             renderedPages.insert(page);
+                         });
+        auto openIn = [&](const QString& path) {
+            QMetaObject::invokeMethod(iso, "open", Qt::QueuedConnection, Q_ARG(QString, path));
+        };
+        auto renderIn = [&](int page) {
+            QMetaObject::invokeMethod(iso, "render", Qt::QueuedConnection, Q_ARG(int, page),
+                                      Q_ARG(double, 1.0), Q_ARG(int, 0), Q_ARG(quint64, 0));
+        };
+
+        QTemporaryDir tmp;
+        const QString deep = writeDeepOutline(tmp.filePath(QStringLiteral("deep.pdf")), 200000);
+
+        openIn(deep);
+        pump(4000);
+        check(failures.size() == 1 && failures.last().contains(QStringLiteral("crashed")),
+              "a file that crashes the parser reports failure");
+        check(openedPages == 0, "the crashing file does not open");
+        check(iso->workerPid() == 0, "no worker is left running after the crash");
+
+        openIn(deep);
+        pump(300);
+        check(failures.size() == 2 && iso->workerPid() == 0,
+              "reopening a quarantined file fails fast, without a worker");
+
+        // The kill cases below end with this document quarantined for the
+        // session, so they use a private copy rather than the shared corpus file.
+        const QString copy = tmp.filePath(QStringLiteral("copy.pdf"));
+        QFile::copy(QString::fromStdString(doc), copy);
+        openIn(copy);
+        pump(1500);
+        check(openedPages == 10, "the viewer opens the next file normally after a crash");
+
+        // Kill the worker behind the viewer's back, as a crash on one page would.
+        const qint64 first = iso->workerPid();
+        ::kill(static_cast<pid_t>(first), SIGKILL);
+        pump(100);
+        renderIn(3);
+        pump(1500);
+        check(!renderedPages.contains(3), "the page being rendered at the crash stays blank");
+        check(iso->workerPid() != 0 && iso->workerPid() != first,
+              "a fresh worker replaces the dead one");
+        renderIn(4);
+        pump(1500);
+        check(renderedPages.contains(4), "other pages keep rendering after a respawn");
+        renderIn(3);
+        pump(500);
+        check(!renderedPages.contains(3), "the poisoned page is not retried");
+
+        // A second worker death in the same document gives up on it.
+        ::kill(static_cast<pid_t>(iso->workerPid()), SIGKILL);
+        pump(100);
+        renderIn(5);
+        pump(1500);
+        check(failures.size() == 3 && iso->workerPid() == 0,
+              "a second crash in one document closes it");
+
+        thread.quit();
+        thread.wait();
+        delete iso;
     }
 
     // --- Print -------------------------------------------------------------

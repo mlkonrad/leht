@@ -8,3 +8,11 @@ target_link_libraries(bench_thread_scaling
     PRIVATE leht::core MuPDF::MuPDF leht::warnings)
 target_include_directories(bench_thread_scaling
     PRIVATE ${CMAKE_SOURCE_DIR}/core/src)
+
+# The cost of process isolation (M3): the same open and render work, in-process
+# and through leht-worker.
+add_executable(bench_worker_latency worker_latency.cpp)
+target_link_libraries(bench_worker_latency PRIVATE leht::core leht::ipc leht::warnings)
+target_compile_definitions(bench_worker_latency PRIVATE
+    LEHT_WORKER_EXE="$<TARGET_FILE:leht_worker>")
+add_dependencies(bench_worker_latency leht_worker)

@@ -13,7 +13,16 @@ qt_add_library(leht_viewer_lib STATIC
 target_include_directories(leht_viewer_lib PUBLIC src)
 # leht::warnings is deliberately not applied: Qt's moc output and headers do not
 # pass our -Werror pedantic set, and they are not ours to fix. core/ stays strict.
-target_link_libraries(leht_viewer_lib PUBLIC leht::core Qt6::Widgets Qt6::PrintSupport)
+target_link_libraries(leht_viewer_lib PUBLIC leht::core leht::ipc Qt6::Widgets Qt6::PrintSupport)
+
+# The viewer parses nothing itself: every document goes to leht-worker (M3).
+# Both locations are baked in; render_worker.cpp tries the installed one first
+# and falls back to the build tree, so tests and in-tree runs work unchanged.
+include(GNUInstallDirs)
+add_dependencies(leht_viewer_lib leht_worker)
+target_compile_definitions(leht_viewer_lib PRIVATE
+    LEHT_WORKER_INSTALLED_PATH="${CMAKE_INSTALL_FULL_LIBEXECDIR}/leht/leht-worker"
+    LEHT_WORKER_BUILD_PATH="$<TARGET_FILE:leht_worker>")
 
 qt_add_executable(leht_viewer src/main.cpp)
 set_target_properties(leht_viewer PROPERTIES OUTPUT_NAME leht-viewer)

@@ -47,7 +47,10 @@ MainWindow::MainWindow() {
     // GUI -> worker (queued across the thread boundary).
     connect(this, &MainWindow::requestOpen, worker_, &RenderWorker::open);
     connect(view_, &PageView::needRender, worker_, &RenderWorker::render);
-    connect(view_, &PageView::generationChanged, worker_,
+    // Context `this`, not worker_: setGeneration must run on the GUI thread the
+    // moment the view moves. Queued onto the worker thread it would wait behind
+    // the very renders it is meant to make stale.
+    connect(view_, &PageView::generationChanged, this,
             [this](quint64 gen) { worker_->setGeneration(gen); });
 
     // worker -> GUI.

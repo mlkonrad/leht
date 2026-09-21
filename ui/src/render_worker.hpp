@@ -2,7 +2,6 @@
 #pragma once
 
 #include <QAtomicInteger>
-#include <QHash>
 #include <QImage>
 #include <QObject>
 #include <QPointF>
@@ -11,30 +10,41 @@
 #include <QString>
 #include <QVector>
 
-#include "outline_model.hpp"
+#include <QSet>
 
+#include "outline_model.hpp"
+#include "leht/ipc/process.hpp"
+
+#include <atomic>
 #include <memory>
+#include <optional>
+#include <string>
 
 namespace leht {
-class Context;
-class Document;
-class Renderer;
 class PageCache;
-class TextPage;
 }  // namespace leht
 
-/// Owns the whole engine and runs it on its own thread.
+/// The viewer's side of the document engine, running on its own thread.
 ///
-/// This exists because of the threading finding (docs/threading.md): MuPDF
-/// requires that one thread touch the document, and rendering must not block
-/// the UI. So the Context, Document and Renderer are all created and used HERE,
-/// on the worker thread — never on the GUI thread. The GUI talks to this object
-/// only through queued signals and slots.
+/// Since M3 this object never parses a document. Each open spawns a fresh
+/// sandboxed `leht-worker` process, hands it the file descriptor, and relays
+/// its answers as the same signals the viewer has always consumed -- so
+/// MainWindow, PageView and ThumbnailBar are unaware of the process boundary.
+/// See docs/robustness.md, "Process isolation".
+///
+/// All worker I/O happens on this object's thread. The one exception is
+/// setGeneration(), called on the GUI thread, which also sends the worker a
+/// Cancel so an in-flight render of a page scrolled away from is aborted.
 ///
 /// Requests carry a monotonic `generation`. When the user scrolls or zooms, the
-/// view bumps the generation; the worker skips any queued request older than
-/// the latest before spending time on it, so a fast scroll does not render a
-/// backlog of pages nobody is looking at any more.
+/// view bumps the generation; stale requests are skipped here before being
+/// sent, and the worker skips or aborts any it already has.
+///
+/// If the worker dies (a hostile file crashed MuPDF inside it): during a page
+/// request, that page is marked poisoned and left blank, and a fresh worker
+/// reopens the document so the rest keeps working. During open, or on a second
+/// crash in the same document, failed() is emitted and the file is quarantined
+/// for the session, so reopening it fails fast instead of crashing again.
 class RenderWorker : public QObject {
     Q_OBJECT
 
@@ -42,9 +52,14 @@ public:
     RenderWorker();
     ~RenderWorker() override;
 
-    /// Called from the GUI thread. The worker reads it before each render and
-    /// drops stale ones. Atomic because it is written and read across threads.
-    void setGeneration(quint64 generation) { generation_.storeRelease(generation); }
+    /// Called from the GUI thread. Renders older than `generation` are dropped
+    /// before being sent, and the worker process is told to skip or abort any
+    /// it already has.
+    void setGeneration(quint64 generation);
+
+    /// The current worker process id, or 0 if none is running. For
+    /// diagnostics and tests; safe to call from any thread.
+    [[nodiscard]] qint64 workerPid() const;
 
 public slots:
     /// Opens a document (worker thread). Emits opened() on success, failed() on
@@ -94,18 +109,50 @@ signals:
     void thumbnailReady(int page, QImage image);
 
 private:
-    /// A text layer for `page`, built at zoom 1.0 and cached. Both search and
-    /// selection use it; caching avoids re-extracting a page's text per query.
-    leht::TextPage* textPage(int page);
+    /// What the viewer was doing when a worker died, which decides the response.
+    enum class Phase { Open, Page, Search };
 
-    /// Finishes opening an unlocked document: sets up the renderer and emits
-    /// opened() and outlineReady(). Shared by open() and authenticate().
-    void finishOpen();
+    /// Spawns and handshakes a fresh worker. Emits failed() and returns false
+    /// if it cannot start.
+    bool startWorker();
 
-    std::unique_ptr<leht::Context> ctx_;
-    std::unique_ptr<leht::Document> doc_;
-    std::unique_ptr<leht::Renderer> renderer_;
+    /// Opens path_ in the current worker and handles the reply (and, when
+    /// `password` is set, authenticates). Returns false after emitting what it
+    /// needed to. With `silent`, success emits nothing: used to restore the
+    /// document in a respawned worker.
+    bool openInWorker(bool silent);
+
+    /// Receives one frame. Returns nullopt if the worker has gone -- EOF, I/O
+    /// failure, or a malformed frame, which is treated as a compromised worker.
+    std::optional<leht::ipc::Frame> receive();
+
+    /// Sends a request; false if the worker has gone.
+    template <typename Msg>
+    bool sendRequest(const Msg& msg, int fd = -1);
+
+    /// The worker died while doing `phase` (on `page`, if a page request).
+    void workerLost(Phase phase, int page);
+
+    /// Emits opened() and outlineReady() from the worker's replies.
+    void publishOpened(const leht::ipc::Opened& result, const leht::ipc::Outline& outline);
+
+    /// A synchronous render outside the generation machinery (thumbnails,
+    /// printing). Null image on any failure.
+    QImage renderUncached(int page, double zoom);
+
+    void closeDocument();
+
+    /// The live worker. Shared and atomic because setGeneration() reads it
+    /// from the GUI thread while this thread may be replacing it.
+    std::atomic<std::shared_ptr<leht::ipc::WorkerProcess>> proc_;
+    std::uint64_t nextId_ = 1;
+
+    QString path_;
+    std::optional<std::string> password_;  ///< kept to re-authenticate after a respawn
+    QVector<QSize> baseSizes_;
+    QSet<int> poisoned_;                   ///< pages that crashed a worker
+    int crashes_ = 0;                      ///< worker deaths in this document
+
     std::unique_ptr<leht::PageCache> cache_;
-    QHash<int, std::shared_ptr<leht::TextPage>> textPages_;
     QAtomicInteger<quint64> generation_ = 0;
 };
