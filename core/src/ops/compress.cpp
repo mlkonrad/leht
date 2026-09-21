@@ -17,6 +17,10 @@ using detail::OwnedBuffer;
 using detail::OwnedImage;
 using detail::OwnedPdfDoc;
 
+/// Ceiling on the pixmap compress() will ask MuPDF to decode for one image,
+/// measured at maximum subsampling. See recompress_image().
+constexpr std::size_t kMaxDecodeBytes = std::size_t{256} << 20;  // 256 MB
+
 struct PresetValues {
     int max_edge;   // longest edge in pixels, 0 = no image work
     int quality;    // JPEG quality
@@ -70,6 +74,17 @@ bool recompress_image(fz_context* ctx, pdf_document* doc, pdf_obj* ref,
         return false;
     }
 
+    // Backstop for images so large that even MuPDF's maximum subsampling (64x
+    // per axis) leaves an unreasonable allocation. Such an image is skipped --
+    // left exactly as it was -- rather than decoded. Real content never gets
+    // near this: a full-page 600 DPI scan is ~34 megapixels before subsampling.
+    const auto at_max_subsample = [](int extent) {
+        return static_cast<std::size_t>(std::max(1, extent >> 6));
+    };
+    if (at_max_subsample(width) * at_max_subsample(height) * 4 > kMaxDecodeBytes) {
+        return false;
+    }
+
     const int longest = std::max(width, height);
     const double scale =
         longest > max_edge ? static_cast<double>(max_edge) /
@@ -87,8 +102,18 @@ bool recompress_image(fz_context* ctx, pdf_document* doc, pdf_obj* ref,
         fz_pixmap* decoded = nullptr;
         fz_pixmap* scaled = nullptr;
         fz_image* rebuilt = nullptr;
+        // Ask MuPDF for (roughly) the size we are about to scale to, not the
+        // full resolution. Given a ctm, fz_get_pixmap_from_image picks the
+        // largest power-of-two subsampling -- up to 64x per axis -- that still
+        // covers the requested size, and decodes at that. Without this hint an
+        // 888-byte file declaring a 16000x16000 image made compress allocate
+        // 773 MB to produce a thumbnail; with it the same file decodes at
+        // 2000x2000. This is the decompression-bomb defence.
+        const fz_matrix size_hint = fz_scale(static_cast<float>(target_w),
+                                             static_cast<float>(target_h));
         guarded(ctx, [&](fz_context* g) {
-            decoded = fz_get_pixmap_from_image(g, img, nullptr, nullptr,
+            fz_matrix hint = size_hint;
+            decoded = fz_get_pixmap_from_image(g, img, nullptr, &hint,
                                                nullptr, nullptr);
         });
         detail::Owned<fz_pixmap, fz_drop_pixmap> decoded_guard{ctx, decoded};

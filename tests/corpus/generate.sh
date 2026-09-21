@@ -87,6 +87,38 @@ WIDE
     echo "  made  wide.png (400x200)"
 fi
 
+# Decompression bomb: a tiny file declaring a huge image. Kept in a
+# subdirectory so corpus-wide consumers (the fuzz replay, libFuzzer seeding)
+# never pick it up by accident; test_bombs names it explicitly.
+mkdir -p bombs
+if [[ ! -f bombs/image_16k.pdf ]]; then
+    python3 - <<'BOMB'
+import zlib
+w = h = 16000
+data = zlib.compress(b"\x00" * (w * 3 * 4), 9)   # 4 real rows; the rest implied
+objs = [
+    b"<< /Type /Catalog /Pages 2 0 R >>",
+    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+    b"/Resources << /XObject << /Im 4 0 R >> >> /Contents 5 0 R >>",
+    b"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB "
+    b"/BitsPerComponent 8 /Filter /FlateDecode /Length %d >>\nstream\n" % (w, h, len(data))
+    + data + b"\nendstream",
+]
+content = b"q 612 0 0 792 0 0 cm /Im Do Q"
+objs.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
+out, offs = b"%PDF-1.7\n", []
+for i, o in enumerate(objs, 1):
+    offs.append(len(out)); out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+x = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+out += b"".join(b"%010d 00000 n \n" % o for o in offs)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, x)
+open("bombs/image_16k.pdf", "wb").write(out)
+BOMB
+    echo "  made  bombs/image_16k.pdf ($(stat -c %s bombs/image_16k.pdf) bytes, declares 16000x16000)"
+fi
+
 # A deliberately malformed file: Document::open must throw, never crash.
 if [[ ! -f damaged.pdf ]]; then
     printf '%%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n' > damaged.pdf

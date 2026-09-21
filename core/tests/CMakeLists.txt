@@ -37,6 +37,7 @@ leht_add_test(test_compress)
 leht_add_test(test_pages)
 leht_add_test(test_encrypt)
 leht_add_test(test_robustness)
+leht_add_test(test_bombs)
 
 # Independent cross-check against poppler. Self-consistency proves nothing about
 # correctness; agreement with a different rasteriser does. Skips cleanly (exit

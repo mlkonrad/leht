@@ -6,6 +6,7 @@ compile_commands.json
 *.so
 *.a
 tests/corpus/*.pdf
+tests/corpus/bombs/
 !tests/corpus/README.md
 bench/results/
 
