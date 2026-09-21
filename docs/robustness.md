@@ -263,7 +263,7 @@ from outside — the kernel OOM killer, a user's `kill` — **no**.
 | When | Blamed on the file | Killed from outside |
 |---|---|---|
 | During open (or reading the outline) | `failed()`: "could not open this file safely"; quarantined for the session | fresh worker, open retried |
-| During a page render or selection | that page stays blank, never retried; a fresh worker reopens the document (re-unlocking it with the password already given) and every other page keeps working | fresh worker, same request retried once |
+| During a page render or selection | that page is drawn as a labelled "could not be displayed safely" placeholder and never retried; a fresh worker reopens the document (re-unlocking it with the password already given) and every other page keeps working | fresh worker, same request retried once |
 | During search | matches so far stand, search finishes; document restored | same |
 | A second time in one document | document closed and quarantined | — |
 | A fourth outside kill in one document | — | document closed with "repeatedly terminated from outside"; **not** quarantined |

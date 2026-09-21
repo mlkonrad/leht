@@ -72,9 +72,17 @@ public:
     [[nodiscard]] QString selectedText() const { return selectionText_; }
     void copySelection() const;
 
+    /// Whether `page` has been marked as failed (see markPageFailed).
+    [[nodiscard]] bool isPageFailed(int page) const { return failed_.contains(page); }
+
 public slots:
     /// A finished render from the worker. Ignored if the zoom has since changed.
     void onRendered(int page, double zoom, int rotation, quint64 generation, QImage image);
+
+    /// `page` crashed the document worker and will not be rendered. Drawn as
+    /// a labelled placeholder rather than a blank sheet, so a missing page is
+    /// visibly missing instead of looking empty.
+    void markPageFailed(int page);
 
 signals:
     /// The view wants `page` rendered at `zoom`. `generation` lets the worker
@@ -136,6 +144,7 @@ private:
     };
     QHash<int, Rendered> rendered_;
     QSet<int> requested_;                  // in flight at the current generation
+    QSet<int> failed_;                     // pages that crashed the worker
 
     // Find: match boxes per page (base coords), plus a flat page-ordered list
     // for next/prev navigation.

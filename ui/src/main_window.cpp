@@ -63,6 +63,7 @@ MainWindow::MainWindow() {
             &RenderWorker::authenticate);
     connect(worker_, &RenderWorker::failed, this, &MainWindow::onFailed);
     connect(worker_, &RenderWorker::rendered, view_, &PageView::onRendered);
+    connect(worker_, &RenderWorker::pageFailed, view_, &PageView::markPageFailed);
 
     // Find: GUI -> worker search, worker -> view highlights.
     connect(this, &MainWindow::requestSearch, worker_, &RenderWorker::search);

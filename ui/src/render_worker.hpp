@@ -109,6 +109,8 @@ signals:
     void passwordRequired(bool retry);
     void failed(const QString& message);
     void rendered(int page, double zoom, int rotation, quint64 generation, QImage image);
+    /// `page` crashed the worker and will stay blank for this document.
+    void pageFailed(int page);
     /// A search is about to report. Emitted from this thread, so it reaches the
     /// GUI after any matches an abandoned search had already sent: clearing
     /// highlights on it can never leave an old search's matches on screen.

@@ -276,6 +276,7 @@ bool RenderWorker::workerLost(Phase phase, int page) {
     }
     if (phase == Phase::Page && page >= 0) {
         poisoned_.insert(page);  // this page stays blank from now on
+        emit pageFailed(page);
     }
     // Restore the document in a fresh worker so the other pages keep working.
     if (!startWorker() || !openInWorker(/*silent=*/true)) {

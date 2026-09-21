@@ -298,6 +298,21 @@ int main(int argc, char** argv) {
     pump(300);
     check(view->currentPage() == 0, "firstPage returns to the start");
 
+    // A page that crashed the worker is drawn as a labelled placeholder, not
+    // a blank sheet that looks like an empty page.
+    {
+        const QImage before = grabView(window);
+        view->markPageFailed(0);
+        pump(100);
+        const QImage after = grabView(window);
+        check(view->isPageFailed(0) && before != after,
+              "a failed page is drawn differently from a rendered one");
+        view->setPages(QVector<QSize>(10, QSize(612, 792)));
+        check(!view->isPageFailed(0), "failed marks are cleared for a new document");
+        window.openPath(QString::fromStdString(doc));
+        pump(1500);
+    }
+
     // --- Password flow -----------------------------------------------------
     // Test the worker's authentication logic on a STANDALONE worker+thread with
     // no window attached, so the real modal password dialog never appears.
@@ -408,6 +423,8 @@ int main(int argc, char** argv) {
                          [&](int page, double, int, quint64, QImage) {
                              renderedPages.insert(page);
                          });
+        QList<int> failedPages;
+        QObject::connect(iso, &RenderWorker::pageFailed, [&](int page) { failedPages << page; });
         auto openIn = [&](const QString& path) {
             QMetaObject::invokeMethod(iso, "open", Qt::QueuedConnection, Q_ARG(QString, path));
         };
@@ -448,6 +465,7 @@ int main(int argc, char** argv) {
         renderIn(2);
         pump(1500);
         check(renderedPages.contains(2), "a page whose worker was killed from outside is retried");
+        check(failedPages.isEmpty(), "an outside kill marks no page as failed");
         check(iso->workerPid() != 0 && iso->workerPid() != first,
               "a fresh worker replaces the killed one");
         check(failures.size() == 2, "an outside kill is not reported as a bad file");
@@ -460,6 +478,7 @@ int main(int argc, char** argv) {
         renderIn(3);
         pump(1500);
         check(!renderedPages.contains(3), "the page being rendered at a crash stays blank");
+        check(failedPages == QList<int>{3}, "the viewer is told which page failed");
         check(iso->workerPid() != 0 && iso->workerPid() != second,
               "a fresh worker replaces the crashed one");
         renderIn(4);

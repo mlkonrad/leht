@@ -25,6 +25,7 @@ void PageView::setPages(const QVector<QSize>& baseSizes) {
     baseSizes_ = baseSizes;
     rendered_.clear();
     requested_.clear();
+    failed_.clear();
     lastReportedPage_ = -1;
     relayout();
     requestVisible();
@@ -34,6 +35,7 @@ void PageView::clear() {
     baseSizes_.clear();
     rendered_.clear();
     requested_.clear();
+    failed_.clear();
     clearMatches();
     relayout();
     viewport()->update();
@@ -414,6 +416,15 @@ void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
     emit selectRequested(page, base, base, /*Words=*/1);
 }
 
+void PageView::markPageFailed(int page) {
+    if (page < 0 || page >= baseSizes_.size()) {
+        return;
+    }
+    failed_.insert(page);
+    requested_.remove(page);
+    viewport()->update();
+}
+
 void PageView::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(viewport());
     painter.fillRect(viewport()->rect(), palette().dark());
@@ -443,7 +454,15 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
         const QRect pageRect(x, y0 - scrollY, size.width(), size.height());
 
         const auto it = rendered_.constFind(p);
-        if (it != rendered_.constEnd() && !it->image.isNull()) {
+        if (failed_.contains(p)) {
+            painter.fillRect(pageRect, QColor(236, 236, 236));
+            painter.setPen(QColor(90, 90, 90));
+            painter.drawText(pageRect.adjusted(24, 24, -24, -24),
+                             Qt::AlignCenter | Qt::TextWordWrap,
+                             tr("This page could not be displayed safely.\n"
+                                "It crashed the document parser; the rest of the "
+                                "document is unaffected."));
+        } else if (it != rendered_.constEnd() && !it->image.isNull()) {
             // Scale a stale-zoom image to the current page rect; Qt does this
             // fast, and it is replaced the moment the sharp render lands.
             painter.drawImage(pageRect, it->image);
