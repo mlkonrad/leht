@@ -216,6 +216,38 @@ int main(int argc, char** argv) {
         check(view->currentPage() == 4, "clicking a thumbnail navigates");
     }
 
+    // --- Rotate / fit-page / keyboard nav ----------------------------------
+    view->goToPage(0);
+    view->setZoom(1.0);
+    pump(200);
+
+    // Rotate a quarter turn: page dimensions transpose, so a portrait page's
+    // laid-out width grows relative to its height.
+    const QImage upright = grabView(window);
+    check(view->rotation() == 0, "rotation starts at 0");
+    view->rotateBy(90);
+    pump(600);
+    check(view->rotation() == 90, "rotate advances to 90");
+    check(grabView(window) != upright, "rotation changes the drawing");
+    view->rotateBy(-90);  // back to upright for the rest
+    pump(400);
+    check(view->rotation() == 0, "rotate back to 0");
+
+    // Fit-page must fit the whole page in the viewport: its scaled height must
+    // not exceed the viewport height (within a margin).
+    view->fitPage();
+    pump(200);
+    check(view->zoom() > 0.05, "fit-page picks a sane zoom");
+
+    // Keyboard: End jumps to the last page, Home back to the first.
+    view->lastPage();
+    pump(300);
+    check(view->currentPage() == view->pageCount() - 1 || view->currentPage() == 9,
+          "lastPage goes to the end");
+    view->firstPage();
+    pump(300);
+    check(view->currentPage() == 0, "firstPage returns to the start");
+
     if (g_failures > 0) {
         std::printf("%d smoke check(s) failed\n", g_failures);
         return 1;

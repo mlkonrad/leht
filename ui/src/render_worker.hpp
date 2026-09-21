@@ -52,7 +52,7 @@ public slots:
 
     /// Renders one page at `zoom` to RGB. Skipped if `generation` is behind the
     /// latest set via setGeneration(). Emits rendered() on success.
-    void render(int page, double zoom, quint64 generation);
+    void render(int page, double zoom, int rotation, quint64 generation);
 
     /// Searches every page for `needle`. Emits pageMatches() per page as it goes
     /// (so highlights appear progressively) then searchFinished(). Match boxes
@@ -73,7 +73,7 @@ signals:
     void opened(int pageCount, QVector<QSize> baseSizes);
     void outlineReady(QVector<OutlineRow> rows);
     void failed(const QString& message);
-    void rendered(int page, double zoom, quint64 generation, QImage image);
+    void rendered(int page, double zoom, int rotation, quint64 generation, QImage image);
     void pageMatches(int page, QVector<QRectF> boxes);
     void searchFinished(int totalMatches);
     void selectionReady(int page, QVector<QRectF> boxes, QString text);

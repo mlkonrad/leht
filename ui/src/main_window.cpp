@@ -184,6 +184,20 @@ void MainWindow::buildActions() {
         updateZoomLabel();
     });
 
+    QAction* fitPage = bar->addAction(tr("Fit Page"));
+    fitPage->setShortcut(Qt::CTRL | Qt::Key_9);
+    connect(fitPage, &QAction::triggered, this, [this] {
+        view_->fitPage();
+        updateZoomLabel();
+    });
+
+    QAction* rotate = bar->addAction(tr("Rotate"));
+    rotate->setShortcut(Qt::CTRL | Qt::Key_R);
+    connect(rotate, &QAction::triggered, this, [this] {
+        view_->rotateBy(90);
+    });
+
+
     bar->addSeparator();
     QAction* find = bar->addAction(tr("Find"));
     find->setShortcut(QKeySequence::Find);
@@ -229,6 +243,7 @@ void MainWindow::onOpened(int pageCount, QVector<QSize> baseSizes) {
     pageSpin_->setMaximum(qMax(1, pageCount));
     pageSpin_->setEnabled(pageCount > 0);
     thumbnails_->setPageCount(pageCount);
+    view_->setFocus();
     onCurrentPageChanged(view_->currentPage());
     updateZoomLabel();
 }

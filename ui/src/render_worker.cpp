@@ -89,7 +89,8 @@ void RenderWorker::open(const QString& path) {
     }
 }
 
-void RenderWorker::render(int page, double zoom, quint64 generation) {
+void RenderWorker::render(int page, double zoom, int rotation,
+                          quint64 generation) {
     if (renderer_ == nullptr) {
         return;
     }
@@ -102,18 +103,19 @@ void RenderWorker::render(int page, double zoom, quint64 generation) {
         const auto z = static_cast<float>(zoom);
         auto image = QImage();
 
-        // Serve from the byte-budgeted cache when possible.
-        if (auto hit = cache_->get(page, z)) {
+        // The page cache is keyed by (page, zoom, rotation), so rotated and
+        // unrotated views do not collide.
+        if (auto hit = cache_->get(page, z, rotation)) {
             image = toQImage(*hit);
-        } else if (auto bmp = renderer_->render(page, z)) {
+        } else if (auto bmp = renderer_->render(page, z, rotation)) {
             image = toQImage(*bmp);
-            cache_->put(page, z, 0, std::move(*bmp));
+            cache_->put(page, z, rotation, std::move(*bmp));
         } else {
             return;  // render was cancelled; nothing to show
         }
 
         if (!image.isNull()) {
-            emit rendered(page, zoom, generation, image);
+            emit rendered(page, zoom, rotation, generation, image);
         }
     } catch (const leht::Error&) {
         // A single bad page must not take the viewer down; leave it blank.

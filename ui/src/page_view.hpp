@@ -34,6 +34,17 @@ public:
     void setZoom(double zoom);
     void zoomBy(double factor);
     void fitWidth();
+    void fitPage();
+
+    /// View rotation, a multiple of 90 degrees applied to every page.
+    [[nodiscard]] int rotation() const { return rotation_; }
+    void rotateBy(int degrees);
+
+    // Keyboard navigation.
+    void nextPage();
+    void previousPage();
+    void firstPage();
+    void lastPage();
 
     [[nodiscard]] int pageCount() const { return baseSizes_.size(); }
     /// The page currently nearest the top of the viewport, 0-based.
@@ -63,12 +74,12 @@ public:
 
 public slots:
     /// A finished render from the worker. Ignored if the zoom has since changed.
-    void onRendered(int page, double zoom, quint64 generation, QImage image);
+    void onRendered(int page, double zoom, int rotation, quint64 generation, QImage image);
 
 signals:
     /// The view wants `page` rendered at `zoom`. `generation` lets the worker
     /// drop this request if a newer one has superseded it.
-    void needRender(int page, double zoom, quint64 generation);
+    void needRender(int page, double zoom, int rotation, quint64 generation);
     /// The generation advanced (scroll or zoom); the worker should catch up.
     void generationChanged(quint64 generation);
     void currentPageChanged(int page);
@@ -77,6 +88,7 @@ signals:
     void matchNavigated(int index, int total);
 
 protected:
+    void keyPressEvent(QKeyEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void scrollContentsBy(int dx, int dy) override;
@@ -110,6 +122,7 @@ private:
 
     QVector<QSize> baseSizes_;             // at zoom 1.0
     double zoom_ = 1.0;
+    int rotation_ = 0;  // 0, 90, 180 or 270
     quint64 generation_ = 0;
     int lastReportedPage_ = -1;
 
@@ -119,6 +132,7 @@ private:
     struct Rendered {
         QImage image;
         double zoom = 0.0;
+        int rotation = 0;
     };
     QHash<int, Rendered> rendered_;
     QSet<int> requested_;                  // in flight at the current generation

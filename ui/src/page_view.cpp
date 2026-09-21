@@ -3,6 +3,7 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
@@ -17,6 +18,7 @@ PageView::PageView(QWidget* parent) : QAbstractScrollArea(parent) {
     setFrameShape(QFrame::NoFrame);
     viewport()->setBackgroundRole(QPalette::Dark);
     verticalScrollBar()->setSingleStep(40);
+    setFocusPolicy(Qt::StrongFocus);  // so PageUp/Down, Home/End, arrows arrive
 }
 
 void PageView::setPages(const QVector<QSize>& baseSizes) {
@@ -38,7 +40,10 @@ void PageView::clear() {
 }
 
 QSize PageView::scaledSize(int page) const {
-    const QSize base = baseSizes_.value(page);
+    QSize base = baseSizes_.value(page);
+    if (rotation_ == 90 || rotation_ == 270) {
+        base.transpose();  // a quarter-turn swaps width and height
+    }
     return QSize(std::lround(base.width() * zoom_),
                  std::lround(base.height() * zoom_));
 }
@@ -113,12 +118,71 @@ void PageView::fitWidth() {
     if (baseSizes_.isEmpty()) {
         return;
     }
-    int widestBase = 1;
+    const bool turned = rotation_ == 90 || rotation_ == 270;
+    int widest = 1;
     for (const QSize& s : baseSizes_) {
-        widestBase = std::max(widestBase, s.width());
+        widest = std::max(widest, turned ? s.height() : s.width());
     }
     const int avail = viewport()->width() - 2 * kMargin;
-    setZoom(double(avail) / widestBase);
+    setZoom(double(avail) / widest);
+}
+
+void PageView::fitPage() {
+    const int page = currentPage();
+    if (page < 0) {
+        return;
+    }
+    const bool turned = rotation_ == 90 || rotation_ == 270;
+    const QSize base = baseSizes_.value(page);
+    const double w = turned ? base.height() : base.width();
+    const double h = turned ? base.width() : base.height();
+    const double zx = (viewport()->width() - 2 * kMargin) / w;
+    const double zy = (viewport()->height() - 2 * kMargin) / h;
+    setZoom(std::min(zx, zy));
+}
+
+void PageView::rotateBy(int degrees) {
+    rotation_ = (((rotation_ + degrees) % 360) + 360) % 360;
+    // Every cached image is now the wrong orientation; drop them and re-render.
+    rendered_.clear();
+    requested_.clear();
+    relayout();
+    bumpGeneration();
+    requestVisible();
+    viewport()->update();
+}
+
+void PageView::nextPage() { goToPage(std::min(currentPage() + 1, pageCount() - 1)); }
+void PageView::previousPage() { goToPage(std::max(currentPage() - 1, 0)); }
+void PageView::firstPage() { goToPage(0); }
+void PageView::lastPage() { goToPage(pageCount() - 1); }
+
+void PageView::keyPressEvent(QKeyEvent* event) {
+    switch (event->key()) {
+        case Qt::Key_PageDown:
+        case Qt::Key_Space:
+            verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepAdd);
+            break;
+        case Qt::Key_PageUp:
+            verticalScrollBar()->triggerAction(QAbstractSlider::SliderPageStepSub);
+            break;
+        case Qt::Key_Home:
+            firstPage();
+            break;
+        case Qt::Key_End:
+            lastPage();
+            break;
+        case Qt::Key_Down:
+            verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepAdd);
+            break;
+        case Qt::Key_Up:
+            verticalScrollBar()->triggerAction(QAbstractSlider::SliderSingleStepSub);
+            break;
+        default:
+            QAbstractScrollArea::keyPressEvent(event);
+            return;
+    }
+    event->accept();
 }
 
 int PageView::currentPage() const {
@@ -170,17 +234,17 @@ void PageView::requestVisible() {
             it != rendered_.constEnd() && std::abs(it->zoom - zoom_) < 1e-6;
         if (!sharp && !requested_.contains(p)) {
             requested_.insert(p);
-            emit needRender(p, zoom_, generation_);
+            emit needRender(p, zoom_, rotation_, generation_);
         }
     }
 }
 
-void PageView::onRendered(int page, double zoom, quint64 /*generation*/,
-                          QImage image) {
+void PageView::onRendered(int page, double zoom, int rotation,
+                          quint64 /*generation*/, QImage image) {
     requested_.remove(page);
-    // Accept it even if the zoom has moved on: a slightly-stale image scaled to
-    // fit still beats a blank placeholder, and the fresh one will replace it.
-    rendered_.insert(page, Rendered{image, zoom});
+    // Accept it even if zoom/rotation moved on: a scaled stale image beats a
+    // blank placeholder, and the fresh one will replace it.
+    rendered_.insert(page, Rendered{image, zoom, rotation});
     viewport()->update();
 }
 
