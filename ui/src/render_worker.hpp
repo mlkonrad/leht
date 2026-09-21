@@ -11,6 +11,8 @@
 #include <QString>
 #include <QVector>
 
+#include "outline_model.hpp"
+
 #include <memory>
 
 namespace leht {
@@ -64,6 +66,7 @@ public slots:
 
 signals:
     void opened(int pageCount, QVector<QSize> baseSizes);
+    void outlineReady(QVector<OutlineRow> rows);
     void failed(const QString& message);
     void rendered(int page, double zoom, quint64 generation, QImage image);
     void pageMatches(int page, QVector<QRectF> boxes);

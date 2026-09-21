@@ -25,7 +25,11 @@ if(LEHT_BUILD_TESTS)
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
     add_test(NAME ui_smoke COMMAND ui_smoke_test)
     # Offscreen so it runs headless in CI; skips (77) if even that is unavailable.
+    # detect_leaks=0: Qt leaks a lot at exit under LSan (its own caches, not
+    # ours), which would drown the signal. ASan still catches the memory errors
+    # that matter here -- use-after-free, overflow -- and one such bug (a reopen
+    # freeing the context out from under live documents) was found this way.
     set_tests_properties(ui_smoke PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ASAN_OPTIONS=detect_leaks=0"
         SKIP_RETURN_CODE 77)
 endif()

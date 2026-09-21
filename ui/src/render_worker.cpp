@@ -10,6 +10,7 @@
 
 #include <QThread>
 
+#include <functional>
 #include <utility>
 
 namespace {
@@ -33,6 +34,17 @@ RenderWorker::~RenderWorker() = default;
 
 void RenderWorker::open(const QString& path) {
     try {
+        // Tear down any previous document in REVERSE dependency order, before
+        // the old Context is dropped. The renderer, text pages and document all
+        // hold pointers into the context, so the context must outlive them --
+        // reassigning ctx_ first would free it out from under them and crash on
+        // their eventual destruction. This is what a reopen used to do.
+        textPages_.clear();
+        renderer_.reset();
+        cache_.reset();
+        doc_.reset();
+        ctx_.reset();
+
         // Everything MuPDF is created on this thread and only ever touched here.
         ctx_ = std::make_unique<leht::Context>();
         doc_ = std::make_unique<leht::Document>(
@@ -56,6 +68,20 @@ void RenderWorker::open(const QString& path) {
             sizes.push_back(QSize(size.width, size.height));
         }
         emit opened(pages, sizes);
+
+        // Outline is optional; a document without one simply emits no rows.
+        QVector<OutlineRow> rows;
+        std::function<void(const std::vector<leht::OutlineItem>&, int)> flatten =
+            [&](const std::vector<leht::OutlineItem>& items, int depth) {
+                for (const leht::OutlineItem& item : items) {
+                    rows.push_back(OutlineRow{depth,
+                                              QString::fromStdString(item.title),
+                                              item.page, item.y});
+                    flatten(item.children, depth + 1);
+                }
+            };
+        flatten(doc_->outline(), 0);
+        emit outlineReady(rows);
     } catch (const leht::Error& e) {
         emit failed(QString::fromUtf8(e.what()));
     } catch (const std::exception& e) {

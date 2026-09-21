@@ -3,12 +3,18 @@
 
 #include <QMainWindow>
 #include <QThread>
+#include <QVector>
+
+#include "outline_model.hpp"
 
 class PageView;
 class RenderWorker;
 class QLabel;
 class QLineEdit;
 class QToolBar;
+class QTreeWidget;
+class QTreeWidgetItem;
+class QSpinBox;
 
 /// The application window. Owns the render thread, wires it to the view, and
 /// provides open / zoom / fit actions.
@@ -36,6 +42,9 @@ private slots:
     void hideFindBar();
     void runSearch();
     void onMatchNavigated(int index, int total);
+    void onOutlineReady(const QVector<OutlineRow>& rows);
+    void onOutlineClicked(QTreeWidgetItem* item, int column);
+    void goToPageFromSpin();
 
 signals:
     void requestOpen(const QString& path);
@@ -53,6 +62,9 @@ private:
     QToolBar* findBar_ = nullptr;
     QLineEdit* findEdit_ = nullptr;
     QLabel* findLabel_ = nullptr;
+    QTreeWidget* outlineTree_ = nullptr;
+    QSpinBox* pageSpin_ = nullptr;
+    bool syncingSpin_ = false;
     int pageCount_ = 0;
     QString currentTitle_;
 };

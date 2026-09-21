@@ -17,6 +17,10 @@
 
 #include "render_worker.hpp"
 
+#include <QDockWidget>
+#include <QScrollBar>
+#include <QTreeWidget>
+
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -149,6 +153,38 @@ int main(int argc, char** argv) {
     view->copySelection();
     check(QApplication::clipboard()->text() == selText,
           "copy puts the selection on the clipboard");
+
+    // --- Outline + go-to-page ----------------------------------------------
+    // Reopen with a document that has an outline.
+    const std::string outlined = std::string(LEHT_CORPUS_DIR) + "/outlined.pdf";
+    window.openPath(QString::fromStdString(outlined));
+    pump(1500);
+
+    auto* tree = window.findChild<QTreeWidget*>();
+    check(tree != nullptr, "outline tree exists");
+    if (tree != nullptr) {
+        check(tree->topLevelItemCount() == 3, "outline has 3 top-level entries");
+        QTreeWidgetItem* chapterTwo = tree->topLevelItem(1);
+        check(chapterTwo != nullptr && chapterTwo->childCount() == 1,
+              "Chapter Two has one child (Section 2.1)");
+
+        // Click Chapter Three -> should jump to page 3 (index 2).
+        QTreeWidgetItem* chapterThree = tree->topLevelItem(2);
+        if (chapterThree != nullptr) {
+            emit tree->itemClicked(chapterThree, 0);
+            pump(400);
+            check(view->currentPage() == 2, "clicking an outline entry navigates");
+        }
+    }
+
+    auto* dock = window.findChild<QDockWidget*>(QStringLiteral("outlineDock"));
+    check(dock != nullptr && dock->isVisible(),
+          "outline dock shows for a document with an outline");
+
+    // Go-to-page: jump back to page 1.
+    view->goToPage(0);
+    pump(300);
+    check(view->currentPage() == 0, "goToPage(0) returns to the first page");
 
     if (g_failures > 0) {
         std::printf("%d smoke check(s) failed\n", g_failures);

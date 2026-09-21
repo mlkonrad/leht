@@ -150,4 +150,52 @@ std::optional<std::string> Document::metadata(const std::string& key) const {
     return std::string(buffer.data());
 }
 
+namespace {
+
+/// Converts one fz_outline node (with its siblings and children) into leht's
+/// plain tree. This allocates std::string / std::vector, so it must NOT run
+/// inside a guarded() lambda. It is called after the outline is loaded, on
+/// pointers MuPDF keeps alive, with no throwing fz_ call in between.
+void convert(fz_context* ctx, fz_document* doc, fz_outline* node,
+             std::vector<OutlineItem>& out) {
+    for (; node != nullptr; node = node->next) {
+        OutlineItem item;
+        item.title = node->title != nullptr ? node->title : "";
+        item.y = node->y;
+        // A bookmark may point nowhere (a plain heading); page stays -1.
+        if (node->uri != nullptr) {
+            item.page = fz_page_number_from_location(ctx, doc, node->page);
+        }
+        if (node->down != nullptr) {
+            convert(ctx, doc, node->down, item.children);
+        }
+        out.push_back(std::move(item));
+    }
+}
+
+}  // namespace
+
+std::vector<OutlineItem> Document::outline() const {
+    fz_document* doc = doc_;
+
+    // fz_load_outline can throw, so it is the only thing in the guard; the tree
+    // walk that allocates runs after, on the returned pointer MuPDF owns until
+    // we drop it.
+    fz_outline* root = nullptr;
+    guarded(ctx_, [&](fz_context* g) { root = fz_load_outline(g, doc); });
+    if (root == nullptr) {
+        return {};
+    }
+
+    std::vector<OutlineItem> result;
+    try {
+        convert(ctx_, doc, root, result);
+    } catch (...) {
+        fz_drop_outline(ctx_, root);
+        throw;
+    }
+    fz_drop_outline(ctx_, root);
+    return result;
+}
+
 }  // namespace leht

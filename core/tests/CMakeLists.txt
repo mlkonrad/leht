@@ -30,6 +30,7 @@ endfunction()
 
 leht_add_test(test_context)
 leht_add_test(test_error)
+leht_add_test(test_outline)
 leht_add_test(test_renderer)
 leht_add_test(test_text)
 leht_add_test(test_page_cache)

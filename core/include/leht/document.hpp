@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <vector>
 #include <string_view>
 
 typedef struct fz_context fz_context;
@@ -12,6 +13,14 @@ typedef struct fz_document fz_document;
 namespace leht {
 
 class Context;
+
+/// One entry in a document's outline (its table of contents / bookmarks).
+struct OutlineItem {
+    std::string title;
+    int page = -1;      ///< 0-based target page, or -1 if the entry has no page
+    float y = 0.0F;     ///< target offset down the page, in unscaled points
+    std::vector<OutlineItem> children;
+};
 
 /// An open document.
 ///
@@ -55,6 +64,11 @@ public:
     /// Metadata by MuPDF key ("format", "info:Title", "info:Author", ...).
     /// Returns nullopt when the key is absent.
     [[nodiscard]] std::optional<std::string> metadata(const std::string& key) const;
+
+    /// The document outline (bookmarks / table of contents), as a tree. Empty
+    /// when the document has none. Page numbers are 0-based and resolved to
+    /// absolute page indices.
+    [[nodiscard]] std::vector<OutlineItem> outline() const;
 
     [[nodiscard]] fz_document* raw() const noexcept { return doc_; }
 

@@ -39,6 +39,10 @@ public:
     /// The page currently nearest the top of the viewport, 0-based.
     [[nodiscard]] int currentPage() const;
 
+    /// Scrolls so `page` is at the top of the viewport, offset by `yBase`
+    /// (unscaled points down the page). Used by the outline and go-to-page.
+    void goToPage(int page, double yBase = 0.0);
+
     // --- Find ---------------------------------------------------------------
     /// Drops all current matches and the selection; call before a new search.
     void clearMatches();

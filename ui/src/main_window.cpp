@@ -13,9 +13,15 @@
 #include <QLineEdit>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QDockWidget>
+#include <QHeaderView>
 #include <QShortcut>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QTreeWidget>
+
+#include "outline_model.hpp"
 
 MainWindow::MainWindow() {
     setWindowTitle(tr("Leht"));
@@ -37,6 +43,8 @@ MainWindow::MainWindow() {
 
     // worker -> GUI.
     connect(worker_, &RenderWorker::opened, this, &MainWindow::onOpened);
+    connect(worker_, &RenderWorker::outlineReady, this,
+            &MainWindow::onOutlineReady);
     connect(worker_, &RenderWorker::failed, this, &MainWindow::onFailed);
     connect(worker_, &RenderWorker::rendered, view_, &PageView::onRendered);
 
@@ -92,6 +100,30 @@ MainWindow::MainWindow() {
 
     auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     connect(esc, &QShortcut::activated, this, &MainWindow::hideFindBar);
+
+    // Outline sidebar: a dockable tree, hidden until a document with an outline
+    // is opened.
+    auto* dock = new QDockWidget(tr("Outline"), this);
+    dock->setObjectName(QStringLiteral("outlineDock"));
+    outlineTree_ = new QTreeWidget(dock);
+    outlineTree_->setHeaderHidden(true);
+    outlineTree_->setColumnCount(1);
+    dock->setWidget(outlineTree_);
+    addDockWidget(Qt::LeftDockWidgetArea, dock);
+    dock->hide();
+    connect(outlineTree_, &QTreeWidget::itemClicked, this,
+            &MainWindow::onOutlineClicked);
+
+    // Go-to-page: a spin box in the status bar, kept in sync with the view.
+    pageSpin_ = new QSpinBox(this);
+    pageSpin_->setMinimum(1);
+    pageSpin_->setMaximum(1);
+    pageSpin_->setEnabled(false);
+    pageSpin_->setKeyboardTracking(false);
+    pageSpin_->setPrefix(tr("Page "));
+    statusBar()->addPermanentWidget(pageSpin_);
+    connect(pageSpin_, &QSpinBox::editingFinished, this,
+            &MainWindow::goToPageFromSpin);
 }
 
 MainWindow::~MainWindow() {
@@ -169,6 +201,8 @@ void MainWindow::onOpened(int pageCount, QVector<QSize> baseSizes) {
     statusBar()->clearMessage();
     view_->setPages(baseSizes);
     view_->fitWidth();
+    pageSpin_->setMaximum(qMax(1, pageCount));
+    pageSpin_->setEnabled(pageCount > 0);
     onCurrentPageChanged(view_->currentPage());
     updateZoomLabel();
 }
@@ -180,7 +214,10 @@ void MainWindow::onFailed(const QString& message) {
 
 void MainWindow::onCurrentPageChanged(int page) {
     if (pageCount_ > 0 && page >= 0) {
-        pageLabel_->setText(tr("Page %1 / %2").arg(page + 1).arg(pageCount_));
+        pageLabel_->setText(tr("/ %1").arg(pageCount_));
+        syncingSpin_ = true;
+        pageSpin_->setValue(page + 1);
+        syncingSpin_ = false;
     } else {
         pageLabel_->clear();
     }
@@ -215,4 +252,58 @@ void MainWindow::onMatchNavigated(int index, int total) {
     } else {
         findLabel_->setText(tr("%1 of %2").arg(index + 1).arg(total));
     }
+}
+
+void MainWindow::onOutlineReady(const QVector<OutlineRow>& rows) {
+    outlineTree_->clear();
+    auto* dock = findChild<QDockWidget*>(QStringLiteral("outlineDock"));
+
+    if (rows.isEmpty()) {
+        if (dock != nullptr) {
+            dock->hide();
+        }
+        return;
+    }
+
+    // Rebuild the tree from the flat, depth-tagged rows. A running stack maps
+    // each depth to its last item, so a child attaches under the right parent.
+    QVector<QTreeWidgetItem*> stack;
+    for (const OutlineRow& row : rows) {
+        auto* item = new QTreeWidgetItem();
+        item->setText(0, row.title);
+        item->setData(0, Qt::UserRole, row.page);
+        item->setData(0, Qt::UserRole + 1, row.y);
+
+        stack.resize(row.depth);
+        if (row.depth == 0) {
+            outlineTree_->addTopLevelItem(item);
+        } else if (!stack.isEmpty() && stack.last() != nullptr) {
+            stack.last()->addChild(item);
+        } else {
+            outlineTree_->addTopLevelItem(item);  // malformed depth; do not lose it
+        }
+        stack.push_back(item);
+    }
+    outlineTree_->expandToDepth(1);
+    if (dock != nullptr) {
+        dock->show();
+    }
+}
+
+void MainWindow::onOutlineClicked(QTreeWidgetItem* item, int /*column*/) {
+    if (item == nullptr) {
+        return;
+    }
+    const int page = item->data(0, Qt::UserRole).toInt();
+    const double y = item->data(0, Qt::UserRole + 1).toDouble();
+    if (page >= 0) {
+        view_->goToPage(page, y);
+    }
+}
+
+void MainWindow::goToPageFromSpin() {
+    if (syncingSpin_) {
+        return;  // the change came from scrolling, not the user
+    }
+    view_->goToPage(pageSpin_->value() - 1);
 }

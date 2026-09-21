@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "main_window.hpp"
+#include "outline_model.hpp"
 
 #include <QApplication>
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    qRegisterMetaType<OutlineRow>();
+    qRegisterMetaType<QVector<OutlineRow>>();
     QApplication::setApplicationName(QStringLiteral("Leht"));
     QApplication::setApplicationDisplayName(QStringLiteral("Leht"));
 

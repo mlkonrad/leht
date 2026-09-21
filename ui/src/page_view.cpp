@@ -134,6 +134,16 @@ int PageView::currentPage() const {
     return baseSizes_.size() - 1;
 }
 
+void PageView::goToPage(int page, double yBase) {
+    if (page < 0 || page >= baseSizes_.size()) {
+        return;
+    }
+    const int y = pageTop(page) + int(yBase * zoom_) - kMargin;
+    verticalScrollBar()->setValue(std::clamp(y, 0, verticalScrollBar()->maximum()));
+    requestVisible();
+    viewport()->update();
+}
+
 void PageView::bumpGeneration() {
     ++generation_;
     emit generationChanged(generation_);
