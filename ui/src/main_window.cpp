@@ -66,6 +66,7 @@ MainWindow::MainWindow() {
 
     // Find: GUI -> worker search, worker -> view highlights.
     connect(this, &MainWindow::requestSearch, worker_, &RenderWorker::search);
+    connect(worker_, &RenderWorker::searchStarted, view_, &PageView::clearMatches);
     connect(worker_, &RenderWorker::pageMatches, view_, &PageView::addMatches);
     connect(worker_, &RenderWorker::searchFinished, view_,
             &PageView::finishMatches);
@@ -297,6 +298,7 @@ void MainWindow::showFindBar() {
 }
 
 void MainWindow::hideFindBar() {
+    worker_->cancelSearch();
     findBar_->hide();
     view_->clearMatches();
     view_->setFocus();
@@ -306,6 +308,7 @@ void MainWindow::runSearch() {
     const QString needle = findEdit_->text();
     view_->clearMatches();
     findLabel_->setText(needle.isEmpty() ? QString() : tr("searching…"));
+    worker_->cancelSearch();  // a new search never waits behind an old one
     emit requestSearch(needle);
 }
 

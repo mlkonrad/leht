@@ -25,7 +25,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 1;
+inline constexpr std::uint32_t kProtocolVersion = 2;  // 2: CancelSearch
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -45,6 +45,7 @@ enum class MsgType : std::uint16_t {
     Search = 6,
     Select = 7,
     Shutdown = 8,
+    CancelSearch = 9,
 
     // worker -> viewer
     HelloAck = 100,
@@ -108,9 +109,11 @@ struct Cancel {
     static Cancel decode(Reader& r);
 };
 
+/// `epoch` identifies the search for CancelSearch.
 struct Search {
     static constexpr MsgType kType = MsgType::Search;
     std::string needle;
+    std::uint64_t epoch = 0;
     void encode(Writer& w) const;
     static Search decode(Reader& r);
 };
@@ -123,6 +126,18 @@ struct Select {
     SelectMode mode = SelectMode::Chars;
     void encode(Writer& w) const;
     static Select decode(Reader& r);
+};
+
+/// Cancels every search with an epoch older than `epoch`: a running one stops
+/// at the next page, a queued one ends at once. Either still ends with its
+/// SearchDone (matches so far), so the stream stays in step. Numbered rather
+/// than a flag so that a cancel can never be lost to a search that had not
+/// yet started, nor stop one that starts after it.
+struct CancelSearch {
+    static constexpr MsgType kType = MsgType::CancelSearch;
+    std::uint64_t epoch = 0;
+    void encode(Writer& w) const;
+    static CancelSearch decode(Reader& r);
 };
 
 struct Shutdown {

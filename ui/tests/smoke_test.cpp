@@ -341,6 +341,53 @@ int main(int argc, char** argv) {
         delete pw;
     }
 
+    // --- Search cancellation ---------------------------------------------
+    // A new search must not wait behind an old one, and none of the old one's
+    // matches may survive into the new one's results.
+    {
+        const QString big = QString::fromStdString(std::string(LEHT_CORPUS_DIR) + "/text_500p.pdf");
+        QThread thread;
+        auto* sw = new RenderWorker();
+        sw->moveToThread(&thread);
+        thread.start();
+
+        int opened = 0;
+        QVector<int> finished;
+        int matchPagesSinceStart = 0;
+        QObject::connect(sw, &RenderWorker::opened, [&](int pages, QVector<QSize>) { opened = pages; });
+        QObject::connect(sw, &RenderWorker::searchStarted, [&] { matchPagesSinceStart = 0; });
+        QObject::connect(sw, &RenderWorker::pageMatches,
+                         [&](int, QVector<QRectF>) { ++matchPagesSinceStart; });
+        QObject::connect(sw, &RenderWorker::searchFinished, [&](int total) { finished << total; });
+        QMetaObject::invokeMethod(sw, "open", Qt::QueuedConnection, Q_ARG(QString, big));
+        pump(2000);
+        check(opened == 500, "500-page document opens for the search test");
+
+        // "page 7 -" occurs only on page 7's lines ("leht corpus - page 7 - ...").
+        QMetaObject::invokeMethod(sw, "search", Qt::QueuedConnection,
+                                  Q_ARG(QString, QStringLiteral("page 7 -")));
+        pump(8000);
+        check(finished.size() == 1 && matchPagesSinceStart == 1,
+              "baseline: 'page 7 -' matches on exactly one page");
+        const int expected = finished.isEmpty() ? -1 : finished.first();
+
+        finished.clear();
+        QMetaObject::invokeMethod(sw, "search", Qt::QueuedConnection,
+                                  Q_ARG(QString, QStringLiteral("quick")));
+        pump(100);
+        sw->cancelSearch();  // what MainWindow does before every new search
+        QMetaObject::invokeMethod(sw, "search", Qt::QueuedConnection,
+                                  Q_ARG(QString, QStringLiteral("page 7 -")));
+        pump(8000);
+        check(finished.size() == 1, "a cancelled search never reports finished");
+        check(!finished.isEmpty() && finished.last() == expected && matchPagesSinceStart == 1,
+              "the new search's results contain nothing from the cancelled one");
+
+        thread.quit();
+        thread.wait();
+        delete sw;
+    }
+
     // --- Process isolation (M3) -------------------------------------------
     // A standalone worker+thread, as for the password flow, so failures are
     // observed as signals rather than as modal message boxes.

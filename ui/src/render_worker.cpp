@@ -138,6 +138,17 @@ void RenderWorker::setGeneration(quint64 generation) {
     }
 }
 
+void RenderWorker::cancelSearch() {
+    const quint64 epoch = searchEpoch_.fetchAndAddOrdered(1) + 1;
+    if (auto proc = proc_.load()) {
+        try {
+            proc->channel().send(0, ipc::CancelSearch{epoch});
+        } catch (const std::exception&) {
+            // The worker has gone; this thread will notice on its next receive.
+        }
+    }
+}
+
 qint64 RenderWorker::workerPid() const {
     const auto proc = proc_.load();
     return proc ? proc->pid() : 0;
@@ -469,16 +480,21 @@ void RenderWorker::search(const QString& needle) {
     if (!proc_.load()) {
         return;
     }
+    const quint64 mine = searchEpoch_.loadAcquire();
+    const auto current = [&] { return searchEpoch_.loadAcquire() == mine; };
+    emit searchStarted();
     if (needle.isEmpty()) {
         emit searchFinished(0);
         return;
     }
-    if (!sendRequest(ipc::Search{needle.toStdString()})) {
+    if (!sendRequest(ipc::Search{needle.toStdString(), mine})) {
         (void)workerLost(Phase::Search, -1);
         emit searchFinished(0);
         return;
     }
 
+    // Read until SearchDone even once cancelled, so the stream stays in step;
+    // a cancelled search just stops emitting what it reads.
     int total = 0;
     for (;;) {
         auto reply = receive();
@@ -494,16 +510,20 @@ void RenderWorker::search(const QString& needle) {
                 break;
             }
             const ipc::PageMatches m = ipc::decode_as<ipc::PageMatches>(*reply);
-            const QVector<QRectF> boxes = toRects(m.quads);
-            total += static_cast<int>(boxes.size());
-            emit pageMatches(m.page, boxes);
+            if (current()) {
+                const QVector<QRectF> boxes = toRects(m.quads);
+                total += static_cast<int>(boxes.size());
+                emit pageMatches(m.page, boxes);
+            }
         } catch (const ipc::ProtocolError&) {
             distrust();
             (void)workerLost(Phase::Search, -1);
             break;
         }
     }
-    emit searchFinished(total);
+    if (current()) {
+        emit searchFinished(total);
+    }
 }
 
 void RenderWorker::selectRegion(int page, QPointF aBase, QPointF bBase, int mode) {

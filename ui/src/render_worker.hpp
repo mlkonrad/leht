@@ -57,6 +57,12 @@ public:
     /// it already has.
     void setGeneration(quint64 generation);
 
+    /// Called from the GUI thread before a new search, or when find is closed.
+    /// The running search (if any) stops emitting at once, never reports
+    /// searchFinished, and the worker abandons it at the next page -- so a
+    /// new search is not stuck behind an old one, nor are renders.
+    void cancelSearch();
+
     /// The current worker process id, or 0 if none is running. For
     /// diagnostics and tests; safe to call from any thread.
     [[nodiscard]] qint64 workerPid() const;
@@ -103,6 +109,10 @@ signals:
     void passwordRequired(bool retry);
     void failed(const QString& message);
     void rendered(int page, double zoom, int rotation, quint64 generation, QImage image);
+    /// A search is about to report. Emitted from this thread, so it reaches the
+    /// GUI after any matches an abandoned search had already sent: clearing
+    /// highlights on it can never leave an old search's matches on screen.
+    void searchStarted();
     void pageMatches(int page, QVector<QRectF> boxes);
     void searchFinished(int totalMatches);
     void selectionReady(int page, QVector<QRectF> boxes, QString text);
@@ -177,4 +187,5 @@ private:
 
     std::unique_ptr<leht::PageCache> cache_;
     QAtomicInteger<quint64> generation_ = 0;
+    QAtomicInteger<quint64> searchEpoch_ = 0;  ///< bumped by cancelSearch()
 };

@@ -79,7 +79,7 @@ bool is_known(std::uint16_t type) noexcept {
     switch (static_cast<MsgType>(type)) {
     case MsgType::Hello: case MsgType::Open: case MsgType::Authenticate:
     case MsgType::Render: case MsgType::Cancel: case MsgType::Search:
-    case MsgType::Select: case MsgType::Shutdown:
+    case MsgType::Select: case MsgType::Shutdown: case MsgType::CancelSearch:
     case MsgType::HelloAck: case MsgType::NeedsPassword: case MsgType::Opened:
     case MsgType::Outline: case MsgType::Rendered: case MsgType::RenderSkipped:
     case MsgType::PageMatches: case MsgType::SearchDone:
@@ -123,8 +123,19 @@ Render Render::decode(Reader& r) {
 void Cancel::encode(Writer& w) const { w.u64(generation); }
 Cancel Cancel::decode(Reader& r) { return {r.u64()}; }
 
-void Search::encode(Writer& w) const { w.str(needle); }
-Search Search::decode(Reader& r) { return {r.str(kMaxString)}; }
+void Search::encode(Writer& w) const {
+    w.str(needle);
+    w.u64(epoch);
+}
+Search Search::decode(Reader& r) {
+    Search m;
+    m.needle = r.str(kMaxString);
+    m.epoch = r.u64();
+    return m;
+}
+
+void CancelSearch::encode(Writer& w) const { w.u64(epoch); }
+CancelSearch CancelSearch::decode(Reader& r) { return {r.u64()}; }
 
 void Select::encode(Writer& w) const {
     w.i32(page);

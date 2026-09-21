@@ -27,7 +27,8 @@ namespace leht::worker {
 ///
 /// Two threads. The reader thread only receives frames: it queues requests,
 /// and handles Cancel immediately -- recording the newest generation and
-/// aborting an in-flight render older than it. The main thread (run()) pops
+/// aborting an in-flight render older than it -- as it does CancelSearch,
+/// which stops a running search at the next page. The main thread (run()) pops
 /// requests and does all MuPDF work, so the document is only ever touched by
 /// one thread, as core/ requires.
 class Session {
@@ -70,6 +71,7 @@ private:
     static constexpr std::uint64_t kNone = std::numeric_limits<std::uint64_t>::max();
     std::atomic<std::uint64_t> latest_generation_{0};
     std::atomic<std::uint64_t> in_flight_generation_{kNone};
+    std::atomic<std::uint64_t> search_cancel_epoch_{0};  ///< searches older than this stop
     std::unique_ptr<Cancel> cancel_;
 };
 

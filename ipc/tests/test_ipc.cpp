@@ -73,6 +73,9 @@ void test_round_trips() {
     CHECK(rejects<Open>(make_frame(1, Open{"../etc/passwd"}).payload));
     CHECK(round_trip(Authenticate{"s3cr\xc3\xa9t"}).password == "s3cr\xc3\xa9t");
     CHECK(round_trip(Cancel{42}).generation == 42);
+    CHECK(round_trip(CancelSearch{9}).epoch == 9);
+    const Search sr0 = round_trip(Search{"n", 4});
+    CHECK(sr0.needle == "n" && sr0.epoch == 4);
     CHECK(round_trip(Search{"needle"}).needle == "needle");
     CHECK(round_trip(NeedsPassword{true}).retry);
     CHECK(round_trip(SearchDone{17}).total == 17);

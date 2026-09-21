@@ -25,6 +25,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <utility>
 
 using namespace leht::ipc;
 
@@ -394,6 +395,49 @@ void sandbox_forbids_escape_routes() {
     }
 }
 
+/// Runs a search to completion, returning (pages with matches, SearchDone total).
+std::pair<int, std::uint32_t> drain_search(WorkerProcess& w, std::uint64_t id) {
+    int pages = 0;
+    for (;;) {
+        const Frame f = next(w);
+        CHECK(f.id == id);
+        if (f.type == MsgType::SearchDone) {
+            return {pages, decode_as<SearchDone>(f).total};
+        }
+        (void)decode_as<PageMatches>(f);
+        ++pages;
+    }
+}
+
+/// CancelSearch stops a long search between pages, and the stream still ends
+/// with a SearchDone so the viewer stays in step. A cancel that arrives before
+/// a search starts belongs to an earlier one and must not stop it.
+void search_can_be_cancelled() {
+    auto w = start();
+    (void)open_ok(*w, corpus("text_500p.pdf"));
+
+    w->channel().send(1, CancelSearch{1});  // cancels epoch 0 only
+    w->channel().send(2, Search{"quick", 1});
+    const auto full = drain_search(*w, 2);
+    CHECK(full.first == 500);               // "quick" is on every page
+
+    // Sent back to back, the cancel may reach the worker before the search has
+    // even started: it must still take effect.
+    w->channel().send(3, Search{"quick", 1});
+    w->channel().send(0, CancelSearch{2});
+    const auto cut = drain_search(*w, 3);
+    CHECK(cut.first < 500);
+    std::printf("      cancelled after %d of 500 pages\n", cut.first);
+
+    // A search newer than the cancel runs in full.
+    w->channel().send(4, Search{"quick", 2});
+    CHECK(drain_search(*w, 4).first == 500);
+
+    // The worker is fine afterwards.
+    w->channel().send(5, Render{0, 1.0F, 0, 1});
+    CHECK(next(*w).type == MsgType::Rendered);
+}
+
 void clean_shutdown() {
     auto w = start();
     w->channel().send(1, Shutdown{});
@@ -421,6 +465,7 @@ int main() {
     RUN(corpus_sweep_never_kills_the_worker);
     RUN(worker_is_sandboxed);
     RUN(sandbox_forbids_escape_routes);
+    RUN(search_can_be_cancelled);
     RUN(clean_shutdown);
     RUN(viewer_eof_ends_the_worker);
     return 0;

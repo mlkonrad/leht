@@ -58,6 +58,13 @@ void Session::reader_loop() {
                 }
                 continue;
             }
+            if (frame->type == MsgType::CancelSearch) {
+                const std::uint64_t epoch = decode_as<CancelSearch>(*frame).epoch;
+                std::uint64_t seen = search_cancel_epoch_.load();
+                while (seen < epoch && !search_cancel_epoch_.compare_exchange_weak(seen, epoch)) {
+                }
+                continue;
+            }
             const bool shutdown = frame->type == MsgType::Shutdown;
             {
                 const std::scoped_lock lock(mutex_);
@@ -270,10 +277,11 @@ void Session::on_search(std::uint64_t id, const Search& m) {
         channel_.send(id, Failed{"no document is open"});
         return;
     }
+    const auto cancelled = [&] { return m.epoch < search_cancel_epoch_.load(); };
     std::uint32_t total = 0;
     if (!m.needle.empty()) {
         const int pages = doc_->page_count();
-        for (int p = 0; p < pages; ++p) {
+        for (int p = 0; p < pages && !cancelled(); ++p) {
             PageMatches matches;
             matches.page = p;
             try {

@@ -37,6 +37,7 @@ void decode_frame(const Frame& f) {
     case MsgType::Search: (void)decode_as<Search>(f); break;
     case MsgType::Select: (void)decode_as<Select>(f); break;
     case MsgType::Shutdown: (void)decode_as<Shutdown>(f); break;
+    case MsgType::CancelSearch: (void)decode_as<CancelSearch>(f); break;
     case MsgType::HelloAck: (void)decode_as<HelloAck>(f); break;
     case MsgType::NeedsPassword: (void)decode_as<NeedsPassword>(f); break;
     case MsgType::Opened: (void)decode_as<Opened>(f); break;
