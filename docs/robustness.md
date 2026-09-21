@@ -13,8 +13,9 @@ behaves on hostile input, and what the plan is.
 | `memcpy` from a null pointer in `renderer.cpp` | **ours** | fixed |
 | Three leaked MuPDF object references in the ops layer | **ours** | fixed |
 | `pdf_save_document` leaks ~874 bytes per call | upstream | **live** |
+| Stack overflow on deep indirect-reference chains | upstream | **live** |
 
-Three of the five were ours. A robustness document that only catalogues other people's
+Three of the six were ours. A robustness document that only catalogues other people's
 defects is marketing, so they are written up here at the same length as the upstream ones.
 
 ## Upstream: MuPDF aborts on five bytes — resolved
@@ -129,21 +130,44 @@ merging four copies of one file without it costs four copies of their shared fon
 matter for the M2 viewer if a session performs many saves, and that is the point to
 revisit it, not now.
 
+## Upstream: stack overflow on deep reference chains — live
+
+A PDF whose objects form a long indirect-reference chain (4 -> 5 -> 6 -> ...)
+overflows the stack: `pdf_resolve_indirect` -> `pdf_cache_object` recurses once
+per link, and ~200,000 links (a ~10 MB file) exhaust a default 8 MB stack. Pure
+MuPDF crashes identically with no Leht code, and ASan on **1.28.4** reports a
+stack-overflow in `pdf_cache_object`, so it is live in current upstream.
+Details and a generator: [`../tests/crashes/README.md`](../tests/crashes/README.md).
+
+Lower severity than the others — a crash / DoS, not corruption, and it needs a
+multi-megabyte crafted file. But it is the sharpest case for process isolation,
+because there is **no in-process fix**: the recursion is MuPDF's and MuPDF
+exposes no depth limit for Leht to cap. This is exactly the situation the
+isolation direction exists for.
+
 ## Fuzzing coverage to date
 
 Against MuPDF 1.28.4, no defect has been found in Leht's own code by fuzzing:
 
 | Target | Driver | Executions | Result |
 |---|---|---|---|
-| `fuzz_open` | libFuzzer, coverage-guided | 587,754 | clean |
+| `fuzz_open` | libFuzzer, MuPDF instrumented | ~60,000 (6 jobs x 15 min) | clean |
+| `fuzz_open` | libFuzzer, wrapper-only coverage | 587,754 | clean |
 | `fuzz_open` | mutation driver | 64,000 | clean |
-| `fuzz_ops` | libFuzzer, coverage-guided | 56,285 | clean |
-| `fuzz_ops` | mutation driver | 15,000 | clean |
+| `fuzz_ops` | libFuzzer | 56,285 | clean |
+| `fuzz_ops` | mutation driver | 15,000+ | clean |
 
-Read that as "nothing found yet", not "nothing there". `fuzz_ops` runs at roughly 133
-executions per second against `fuzz_open`'s 3,892, because each input is written to a file
-and put through eight operations — so it has had far less exercise than the raw number
-suggests, on the more dangerous code.
+"Nothing found yet", not "nothing there". Two caveats matter:
+
+- Only the last `fuzz_open` runs could see *inside* MuPDF. Earlier runs built MuPDF
+  without coverage instrumentation, so libFuzzer got feedback only from Leht's thin
+  wrapper (382 counters) and mutated blindly through the parser. Rebuilding MuPDF with
+  `-fsanitize=fuzzer-no-link` raised that to 202,151 counters and coverage climbed from a
+  flat ~200 to ~7,500 — that is the run that actually exercised the parser.
+- The known crashes above were *not* found by fuzzing. `obj<<` came from the mutation
+  driver, and the stack overflow and the bombs came from hand-written adversarial inputs.
+  Structural pathologies — deep chains, huge declared dimensions — are hard for a byte
+  mutator to stumble onto, which is why targeted probing still earns its place.
 
 ## Direction: process isolation
 
@@ -179,8 +203,9 @@ rewrite.
 - [x] ~~Verify `obj<<` upstream~~ — fixed in 1.28.4; no report needed
 - [x] ~~Install `libasan`/`libubsan`~~ — done; the first run found four defects of ours
 - [x] ~~Install `clang` for coverage-guided libFuzzer~~ — done; 644,039 executions, clean
-- [ ] **Report the `pdf_save_document` leak to Artifex.** Live in current upstream, has a
-      pure-C reproducer, not yet sent.
+- [ ] **Report two live upstream bugs to Artifex** (bugs.ghostscript.com, MuPDF
+      component): the `pdf_save_document` leak (pure-C reproducer + patch ready) and the
+      indirect-reference-chain stack overflow (generator ready). Neither sent yet.
 - [ ] Install `llvm-symbolizer` (Fedora `llvm`) so LSan suppressions resolve under
       libFuzzer. Without it libFuzzer must run with `-detect_leaks=0`.
 - [ ] Give `fuzz_ops` far more time. At 133 executions per second it has had a fraction of

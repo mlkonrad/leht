@@ -217,3 +217,53 @@ four real defects in Leht:
 
 All four are invisible without sanitizers, and all four are in code that passed
 its functional tests.
+
+
+---
+
+## `mupdf_refchain_stackoverflow.py` — MuPDF stack overflow on deep reference chains
+
+A PDF whose objects form a long indirect-reference chain (object 4 -> 5 -> 6 ->
+...) crashes MuPDF with a stack overflow. `pdf_resolve_indirect` calls
+`pdf_cache_object`, which resolves the next reference, which recurses again —
+one frame per link. Around 200,000 links (a ~10 MB file) exhausts a default
+8 MB stack.
+
+```sh
+python3 mupdf_refchain_stackoverflow.py chain.pdf 200000
+leht compress chain.pdf -o /dev/null      # SIGSEGV
+```
+
+**Upstream, and unlike `obj<<` it is still live.** A pure-C program calling only
+`pdf_save_document` crashes identically, and an ASan build of MuPDF **1.28.4**
+(current upstream) reports:
+
+```
+ERROR: AddressSanitizer: stack-overflow
+    #0 pdf_cache_object
+    #1 pdf_resolve_indirect
+```
+
+No single object is deeply nested, so MuPDF's syntactic nesting cap (~128
+levels, which does stop deeply-nested arrays and dicts) does not apply — the
+depth is in the references.
+
+### Severity, honestly
+
+Lower than the earlier finds. It is a **stack overflow, i.e. a crash / denial of
+service**, not the heap corruption `obj<<` was, and it needs a crafted file of
+several megabytes rather than five bytes. Every recursive-descent PDF parser has
+had a bug of this shape; it is a known class.
+
+### What Leht can and cannot do
+
+Leht cannot fix this from `core/`: the recursion is inside MuPDF, and MuPDF
+exposes no depth limit to cap it. The only real defenses are (a) MuPDF growing an
+internal limit, and (b) **process isolation**, so a parser crash on a hostile
+file costs a worker process rather than the application. It is the strongest
+argument yet for the isolation direction in
+[../../docs/robustness.md](../../docs/robustness.md), because here there is no
+in-process fix available at all.
+
+Worth reporting to Artifex alongside the save leak. No artifact is committed —
+the triggering file is multi-megabyte — so the generator stands in for it.
