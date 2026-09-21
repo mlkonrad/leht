@@ -144,10 +144,35 @@ void damaged_file_does_not_crash() {
 
 }  // namespace
 
+/// page_size() takes a cheap path (page bounds) when no display list is
+/// cached and the list's bounds when one is. Both must agree with what
+/// render() produces, on every page, format, zoom and rotation -- a viewer
+/// lays out its scroll area from these before a single page is drawn.
+void page_size_matches_render_everywhere() {
+    Context ctx;
+    for (const char* name : {"text_10p.pdf", "outlined.pdf", "page.png", "scan.jpg",
+                             "wide.png"}) {
+        Document doc = Document::open(ctx, corpus(name));
+        for (int page = 0; page < doc.page_count(); ++page) {
+            for (const auto& [zoom, rot] : {std::pair{1.0F, 0}, std::pair{0.37F, 90},
+                                            std::pair{2.5F, 270}}) {
+                Renderer fresh{ctx, doc};  // nothing cached: the page-bounds path
+                const PageSize cold = fresh.page_size(page, zoom, rot);
+                const auto bmp = fresh.render(page, zoom, rot);
+                CHECK(bmp.has_value());
+                CHECK(cold.width == bmp->width && cold.height == bmp->height);
+                const PageSize warm = fresh.page_size(page, zoom, rot);  // cached list
+                CHECK(warm.width == cold.width && warm.height == cold.height);
+            }
+        }
+    }
+}
+
 int main() {
     RUN(renders_a_page_with_ink);
     RUN(zoom_scales_dimensions);
     RUN(page_size_matches_render);
+    RUN(page_size_matches_render_everywhere);
     RUN(rotation_swaps_axes);
     RUN(cancelled_render_returns_nullopt);
     RUN(display_list_cache_is_bounded);

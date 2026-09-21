@@ -100,8 +100,10 @@ public:
                                                int rotation = 0,
                                                Cancel* cancel = nullptr);
 
-    /// Pixel size of a page without rendering it. Cheap enough to call while
-    /// laying out scrollbars, and it warms the display-list cache.
+    /// Pixel size of a page without rendering it. Reads only the page's
+    /// dictionary, not its content, so sizing every page of a large document
+    /// is cheap enough to do on open. Always equal to the size render()
+    /// produces for the same zoom and rotation.
     [[nodiscard]] PageSize page_size(int page_index, float zoom,
                                      int rotation = 0);
 

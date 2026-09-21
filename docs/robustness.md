@@ -271,16 +271,21 @@ fast without spawning anything, while an edited copy gets a fresh chance.
 | | in-process | worker | overhead |
 |---|---|---|---|
 | open + first page, `text_10p` | 10.8 ms | 24.3 ms | +13.5 ms |
-| open + first page, `text_500p` | 193.0 ms | 207.3 ms | +14.3 ms |
-| uncached page turn (3.1 MB bitmap) | 1.2–1.9 ms | 4.4–4.7 ms | ~+3 ms |
+| open + first page, `text_500p` | 18.2 ms | 37.5 ms | +19.3 ms |
+| uncached page turn (3.1 MB bitmap) | ~5 ms | ~8.6 ms | ~+3.5 ms |
 | cached page turn | — | — | none: the cache lives in the viewer |
 
-The open overhead is almost all process start (~15 ms for spawn + handshake); the
+The open overhead is almost all process start (~15–17 ms for spawn + handshake); the
 per-page overhead is copying the bitmap across. Two tempting fixes were measured and
 dropped as noise: a pre-spawned spare worker (with a built-in warm-up page), and larger
 socket buffers. Shared-memory bitmap transport is the next lever if a target is ever missed.
-The 500-page cold open was already at 193 ms in-process because the viewer computes every
-page size up front — lazy sizes would win back far more than isolation costs.
+
+The 500-page open used to cost ~190–350 ms (load-dependent) before a single pixel,
+because `Renderer::page_size` built a full display list — interpreting every page's
+content — just to read its dimensions, and the viewer sizes every page on open. It now
+reads the page dictionary instead (`fz_bound_page`, identical bounds), and each page's
+content is parsed on its first render. Measured back to back under the same load:
+348 → 18 ms in-process, 367 → 38 ms through the worker.
 
 ### What is deliberately not isolated
 
@@ -320,5 +325,5 @@ public `core/` header (the API surface *is* the wire format), and one independen
 - [ ] Give `fuzz_ops` far more time. At 133 executions per second it has had a fraction of
       `fuzz_open`'s exercise, on the code that does more with attacker-shaped structure.
 - [x] ~~Decide when process isolation lands~~ — built in M3, straight after the viewer
-- [ ] Lazy page sizes in the viewer: a 500-page cold open spends ~190 ms sizing every page
-      before the first one is shown
+- [x] ~~Lazy page sizes~~ — `page_size` reads page bounds, not content; a 500-page open
+      went from ~350 ms to ~20 ms

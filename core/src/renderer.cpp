@@ -141,6 +141,13 @@ struct Renderer::Impl {
         lru.clear();
     }
 
+    /// The cached display list for `page`, or nullptr. Does not build one and
+    /// does not touch the LRU order.
+    fz_display_list* cached_list(int page) const {
+        const auto it = cache.find(page);
+        return it == cache.end() ? nullptr : it->second.first;
+    }
+
     /// Returns a borrowed display list for `page`, building and caching it on
     /// first use. Parsing is the expensive half of rendering, so a cached list
     /// is what makes re-rendering at a new zoom cheap.
@@ -197,14 +204,31 @@ Renderer& Renderer::operator=(Renderer&&) noexcept = default;
 
 PageSize Renderer::page_size(int page_index, float zoom, int rotation) {
     validate_zoom(zoom);
-    fz_display_list* list = impl_->list_for(page_index);
+    fz_context* ctx = impl_->ctx;
     const fz_matrix ctm = transform_for(zoom, rotation);
 
-    fz_irect bbox{};
-    guarded(impl_->ctx, [&](fz_context* g) {
-        const fz_rect bounds = fz_bound_display_list(g, list);
-        bbox = fz_round_rect(fz_transform_rect(bounds, ctm));
-    });
+    // A cached display list already knows its bounds. Otherwise ask the page
+    // itself: fz_bound_page reads only the page dictionary (MediaBox, CropBox,
+    // Rotate, UserUnit), where building a display list would interpret the
+    // whole content stream. The results are identical -- a list built from a
+    // page takes its bounds from fz_bound_page -- but a viewer sizing every
+    // page on open pays microseconds per page instead of a full parse.
+    fz_rect bounds{};
+    if (fz_display_list* list = impl_->cached_list(page_index)) {
+        guarded(ctx, [&](fz_context* g) { bounds = fz_bound_display_list(g, list); });
+    } else {
+        fz_page* raw = nullptr;
+        fz_document* d = impl_->doc;
+        guarded(ctx, [&](fz_context* g) { raw = fz_load_page(g, d, page_index); });
+        detail::Owned<fz_page, fz_drop_page> page{ctx, raw};
+        if (raw == nullptr) {
+            throw Error(0, "failed to load page " + std::to_string(page_index));
+        }
+        guarded(ctx, [&](fz_context* g) { bounds = fz_bound_page(g, raw); });
+    }
+
+    // Pure geometry: neither call can throw.
+    const fz_irect bbox = fz_round_rect(fz_transform_rect(bounds, ctm));
     return PageSize{bbox.x1 - bbox.x0, bbox.y1 - bbox.y0};
 }
 
