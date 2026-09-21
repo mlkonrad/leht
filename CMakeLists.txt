@@ -23,6 +23,10 @@ option(LEHT_BUILD_FUZZ   "Build the fuzz target"              ON)
 
 include(CompilerWarnings)
 
+if(LEHT_BUILD_TESTS)
+    enable_testing()
+endif()
+
 add_subdirectory(core)
 
 if(LEHT_BUILD_CLI)
@@ -38,7 +42,6 @@ if(LEHT_BUILD_FUZZ)
     add_subdirectory(fuzz)
 endif()
 if(LEHT_BUILD_TESTS)
-    enable_testing()
     add_subdirectory(core/tests)
 endif()
 
