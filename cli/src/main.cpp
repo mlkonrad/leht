@@ -15,6 +15,9 @@
 #include "leht/renderer.hpp"
 
 #include <array>
+#include <cerrno>
+#include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -79,12 +82,26 @@ struct Args {
         return it == flags.end() ? fallback : it->second;
     }
 
+    // Strict parsing. std::atoi and std::atof return 0 for anything they cannot
+    // read and ignore trailing junk, so `-d abc` used to rotate by 0 degrees and
+    // report success, and `-d 90xyz` silently meant 90. For a tool people put in
+    // scripts, a typo must be an error, not a quietly different command.
     [[nodiscard]] int int_flag(const std::string& name, int fallback) const {
         const auto it = flags.find(name);
         if (it == flags.end()) {
             return fallback;
         }
-        return std::atoi(it->second.c_str());
+        const std::string& text = it->second;
+        errno = 0;
+        char* end = nullptr;
+        const long value = std::strtol(text.c_str(), &end, 10);
+        if (text.empty() || end == text.c_str() || *end != '\0') {
+            throw leht::Error(0, name + " expects a whole number, got '" + text + "'");
+        }
+        if (errno == ERANGE || value < INT_MIN || value > INT_MAX) {
+            throw leht::Error(0, name + " is out of range: " + text);
+        }
+        return static_cast<int>(value);
     }
 
     [[nodiscard]] float float_flag(const std::string& name, float fallback) const {
@@ -92,7 +109,19 @@ struct Args {
         if (it == flags.end()) {
             return fallback;
         }
-        return static_cast<float>(std::atof(it->second.c_str()));
+        const std::string& text = it->second;
+        errno = 0;
+        char* end = nullptr;
+        const double value = std::strtod(text.c_str(), &end);
+        if (text.empty() || end == text.c_str() || *end != '\0') {
+            throw leht::Error(0, name + " expects a number, got '" + text + "'");
+        }
+        // strtod happily accepts "inf" and "nan"; neither is a meaningful value
+        // for any leht flag, and NaN in particular must never reach MuPDF.
+        if (errno == ERANGE || !std::isfinite(value)) {
+            throw leht::Error(0, name + " must be a finite number, got '" + text + "'");
+        }
+        return static_cast<float>(value);
     }
 };
 

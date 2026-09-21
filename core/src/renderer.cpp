@@ -8,6 +8,9 @@
 #include "mupdf_c.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <list>
@@ -25,6 +28,11 @@ namespace leht {
 // them inside the lambda would let the longjmp skip them.
 // ---------------------------------------------------------------------------
 namespace {
+
+/// 6400%, the ceiling most PDF viewers use. A whole US Letter page at this scale
+/// is already ~2 billion pixels, which MuPDF refuses anyway; the limit exists to
+/// fail early with a clear message rather than deep inside the allocator.
+constexpr float kMaxZoom = 64.0F;
 
 struct PixmapGuard {
     fz_context* ctx = nullptr;
@@ -51,6 +59,38 @@ struct DeviceGuard {
         }
     }
 };
+
+/// Rejects zoom values MuPDF cannot be trusted with.
+///
+/// NaN is the important case. fz_round_rect clamps coordinates with ordinary
+/// comparisons, and every comparison with NaN is false, so NaN passes straight
+/// through the clamp into a float-to-int conversion -- undefined behaviour in
+/// C. Infinity is clamped correctly but produces a meaningless error far from
+/// the cause. Both are caller mistakes, so they are rejected here, at the API
+/// boundary, with a message that names the actual problem.
+/// std::to_string prints floats as fixed-point with six decimals, which turns
+/// 1e30 into a 31-digit number in an error message. %g is compact and exact
+/// enough for a human. The format is a literal, so this is not the kind of
+/// snprintf that split() got wrong.
+std::string format_zoom(float zoom) {
+    std::array<char, 32> buf{};
+    std::snprintf(buf.data(), buf.size(), "%g", static_cast<double>(zoom));
+    return buf.data();
+}
+
+void validate_zoom(float zoom) {
+    if (!std::isfinite(zoom)) {
+        throw Error(0, "zoom must be a finite number");
+    }
+    if (zoom <= 0.0F) {
+        throw Error(0, "zoom must be greater than zero, got " +
+                           format_zoom(zoom));
+    }
+    if (zoom > kMaxZoom) {
+        throw Error(0, "zoom " + format_zoom(zoom) + " exceeds the maximum of " +
+                           format_zoom(kMaxZoom));
+    }
+}
 
 fz_matrix transform_for(float zoom, int rotation) {
     return fz_pre_rotate(fz_scale(zoom, zoom), static_cast<float>(rotation));
@@ -156,6 +196,7 @@ Renderer::Renderer(Renderer&&) noexcept = default;
 Renderer& Renderer::operator=(Renderer&&) noexcept = default;
 
 PageSize Renderer::page_size(int page_index, float zoom, int rotation) {
+    validate_zoom(zoom);
     fz_display_list* list = impl_->list_for(page_index);
     const fz_matrix ctm = transform_for(zoom, rotation);
 
@@ -169,6 +210,7 @@ PageSize Renderer::page_size(int page_index, float zoom, int rotation) {
 
 std::optional<Bitmap> Renderer::render(int page_index, float zoom, int rotation,
                                        Cancel* cancel) {
+    validate_zoom(zoom);
     fz_context* ctx = impl_->ctx;
     fz_display_list* list = impl_->list_for(page_index);
     const fz_matrix ctm = transform_for(zoom, rotation);

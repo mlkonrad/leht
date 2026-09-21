@@ -1,5 +1,14 @@
 # Plain-assert test executables driven by CTest. No framework dependency:
 # core/ has few enough seams that a test framework would cost more than it saves.
+# Sanitizer environment, shared by every test that runs Leht code -- the library
+# executables AND the CLI script. Kept in one variable so a new test cannot be
+# added without it, which is exactly the mistake that left cli_arguments red
+# under ASan: it saves with do_garbage=3 and hit the known upstream leak.
+set(LEHT_SANITIZER_ENV
+    "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tests/lsan.supp"
+    "ASAN_OPTIONS=fast_unwind_on_malloc=0"
+    "UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1")
+
 function(leht_add_test name)
     add_executable(${name} ${name}.cpp)
     target_link_libraries(${name} PRIVATE leht::core leht::warnings)
@@ -15,8 +24,7 @@ function(leht_add_test name)
     # unwinder produces stacks too shallow to reach the frame the suppressions
     # name, so every suppression silently fails to match. It costs speed.
     if(LEHT_SANITIZE)
-        set_tests_properties(${name} PROPERTIES ENVIRONMENT
-            "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tests/lsan.supp;ASAN_OPTIONS=fast_unwind_on_malloc=0;UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1")
+        set_tests_properties(${name} PROPERTIES ENVIRONMENT "${LEHT_SANITIZER_ENV}")
     endif()
 endfunction()
 
@@ -42,6 +50,10 @@ if(Python3_FOUND AND LEHT_BUILD_CLI)
                          $<TARGET_FILE:leht_cli>
                          ${CMAKE_SOURCE_DIR}/tests/corpus/${sample})
         set_tests_properties(crosscheck_${sample} PROPERTIES SKIP_RETURN_CODE 77)
+        if(LEHT_SANITIZE)
+            set_tests_properties(crosscheck_${sample} PROPERTIES
+                ENVIRONMENT "${LEHT_SANITIZER_ENV}")
+        endif()
     endforeach()
 endif()
 
@@ -56,4 +68,19 @@ endif()
 if(LEHT_BUILD_FUZZ)
     add_test(NAME fuzz_corpus_replay
              COMMAND leht_fuzz_open ${CMAKE_SOURCE_DIR}/tests/corpus 0)
+    if(LEHT_SANITIZE)
+        set_tests_properties(fuzz_corpus_replay PROPERTIES
+            ENVIRONMENT "${LEHT_SANITIZER_ENV}")
+    endif()
+endif()
+
+# CLI behaviour: argument parsing and exit codes. The library tests cannot see
+# these, which is how `leht rotate -d abc` came to succeed as a no-op.
+if(LEHT_BUILD_CLI)
+    add_test(NAME cli_arguments
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/cli_test.sh
+                     $<TARGET_FILE:leht_cli> ${CMAKE_SOURCE_DIR}/tests/corpus)
+    if(LEHT_SANITIZE)
+        set_tests_properties(cli_arguments PROPERTIES ENVIRONMENT "${LEHT_SANITIZER_ENV}")
+    endif()
 endif()

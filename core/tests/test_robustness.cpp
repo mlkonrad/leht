@@ -17,6 +17,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <fstream>
 #include <string>
 #include <utility>
@@ -143,26 +144,33 @@ void garbage_buffer_is_rejected() {
 
 // -- degenerate render parameters -------------------------------------------
 
-/// Zoom of zero or less collapses the page to nothing. MuPDF must reject it
-/// rather than allocate a zero or negative sized pixmap.
-void degenerate_zoom_does_not_crash() {
+/// Invalid zoom must be rejected at the API boundary, before MuPDF sees it.
+///
+/// This used to accept either a throw or a result. It now REQUIRES a throw:
+/// NaN in particular slips past MuPDF's coordinate clamp (every comparison with
+/// NaN is false) into a float-to-int conversion, which is undefined behaviour,
+/// and NaN also used to make render() "succeed" with an empty bitmap.
+void invalid_zoom_is_rejected() {
     Context ctx;
     Document doc = Document::open(ctx, corpus("text_10p.pdf"));
     Renderer renderer{ctx, doc};
 
-    for (const float zoom : {0.0F, -1.0F, -0.0001F}) {
-        try {
-            const auto bitmap = renderer.render(0, zoom);
-            // If it returns, the result must at least be self-consistent.
-            if (bitmap.has_value()) {
-                CHECK(bitmap->width >= 0);
-                CHECK(bitmap->height >= 0);
-            }
-        } catch (const leht::Error&) {
-            // Also fine.
-        }
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    for (const float zoom : {0.0F, -0.0F, -1.0F, -0.0001F, nan, inf, -inf,
+                             64.0001F, 1000.0F, 1e30F}) {
+        CHECK(throws_leht_error([&] { (void)renderer.render(0, zoom); }));
+        CHECK(throws_leht_error([&] { (void)renderer.page_size(0, zoom); }));
     }
-    CHECK(true);
+
+    // The boundary itself, and ordinary values, must still work.
+    for (const float zoom : {0.01F, 1.0F, 2.5F}) {
+        const auto bitmap = renderer.render(0, zoom);
+        CHECK(bitmap.has_value());
+        CHECK(bitmap->width > 0);
+    }
+    CHECK(renderer.page_size(0, 64.0F).width > 0);
 }
 
 /// Rotations that are not multiples of 90 are rejected by the ops layer, but
@@ -241,7 +249,7 @@ int main() {
     RUN(empty_file_is_rejected);
     RUN(empty_buffer_is_rejected);
     RUN(garbage_buffer_is_rejected);
-    RUN(degenerate_zoom_does_not_crash);
+    RUN(invalid_zoom_is_rejected);
     RUN(odd_rotations_do_not_crash);
     RUN(out_of_range_page_is_rejected);
     RUN(moved_from_context_is_rejected);
