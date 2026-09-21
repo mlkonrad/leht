@@ -18,7 +18,8 @@ known, weighed cost of the model, not an oversight.
 | Component | Licence | Role |
 |---|---|---|
 | **MuPDF** | AGPL-3.0 (Artifex; commercial licence also sold) | Everything: render, text, merge, compress, linearise, AES-256, annotations, redaction, forms, PKCS#12 signing |
-| **Qt6** | LGPL-3.0, dynamically linked | UI toolkit (M2, not yet started) |
+| **Qt6** | LGPL-3.0, dynamically linked | UI toolkit for the viewer |
+| **libseccomp** | LGPL-2.1-only, dynamically linked | Builds the seccomp-bpf filter that sandboxes `leht-worker` (M3) |
 | **Tesseract** | Apache-2.0 | OCR, later phase |
 
 **qpdf was removed from the build.** MuPDF 1.28 covers the structure work it was brought in
@@ -27,7 +28,7 @@ collection, de-duplication, linearisation and AES-256. The qpdf and Ghostscript
 *command-line* tools are used at test time only and are not linked, not shipped, and not
 runtime dependencies, so their licences do not enter the chain.
 
-AGPL-3.0 + LGPL-3.0 (dynamic) + Apache-2.0 → **the app ships AGPL-3.0**. Compatible and
+AGPL-3.0 + LGPL-3.0 and LGPL-2.1 (both dynamic) + Apache-2.0 → **the app ships AGPL-3.0**. Compatible and
 consistent, and simpler than it was: one copyleft library, not two.
 
 Artifex's terms are strict and worth stating plainly: link MuPDF into your software and

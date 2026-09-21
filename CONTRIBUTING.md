@@ -2,15 +2,17 @@
 
 ## Set up
 
-Build dependencies — CMake 3.28+, Ninja, a C++20 compiler and MuPDF. That is the whole
-list; `core/` links no second PDF library. Qt6 arrives with the GUI in M2:
+Build dependencies — CMake 3.28+, Ninja, a C++20 compiler, MuPDF, and libseccomp for
+`leht-worker`, the sandboxed process the viewer parses documents in. That is the whole
+list; `core/` links no second PDF library. A CLI-only build can drop libseccomp with
+`-DLEHT_BUILD_WORKER=OFF`.
 
 ```sh
 # Fedora
-sudo dnf install gcc-c++ cmake ninja-build mupdf-devel
+sudo dnf install gcc-c++ cmake ninja-build mupdf-devel libseccomp-devel
 ```
 
-Building the GUI (`-DLEHT_BUILD_UI=ON`, M2) additionally needs **`qt6-qtbase-devel`**. The
+Building the viewer (`-DLEHT_BUILD_UI=ON`) additionally needs **`qt6-qtbase-devel`**. The
 runtime `qt6-qtbase-gui` package is not enough — without the `-devel` package there is no
 `Qt6Config.cmake` and `ui/` cannot be configured at all.
 
