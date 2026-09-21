@@ -194,7 +194,7 @@ controls:
 | `fuzz_open` | mutation driver | 64,000 | clean |
 | `fuzz_ops` | libFuzzer | 56,285 | clean |
 | `fuzz_ops` | mutation driver | 15,000+ | clean |
-| `fuzz_ops` | libFuzzer, MuPDF instrumented, ASan/UBSan | 14,302 (4 jobs x 30 min, 4,032 edges) | one timeout → quadratic page lookup (upstream); an encrypt-path leak under investigation |
+| `fuzz_ops` | libFuzzer, MuPDF instrumented, ASan/UBSan | 14,302 (4 jobs x 30 min, 4,032 edges) | one timeout → quadratic page lookup (upstream); no memory errors |
 | `fuzz_ipc` | libFuzzer + ASan/UBSan | 6,751,008 (4 jobs x 15 min) | clean |
 | `fuzz_ipc` | mutation driver + ASan/UBSan | 200,000 | clean |
 
@@ -349,6 +349,12 @@ public `core/` header (the API surface *is* the wire format), and one independen
       generator ready). None sent yet.
 - [ ] Install `llvm-symbolizer` (Fedora `llvm`) so LSan suppressions resolve under
       libFuzzer. Without it libFuzzer must run with `-detect_leaks=0`.
+- [ ] Run libFuzzer with `LSAN_OPTIONS=suppressions=tests/lsan.supp`. Without it the
+      known save leak is reported at exit together with everything it holds: the
+      2026-09-22 run showed 150 reports per job, and every *direct* one was
+      `renumberobj`; the rest (the new `/Encrypt` dictionary among them) were indirect,
+      reachable only through those. Re-running the whole corpus through `encrypt` with
+      suppressions on found nothing.
 - [ ] Give `fuzz_ops` far more time. The 2026-09-22 run (30 min, instrumented MuPDF) ran at
       ~1 exec/s on the 500-page seed and still found a timeout; trim the seed corpus to
       small files so it explores faster.
