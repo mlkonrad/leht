@@ -2,9 +2,12 @@
 add_executable(leht_worker
     src/main.cpp
     src/session.cpp
+    src/sandbox.cpp
 )
 set_target_properties(leht_worker PROPERTIES OUTPUT_NAME leht-worker)
-target_link_libraries(leht_worker PRIVATE leht::core leht::ipc leht::warnings)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SECCOMP REQUIRED IMPORTED_TARGET libseccomp)
+target_link_libraries(leht_worker PRIVATE leht::core leht::ipc leht::warnings PkgConfig::SECCOMP)
 
 include(GNUInstallDirs)
 install(TARGETS leht_worker RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/leht)
@@ -21,4 +24,15 @@ if(LEHT_BUILD_TESTS)
     if(LEHT_SANITIZE)
         set_tests_properties(test_worker PROPERTIES ENVIRONMENT "${LEHT_SANITIZER_ENV}")
     endif()
+
+    # Each selftest installs the sandbox, then tries one thing it must forbid.
+    # Pass means death by SIGSYS (exit status 128+31 from the shell). A normal
+    # exit, even a failing one, means the action was allowed. Sanitizer builds
+    # run the worker unsandboxed and report 77, which CTest shows as skipped.
+    foreach(what open socket exec fork mmap-exec)
+        add_test(NAME worker_sandbox_denies_${what}
+            COMMAND sh -c "\"$0\" --selftest-sandbox=${what}; rc=$?; [ $rc -eq 77 ] && exit 77; [ $rc -eq 159 ]"
+                    $<TARGET_FILE:leht_worker>)
+        set_tests_properties(worker_sandbox_denies_${what} PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
 endif()

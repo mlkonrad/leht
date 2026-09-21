@@ -14,9 +14,13 @@
 #include "test_harness.hpp"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <cstdlib>
 #include <vector>
 #include <memory>
@@ -294,6 +298,102 @@ void crash_is_contained() {
     CHECK(open_ok(*fresh, corpus("text_10p.pdf")).base_sizes.size() == 10);
 }
 
+/// Every corpus file -- including the decompression bombs and the image
+/// formats -- through one sandboxed worker: open, render, search, select. None
+/// of it may kill the worker. A seccomp rule missing for some code path shows
+/// up here as a death (SIGSYS), which is why the sweep is broad rather than
+/// clever.
+void corpus_sweep_never_kills_the_worker() {
+    auto w = start();
+    std::uint64_t id = 1;
+    int files = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(LEHT_CORPUS_DIR)) {
+        if (!entry.is_regular_file() || entry.path().extension() == ".sh") {
+            continue;
+        }
+        ++files;
+        const Frame first = open(*w, entry.path().string(), id++);
+        std::size_t pages = 0;
+        if (first.type == MsgType::NeedsPassword) {
+            w->channel().send(id++, Authenticate{"s3cret"});
+            pages = decode_as<Opened>(next(*w)).base_sizes.size();
+        } else if (first.type == MsgType::Opened) {
+            pages = decode_as<Opened>(first).base_sizes.size();
+        } else {
+            CHECK(first.type == MsgType::Failed);
+            continue;
+        }
+        (void)decode_as<Outline>(next(*w));
+        for (int p = 0; p < static_cast<int>(std::min<std::size_t>(pages, 3)); ++p) {
+            w->channel().send(id++, Render{p, 1.0F, 0, 1});
+            const MsgType t = next(*w).type;
+            CHECK(t == MsgType::Rendered || t == MsgType::RenderSkipped);
+        }
+        w->channel().send(id++, Search{"the"});
+        for (;;) {
+            const MsgType t = next(*w).type;
+            if (t == MsgType::SearchDone || t == MsgType::Failed) {
+                break;
+            }
+            CHECK(t == MsgType::PageMatches);
+        }
+        Select s;
+        s.bx = 500;
+        s.by = 500;
+        w->channel().send(id++, s);
+        const MsgType t = next(*w).type;
+        CHECK(t == MsgType::SelectionResult || t == MsgType::Failed);
+    }
+    CHECK(files >= 10);
+    CHECK(!w->try_wait().has_value());  // still alive after all of it
+}
+
+/// Confirms the worker really is under seccomp: the kernel reports mode 2
+/// (filter) for it. Skipped in sanitizer builds, which run it unsandboxed.
+void worker_is_sandboxed() {
+#if defined(__SANITIZE_ADDRESS__)
+    std::printf("      SKIP sanitizer build runs the worker unsandboxed\n");
+#else
+    auto w = start();
+    std::ifstream status("/proc/" + std::to_string(w->pid()) + "/status");
+    std::string line;
+    bool seccomp = false;
+    while (std::getline(status, line)) {
+        if (line.rfind("Seccomp:", 0) == 0) {
+            seccomp = line.find('2') != std::string::npos;
+        }
+    }
+    CHECK(seccomp);
+
+    // The namespaces are best effort (unprivileged user namespaces can be
+    // disabled by policy), so report rather than require them.
+    const auto ns = [](const std::string& pid) {
+        return std::filesystem::read_symlink("/proc/" + pid + "/ns/net").string();
+    };
+    const bool isolated = ns("self") != ns(std::to_string(w->pid()));
+    std::printf("      network namespace: %s\n", isolated ? "isolated" : "shared (userns unavailable)");
+#endif
+}
+
+/// Each thing the sandbox exists to stop, attempted for real after lockdown.
+/// The worker must die of SIGSYS; returning at all means the policy leaked.
+void sandbox_forbids_escape_routes() {
+    for (const char* what : {"open", "socket", "exec", "fork", "mmap-exec"}) {
+        auto w = WorkerProcess::spawn(LEHT_WORKER_EXE,
+                                      {std::string("--selftest-sandbox=") + what});
+        const auto status = w->wait_for(std::chrono::seconds(10));
+        CHECK(status.has_value());
+        if (!status->signaled && status->code == 77) {
+            std::printf("      SKIP sandbox selftests: sanitizer build\n");
+            return;
+        }
+        if (!(status->signaled && status->code == SIGSYS)) {
+            std::fprintf(stderr, "sandbox selftest '%s' did not die of SIGSYS\n", what);
+        }
+        CHECK(status->signaled && status->code == SIGSYS);
+    }
+}
+
 void clean_shutdown() {
     auto w = start();
     w->channel().send(1, Shutdown{});
@@ -318,6 +418,9 @@ int main() {
     RUN(password_flow);
     RUN(stale_and_bad_requests_are_answered);
     RUN(crash_is_contained);
+    RUN(corpus_sweep_never_kills_the_worker);
+    RUN(worker_is_sandboxed);
+    RUN(sandbox_forbids_escape_routes);
     RUN(clean_shutdown);
     RUN(viewer_eof_ends_the_worker);
     return 0;
