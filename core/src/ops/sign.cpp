@@ -835,9 +835,10 @@ int add_signature_stamp(const Context& ctx, Document& doc, int page, const Rect&
         *annot.slot() = pdf_create_annot(g, p, PDF_ANNOT_STAMP);
         pdf_set_annot_rect(g, annot.get(), box);
         pdf_set_annot_icon_name(g, annot.get(), "LehtSignatureMark");
+        // Short enough to survive the CLI's truncated annotation listing: the
+        // one thing a reader must see about this mark is what it is not.
         pdf_set_annot_contents(g, annot.get(),
-                               "Signature mark. This is a picture, not a digital signature: "
-                               "it does not show who made it.");
+                               "A picture, not a digital signature.");
         pdf_set_annot_appearance_from_display_list(g, annot.get(), "N", nullptr, fz_identity,
                                                    list.get());
         pdf_update_annot(g, annot.get());

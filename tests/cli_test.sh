@@ -140,6 +140,71 @@ else
 fi
 expect 0 "form on a file without one"      form "$IN"
 
+
+# Signing and verification. The PKI is made here and thrown away with $OUT; the
+# deeper crypto tests live in crypto/tests. Skipped without openssl(1).
+if command -v openssl >/dev/null 2>&1; then
+    openssl req -x509 -newkey rsa:2048 -keyout "$OUT/ca.key" -out "$OUT/ca.pem" -days 2 \
+        -nodes -subj "/C=EE/O=Leht CLI test/CN=Test Root" >/dev/null 2>&1
+    openssl req -newkey rsa:2048 -keyout "$OUT/s.key" -out "$OUT/s.csr" -nodes \
+        -subj "/C=EE/CN=Test Signer" >/dev/null 2>&1
+    openssl x509 -req -in "$OUT/s.csr" -CA "$OUT/ca.pem" -CAkey "$OUT/ca.key" \
+        -out "$OUT/s.pem" -days 1 >/dev/null 2>&1
+    openssl pkcs12 -export -out "$OUT/id.p12" -inkey "$OUT/s.key" -in "$OUT/s.pem" \
+        -certfile "$OUT/ca.pem" -passout pass:secret >/dev/null 2>&1
+    printf 'secret\n' > "$OUT/pw"
+    printf 'wrong\n' > "$OUT/badpw"
+
+    expect 1 "sign without --p12"            sign "$IN" -o "$OUT/sig.pdf"
+    expect 1 "sign with the wrong password"  sign "$IN" -o "$OUT/sig.pdf" --p12 "$OUT/id.p12" --password-fd 0 < "$OUT/badpw"
+    expect 1 "sign with a missing key file"  sign "$IN" -o "$OUT/sig.pdf" --p12 "$OUT/nope.p12" --password-fd 0 < "$OUT/pw"
+    expect 1 "sign --image without a box"    sign "$IN" -o "$OUT/sig.pdf" --p12 "$OUT/id.p12" --image "$CORPUS/page.png" --password-fd 0 < "$OUT/pw"
+    [[ -e "$OUT/sig.pdf" ]] && { echo "FAIL  a refused sign still wrote output"; failures=$((failures + 1)); }
+
+    expect 0 "sign, invisible"               sign "$IN" -o "$OUT/sig.pdf" --p12 "$OUT/id.p12" --password-fd 0 < "$OUT/pw"
+    expect 1 "sign refuses to overwrite its input" sign "$OUT/sig.pdf" -o "$OUT/sig.pdf" --p12 "$OUT/id.p12" --password-fd 0 < "$OUT/pw"
+    # An untrusted signer is not a broken signature, and says so with its own code.
+    expect 5 "verify: intact but untrusted"  verify "$OUT/sig.pdf"
+    grep -q "intact" "$OUT/stdout" || { echo "FAIL  verify did not report an intact signature"; failures=$((failures + 1)); }
+    expect 0 "verify --trust: trusted"       verify "$OUT/sig.pdf" --trust "$OUT/ca.pem"
+    expect 0 "verify --json"                 verify "$OUT/sig.pdf" --trust "$OUT/ca.pem" --json
+    grep -q '"intact":true' "$OUT/stdout" || { echo "FAIL  verify --json missing intact"; failures=$((failures + 1)); }
+    expect 0 "verify a file with no signatures" verify "$IN"
+    grep -q "no signatures" "$OUT/stdout" || { echo "FAIL  verify was not quiet about an unsigned file"; failures=$((failures + 1)); }
+
+    # The signed file keeps the original bytes: an incremental update.
+    head -c "$(stat -c%s "$IN")" "$OUT/sig.pdf" | cmp -s - "$IN" || {
+        echo "FAIL  signing did not keep the original bytes"; failures=$((failures + 1)); }
+
+    # A second signature, and a visible one at that, leaves the first valid.
+    expect 0 "sign again, visible"           sign "$OUT/sig.pdf" -o "$OUT/sig2.pdf" --p12 "$OUT/id.p12" --box "1:300,650,560,740" --reason Approved --password-fd 0 < "$OUT/pw"
+    expect 0 "verify two signatures"         verify "$OUT/sig2.pdf" --trust "$OUT/ca.pem"
+    [[ "$(grep -c 'intact' "$OUT/stdout")" == 2 ]] || { echo "FAIL  both signatures should be intact"; failures=$((failures + 1)); }
+
+    # Editing a signed document after the fact: the signature survives, but the
+    # change is reported, and the exit code says so.
+    expect 0 "annotate a signed document"    annotate "$OUT/sig2.pdf" --note "1:60,60:later" -o "$OUT/sig3.pdf"
+    expect 6 "verify: changed after signing" verify "$OUT/sig3.pdf" --trust "$OUT/ca.pem"
+    grep -q "CHANGED" "$OUT/stdout" || { echo "FAIL  verify did not report the later change"; failures=$((failures + 1)); }
+
+    # A flipped byte inside the signed range breaks it.
+    cp "$OUT/sig.pdf" "$OUT/bad.pdf"
+    printf 'X' | dd of="$OUT/bad.pdf" bs=1 seek=300 conv=notrunc status=none
+    expect 4 "verify: broken signature"      verify "$OUT/bad.pdf" --trust "$OUT/ca.pem"
+
+    # Redacting a signed file warns that it breaks the signatures.
+    expect 0 "redact a signed document"      redact "$OUT/sig.pdf" --rect "1:72,100,300,120" -o "$OUT/sigredact.pdf"
+    grep -q "signature" "$OUT/stderr" || { echo "FAIL  redact did not warn about signatures"; failures=$((failures + 1)); }
+else
+    echo "  skip  signing (openssl not installed)"
+fi
+
+# A picture stamp is not a signature, and the file says so.
+expect 1 "--stamp-image without a box"     annotate "$IN" --stamp-image "1:$CORPUS/page.png" -o "$OUT/st.pdf"
+expect 0 "--stamp-image"                   annotate "$IN" --stamp-image "1:$CORPUS/page.png:100,100,300,180" -o "$OUT/st.pdf"
+expect 0 "the stamp is listed"             annots "$OUT/st.pdf"
+grep -q "not a digital signature" "$OUT/stdout" || { echo "FAIL  the image stamp does not say what it is"; failures=$((failures + 1)); }
+
 # Valid invocations still succeed.
 expect 0 "rotate -d 90"                    rotate "$IN" -d 90 -o "$OUT/r.pdf"
 expect 0 "rotate -d -90"                   rotate "$IN" -d -90 -o "$OUT/r.pdf"

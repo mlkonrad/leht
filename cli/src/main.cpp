@@ -17,9 +17,16 @@
 #include "leht/ops/merge.hpp"
 #include "leht/ops/pages.hpp"
 #include "leht/ops/redact.hpp"
+#include "leht/ops/sign.hpp"
 #include "leht/ops/watermark.hpp"
 #include "leht/text.hpp"
 #include "leht/renderer.hpp"
+#include "leht/crypto/crypto.hpp"
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -28,7 +35,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <filesystem>
+#include <iostream>
 #include <map>
 #include <string>
 #include <vector>
@@ -68,6 +78,12 @@ constexpr const char* kUsage =
     "  form      FILE                         list form fields and their values\n"
     "  fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]\n"
     "            fill form fields; never runs the document's JavaScript\n"
+    "  sign      FILE -o OUT.pdf --p12 ID.p12 [--field NAME | --box P:X0,Y0,X1,Y1]\n"
+    "            [--image IMG] [--name N] [--reason R] [--location L] [--tsa URL]\n"
+    "            sign with a PKCS#12 key (PAdES); the original bytes are kept and\n"
+    "            the signature appended, so earlier signatures stay valid\n"
+    "  verify    FILE [--trust CA.pem]... [--json]\n"
+    "            check every signature: exits 4 broken, 5 untrusted, 6 changed after\n"
     "\n"
     "options:\n"
     "  -o PATH        output file or pattern\n"
@@ -96,6 +112,19 @@ constexpr const char* kUsage =
     "  --flatten      bake fields into the page so they can no longer be edited\n"
     "  --stamp P:NAME[:BOX]  a stamp: Approved, Draft, Confidential, Final,\n"
     "                 NotApproved, ForComment, TopSecret, ...; top-right by default\n"
+    "  --stamp-image P:IMG:BOX  a picture stamped on page P -- a scanned signature,\n"
+    "                 say. It is a picture, not a digital signature; use sign for that\n"
+    "  --p12 FILE     PKCS#12 (.p12/.pfx) holding the signing key and certificate\n"
+    "  --password-fd N  read its password from this descriptor, one line. Without\n"
+    "                 it, leht asks on the terminal. NEVER pass a password as an\n"
+    "                 argument: /proc shows it to every process on the machine\n"
+    "  --field NAME   sign this existing, empty signature field\n"
+    "  --box P:BOX    place a new visible signature here; otherwise it is invisible\n"
+    "  --image IMG    a picture for the signature to show (PNG or JPEG)\n"
+    "  --tsa URL      timestamp the signature with this RFC 3161 authority (B-T)\n"
+    "  --trust FILE   also trust the certificates in this PEM file, on top of the\n"
+    "                 system's\n"
+    "  --json         verify: machine-readable output\n"
     "\n"
     "leht is free software under the AGPL-3.0-or-later.\n";
 
@@ -183,7 +212,9 @@ bool takes_value(const std::string& name) {
         "--method", "--user-pw", "--owner-pw", "--password", "--search",
         "--text", "--rect", "--images", "--box", "--margins", "--opacity",
         "--angle", "--size", "--color", "--highlight", "--underline", "--strike",
-        "--note", "--stamp", "--delete", "--author"};
+        "--note", "--stamp", "--delete", "--author",
+        "--p12", "--password-fd", "--field", "--image", "--name", "--reason",
+        "--location", "--tsa", "--trust", "--stamp-image"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -716,6 +747,371 @@ int cmd_annots(const leht::Context& ctx, const Args& args) {
     return 0;
 }
 
+// --- signing -------------------------------------------------------------
+
+/// Exit codes for `verify`, so a script can tell apart the three ways a
+/// signature can fail to mean what a reader hopes it means.
+constexpr int kExitBroken = 4;     ///< a signature does not verify
+constexpr int kExitUntrusted = 5;  ///< it verifies, but the signer is not trusted
+constexpr int kExitChanged = 6;    ///< it verifies and is trusted, but the file grew after it
+
+std::vector<std::uint8_t> read_bytes(const std::string& path, std::size_t limit) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) {
+        throw leht::Error(0, "cannot read " + path + ": " + std::strerror(errno));
+    }
+    std::vector<std::uint8_t> out;
+    std::array<std::uint8_t, 65536> buf{};
+    std::size_t n = 0;
+    while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0) {
+        out.insert(out.end(), buf.begin(), buf.begin() + static_cast<long>(n));
+        if (out.size() > limit) {
+            std::fclose(f);
+            throw leht::Error(0, path + " is larger than this command expects");
+        }
+    }
+    std::fclose(f);
+    return out;
+}
+
+/// The PKCS#12 password. NEVER from the command line: an argument is visible
+/// in /proc to every process on the machine, and lands in shell history.
+/// From --password-fd when given (one line), else prompted on the terminal
+/// with echo off, else read from stdin when that is a pipe.
+leht::crypto::Secret read_password(const Args& args) {
+    std::string line;
+    const std::string fd_flag = args.flag("--password-fd");
+    int fd = -1;
+    if (!fd_flag.empty()) {
+        fd = args.int_flag("--password-fd", -1);
+        if (fd < 0) {
+            throw leht::Error(0, "--password-fd expects a file descriptor number");
+        }
+    } else if (::isatty(STDIN_FILENO) == 0) {
+        fd = STDIN_FILENO;
+    }
+    if (fd >= 0) {
+        char ch = 0;
+        ssize_t got = 0;
+        while ((got = ::read(fd, &ch, 1)) == 1 && ch != '\n') {
+            line.push_back(ch);
+            if (line.size() > 1024) {
+                break;
+            }
+        }
+        if (got < 0) {
+            throw leht::Error(0, std::string("cannot read the password: ") + std::strerror(errno));
+        }
+        return leht::crypto::Secret{std::move(line)};
+    }
+
+    termios old{};
+    const bool tty = ::tcgetattr(STDIN_FILENO, &old) == 0;
+    if (tty) {
+        termios quiet = old;
+        quiet.c_lflag &= static_cast<tcflag_t>(~ECHO);
+        (void)::tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet);
+    }
+    std::fputs("PKCS#12 password: ", stderr);
+    std::getline(std::cin, line);
+    if (tty) {
+        (void)::tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
+        std::fputs("\n", stderr);
+    }
+    return leht::crypto::Secret{std::move(line)};
+}
+
+std::string trust_word(leht::crypto::Trust t) {
+    switch (t) {
+        case leht::crypto::Trust::Trusted:     return "trusted";
+        case leht::crypto::Trust::Untrusted:   return "not trusted";
+        case leht::crypto::Trust::Expired:     return "certificate expired";
+        case leht::crypto::Trust::NotYetValid: return "certificate not yet valid";
+        case leht::crypto::Trust::Unknown:     return "not checked";
+    }
+    return "not checked";
+}
+
+std::string local_time(std::int64_t t) {
+    const auto tt = static_cast<std::time_t>(t);
+    std::tm tm{};
+    gmtime_r(&tt, &tm);
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm);
+    return buf;
+}
+
+/// JSON string escaping, enough for the fields verify --json prints.
+std::string json_string(const std::string& s) {
+    std::string out = "\"";
+    for (const char raw : s) {
+        const auto ch = static_cast<unsigned char>(raw);
+        switch (ch) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    char esc[8];
+                    std::snprintf(esc, sizeof(esc), "\\u%04x", ch);
+                    out += esc;
+                } else {
+                    out += static_cast<char>(ch);
+                }
+        }
+    }
+    return out + "\"";
+}
+
+leht::ops::Appearance appearance_from(const Args& args) {
+    leht::ops::Appearance a;
+    const std::string image = args.flag("--image");
+    if (!image.empty()) {
+        // 64 MB: a signature graphic is a photograph at worst.
+        a.image = read_bytes(image, std::size_t{64} << 20);
+    }
+    return a;
+}
+
+int cmd_sign(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+    const std::string p12_path = args.flag("--p12");
+    if (p12_path.empty()) {
+        throw leht::Error(0, "sign needs --p12 ID.p12 (the signing key and certificate)");
+    }
+    std::error_code ec;
+    if (fs::exists(output, ec) && fs::equivalent(input, output, ec)) {
+        throw leht::Error(0, "sign will not write over its input; give -o another path");
+    }
+
+    leht::ops::SignatureRequest request;
+    request.field = args.flag("--field");
+    request.name = args.flag("--name");
+    request.reason = args.flag("--reason");
+    request.location = args.flag("--location");
+    request.appearance = appearance_from(args);
+    const std::string box = args.flag("--box");
+    const bool invisible = args.has_switch("--invisible") || (box.empty() && request.field.empty());
+    if (!box.empty()) {
+        if (!request.field.empty()) {
+            throw leht::Error(0, "--box places a new signature; --field signs an existing one");
+        }
+        const auto [page, rect] = parse_rect(box);
+        request.page = page;
+        request.rect = rect;
+    }
+    if (invisible && !args.flag("--image").empty()) {
+        throw leht::Error(0, "--image needs somewhere to be drawn: add --box PAGE:X0,Y0,X1,Y1");
+    }
+
+    leht::crypto::SignOptions options;
+    options.tsa_url = args.flag("--tsa");
+
+    // The key and its password never leave this process.
+    const leht::crypto::Identity identity = leht::crypto::Identity::from_pkcs12(
+        read_bytes(p12_path, std::size_t{16} << 20), read_password(args));
+    const leht::crypto::CertInfo cert = identity.certificate();
+    if (request.name.empty()) {
+        request.name = cert.common_name;
+    }
+    request.reserve = leht::crypto::estimate_signature_size(identity, options);
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    if (doc.needs_password()) {
+        throw leht::Error(0, "document is encrypted; decrypt it first");
+    }
+    if (!doc.can_save_incrementally()) {
+        // A repaired file has no revision to append to, so there is nothing a
+        // signature could keep intact. Rewrite it once, then sign that.
+        std::fprintf(stderr, "leht: note: this file had to be repaired when opened, so it is "
+                             "rewritten in full before signing\n");
+        doc.save(output, leht::SaveOptions{leht::SaveOptions::Mode::Full});
+        doc = leht::Document::open(ctx, output);
+    }
+
+    // Write beside the target, then rename: the same atomic save the rest of
+    // leht does, with the signature filled in before the file appears.
+    const fs::path target{output};
+    const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path{"."};
+    std::string temp = (dir / ("." + target.filename().string() + ".leht-XXXXXX")).string();
+    const int fd = ::mkostemp(temp.data(), O_CLOEXEC);
+    if (fd < 0) {
+        throw leht::Error(0, "cannot create a file beside " + output + ": " +
+                                 std::strerror(errno));
+    }
+    leht::crypto::SignResult result;
+    std::string field;
+    try {
+        const auto prepared = leht::ops::prepare_signature(ctx, doc, request, fd);
+        field = prepared.field;
+        result = leht::crypto::sign_prepared(fd, prepared.range, identity, options);
+        // mkstemp creates 0600; give the signed file what a new file would get.
+        // umask(2) can only be read by setting it, which is safe here: the CLI
+        // is single-threaded and creates nothing else meanwhile.
+        const mode_t mask = ::umask(022);
+        (void)::umask(mask);
+        (void)::fchmod(fd, 0666 & ~mask);
+        if (::fsync(fd) != 0) {
+            throw leht::Error(0, std::string("cannot flush the signed file: ") +
+                                     std::strerror(errno));
+        }
+    } catch (...) {
+        ::close(fd);
+        ::unlink(temp.c_str());
+        throw;
+    }
+    ::close(fd);
+    if (::rename(temp.c_str(), output.c_str()) != 0) {
+        const int err = errno;
+        ::unlink(temp.c_str());
+        throw leht::Error(0, "cannot write " + output + ": " + std::strerror(err));
+    }
+
+    std::printf("signed %s -> %s\n", input.c_str(), output.c_str());
+    std::printf("  signer:    %s\n", cert.subject.c_str());
+    std::printf("  field:     %s (%s)\n", field.c_str(),
+                invisible ? "invisible" : "visible");
+    std::printf("  digest:    %s, %zu bytes of signature in a %zu byte slot\n",
+                result.digest.c_str(), result.der_size, result.hole_size);
+    if (result.timestamp) {
+        std::printf("  timestamp: %s (%s)\n", local_time(*result.timestamp).c_str(),
+                    options.tsa_url.c_str());
+    } else {
+        std::printf("  timestamp: none (PAdES B-B). --tsa URL adds one, which is what\n"
+                    "             proves the signature existed before the certificate expired\n");
+    }
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    if (cert.not_after != 0 && cert.not_after < now) {
+        std::fprintf(stderr, "leht: warning: the signing certificate expired on %s\n",
+                     local_time(cert.not_after).c_str());
+    }
+    return 0;
+}
+
+int cmd_verify(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const bool json = args.has_switch("--json");
+
+    leht::crypto::TrustStore trust = leht::crypto::TrustStore::system();
+    for (const std::string& path : args.values("--trust")) {
+        const auto bytes = read_bytes(path, std::size_t{16} << 20);
+        trust.add_pem(std::string(bytes.begin(), bytes.end()));
+    }
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    if (doc.needs_password()) {
+        throw leht::Error(0, "document is encrypted; decrypt it first");
+    }
+    const auto signatures = leht::ops::list_signatures(ctx, doc);
+    if (signatures.empty()) {
+        if (json) {
+            std::printf("{\"file\":%s,\"signatures\":[]}\n", json_string(input).c_str());
+        } else {
+            std::printf("%s: no signatures\n", input.c_str());
+        }
+        return 0;
+    }
+
+    int worst = 0;
+    std::string rows;
+    for (std::size_t i = 0; i < signatures.size(); ++i) {
+        const leht::ops::SignatureInfo& s = signatures[i];
+        leht::crypto::CmsReport r;
+        if (s.range_ok) {
+            r = leht::crypto::verify_cms(s.contents, leht::ops::signed_bytes(ctx, doc, s.range),
+                                         trust);
+        }
+        const bool intact = s.range_ok && r.intact();
+        const bool trusted = intact && r.trust == leht::crypto::Trust::Trusted;
+        const bool changed = s.changed_after_signing && !s.later_signature_covers_changes;
+        if (!intact) {
+            worst = std::max(worst, kExitBroken);
+        } else if (!trusted) {
+            worst = std::max(worst, kExitUntrusted);
+        } else if (changed) {
+            worst = std::max(worst, kExitChanged);
+        }
+
+        if (json) {
+            std::string row = "{\"field\":" + json_string(s.field) +
+                              ",\"intact\":" + (intact ? "true" : "false") +
+                              ",\"trust\":" + json_string(intact ? trust_word(r.trust) : "not checked") +
+                              ",\"signer\":" + json_string(r.signer.subject) +
+                              ",\"subfilter\":" + json_string(s.subfilter) +
+                              ",\"digest\":" + json_string(r.digest) +
+                              ",\"claimed_time\":" + json_string(s.claimed_time) +
+                              ",\"changed_after_signing\":" + (s.changed_after_signing ? "true" : "false") +
+                              ",\"later_signature_covers_changes\":" +
+                              (s.later_signature_covers_changes ? "true" : "false") +
+                              ",\"page\":" + std::to_string(s.page + 1);
+            if (r.timestamp) {
+                row += ",\"timestamp\":{\"valid\":" + std::string(r.timestamp->valid ? "true" : "false") +
+                       ",\"time\":" + std::to_string(r.timestamp->time) +
+                       ",\"authority\":" + json_string(r.timestamp->authority.subject) +
+                       ",\"trust\":" + json_string(trust_word(r.timestamp->trust)) + "}";
+            }
+            const std::string problem = !s.range_ok ? s.range_problem : r.problem;
+            if (!problem.empty()) {
+                row += ",\"problem\":" + json_string(problem);
+            }
+            rows += (rows.empty() ? "" : ",") + row + "}";
+            continue;
+        }
+
+        std::printf("%s: signature %zu of %zu (field %s%s)\n", input.c_str(), i + 1,
+                    signatures.size(), s.field.c_str(),
+                    s.page >= 0 ? (", page " + std::to_string(s.page + 1)).c_str() : ", invisible");
+        if (!s.range_ok) {
+            std::printf("  %-10s %s\n", "BROKEN", s.range_problem.c_str());
+            continue;
+        }
+        std::printf("  %-10s %s\n", intact ? "intact" : "BROKEN",
+                    intact ? "the signed bytes are exactly what was signed"
+                           : r.problem.c_str());
+        std::printf("  %-10s %s\n", "signer", r.signer.subject.c_str());
+        std::printf("  %-10s %s%s%s\n", "trust", trust_word(r.trust).c_str(),
+                    r.trust_detail.empty() ? "" : ": ", r.trust_detail.c_str());
+        std::printf("  %-10s %s, %s\n", "algorithm", r.digest.c_str(), s.subfilter.c_str());
+        if (!s.claimed_time.empty()) {
+            std::printf("  %-10s %s (the signer's own clock)\n", "claimed",
+                        s.claimed_time.c_str());
+        }
+        if (r.timestamp) {
+            std::printf("  %-10s %s %s, by %s (%s)\n", "timestamp",
+                        r.timestamp->valid ? "verified" : "NOT VALID:",
+                        r.timestamp->valid ? local_time(r.timestamp->time).c_str()
+                                           : r.timestamp->problem.c_str(),
+                        r.timestamp->authority.common_name.c_str(),
+                        trust_word(r.timestamp->trust).c_str());
+        } else if (intact) {
+            std::printf("  %-10s none: nothing proves when this was signed\n", "timestamp");
+        }
+        if (!s.name.empty() || !s.reason.empty() || !s.location.empty()) {
+            std::printf("  %-10s %s%s%s%s%s\n", "says", s.name.c_str(),
+                        s.reason.empty() ? "" : " -- ", s.reason.c_str(),
+                        s.location.empty() ? "" : " -- ", s.location.c_str());
+        }
+        if (s.changed_after_signing) {
+            std::printf("  %-10s the document was added to after this was signed%s\n", "CHANGED",
+                        s.later_signature_covers_changes
+                            ? "; a later signature covers those bytes too"
+                            : "");
+        }
+        if (!r.problem.empty() && intact) {
+            std::printf("  %-10s %s\n", "note", r.problem.c_str());
+        }
+    }
+    if (json) {
+        std::printf("{\"file\":%s,\"signatures\":[%s]}\n", json_string(input).c_str(),
+                    rows.c_str());
+    }
+    return worst;
+}
+
+
 /// Splits "P:REST" into a 0-based page and REST.
 std::pair<int, std::string> page_prefix(const std::string& spec, const char* flag) {
     const std::size_t colon = spec.find(':');
@@ -776,6 +1172,29 @@ int cmd_annotate(const leht::Context& ctx, const Args& args) {
     for (const std::string& spec : args.values("--stamp")) {
         stamps.push_back(page_prefix(spec, "--stamp"));
     }
+    // --stamp-image PAGE:PATH:X0,Y0,X1,Y1. The box is split off at the LAST
+    // colon, so a path may contain one.
+    struct ImageStamp {
+        int page;
+        std::string path;
+        leht::Rect rect;
+    };
+    std::vector<ImageStamp> image_stamps;
+    for (const std::string& spec : args.values("--stamp-image")) {
+        const auto [page, rest] = page_prefix(spec, "--stamp-image");
+        const std::size_t colon = rest.rfind(':');
+        float v[4];
+        if (colon == std::string::npos ||
+            !parse_floats(rest.c_str() + colon + 1, 4, v)) {
+            throw leht::Error(0, "--stamp-image expects PAGE:IMAGE:X0,Y0,X1,Y1, got '" +
+                                     spec + "'");
+        }
+        const leht::Rect rect{v[0], v[1], v[2], v[3]};
+        if (rect.empty()) {
+            throw leht::Error(0, "--stamp-image box encloses nothing: '" + spec + "'");
+        }
+        image_stamps.push_back({page, rest.substr(0, colon), rect});
+    }
     std::vector<leht::ops::AnnotId> deletes;
     for (const std::string& id : args.values("--delete")) {
         char* end = nullptr;
@@ -786,9 +1205,10 @@ int cmd_annotate(const leht::Context& ctx, const Args& args) {
         }
         deletes.push_back(static_cast<int>(value));
     }
-    if (marks.empty() && adds.empty() && stamps.empty() && deletes.empty()) {
+    if (marks.empty() && adds.empty() && stamps.empty() && deletes.empty() &&
+        image_stamps.empty()) {
         throw leht::Error(0, "annotate needs --highlight, --underline, --strike, --note, "
-                             "--stamp or --delete");
+                             "--stamp, --stamp-image or --delete");
     }
 
     leht::Document doc = leht::Document::open(ctx, input);
@@ -827,6 +1247,12 @@ int cmd_annotate(const leht::Context& ctx, const Args& args) {
         ++deleted;
     }
     int added = 0;
+    for (const ImageStamp& stamp : image_stamps) {
+        leht::ops::Appearance a;
+        a.image = read_bytes(stamp.path, std::size_t{64} << 20);
+        (void)leht::ops::add_signature_stamp(ctx, doc, stamp.page, stamp.rect, a);
+        ++added;
+    }
     for (const auto& [page, spec] : adds) {
         (void)leht::ops::add_annotation(ctx, doc, page, spec);
         ++added;
@@ -954,6 +1380,8 @@ int main(int argc, char** argv) {
         if (cmd == "annotate") { return cmd_annotate(ctx, args); }
         if (cmd == "form")     { return cmd_form(ctx, args); }
         if (cmd == "fill")     { return cmd_fill(ctx, args); }
+        if (cmd == "sign")     { return cmd_sign(ctx, args); }
+        if (cmd == "verify")   { return cmd_verify(ctx, args); }
 
         std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
         std::fputs(kUsage, stderr);
