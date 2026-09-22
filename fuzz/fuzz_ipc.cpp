@@ -48,6 +48,14 @@ void decode_frame(const Frame& f) {
     case MsgType::SearchDone: (void)decode_as<SearchDone>(f); break;
     case MsgType::SelectionResult: (void)decode_as<SelectionResult>(f); break;
     case MsgType::Failed: (void)decode_as<Failed>(f); break;
+    case MsgType::Edit: (void)decode_as<Edit>(f); break;
+    case MsgType::Save: (void)decode_as<Save>(f); break;
+    case MsgType::ListAnnots: (void)decode_as<ListAnnots>(f); break;
+    case MsgType::ListFields: (void)decode_as<ListFields>(f); break;
+    case MsgType::Edited: (void)decode_as<Edited>(f); break;
+    case MsgType::Saved: (void)decode_as<Saved>(f); break;
+    case MsgType::AnnotList: (void)decode_as<AnnotList>(f); break;
+    case MsgType::FieldList: (void)decode_as<FieldList>(f); break;
     }
 }
 

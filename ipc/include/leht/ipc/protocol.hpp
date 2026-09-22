@@ -13,7 +13,12 @@
 // exactly the bytes it carries. The receiving side can then use a decoded
 // message without re-checking it.
 
+#include "leht/edit.hpp"
 #include "leht/ipc/wire.hpp"
+#include "leht/ops/annotate.hpp"
+#include "leht/ops/crop.hpp"
+#include "leht/ops/forms.hpp"
+#include "leht/ops/watermark.hpp"
 #include "leht/renderer.hpp"
 #include "leht/text.hpp"
 
@@ -25,7 +30,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 2;  // 2: CancelSearch
+inline constexpr std::uint32_t kProtocolVersion = 3;  // 2: CancelSearch; 3: editing
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -46,6 +51,10 @@ enum class MsgType : std::uint16_t {
     Select = 7,
     Shutdown = 8,
     CancelSearch = 9,
+    Edit = 10,
+    Save = 11,         ///< carries the output file's fd via SCM_RIGHTS
+    ListAnnots = 12,
+    ListFields = 13,
 
     // worker -> viewer
     HelloAck = 100,
@@ -58,7 +67,15 @@ enum class MsgType : std::uint16_t {
     SearchDone = 107,
     SelectionResult = 108,
     Failed = 109,
+    Edited = 110,
+    Saved = 111,
+    AnnotList = 112,
+    FieldList = 113,
 };
+
+/// Whether a frame of `type` may carry a file descriptor: only the two that
+/// hand the worker a file to read (Open) or to write (Save).
+[[nodiscard]] bool takes_fd(MsgType type) noexcept;
 
 /// True for every value in MsgType. Frames with any other type are rejected
 /// before their payload is read.
@@ -138,6 +155,59 @@ struct CancelSearch {
     std::uint64_t epoch = 0;
     void encode(Writer& w) const;
     static CancelSearch decode(Reader& r);
+};
+
+/// One editing operation, applied to the open document. `kind` selects which
+/// of the fields below are meaningful; the rest are left at their defaults
+/// and not sent. Coordinates are base coordinates (see leht::Rect).
+///
+/// The viewer keeps every Edit it has sent since the last save: undo reopens
+/// the file and replays all but the last, and a respawned worker gets the
+/// whole list. So an Edit must mean the same thing every time it is applied.
+struct Edit {
+    static constexpr MsgType kType = MsgType::Edit;
+    enum class Kind : std::uint8_t {
+        Redact = 1,       ///< page, rects
+        RedactText = 2,   ///< text: the needle, over the whole document
+        AddAnnot = 3,     ///< page, annot
+        DeleteAnnot = 4,  ///< annot_id
+        SetField = 5,     ///< name, text: the value
+        Watermark = 6,    ///< pages, watermark
+        CropMargins = 7,  ///< pages, margins
+    };
+    Kind kind = Kind::Redact;
+    int page = 0;
+    std::vector<Rect> rects;
+    std::string text;
+    std::string name;
+    std::string pages;  ///< a page-range spec; empty means all
+    ops::AnnotSpec annot;
+    int annot_id = 0;
+    ops::WatermarkOptions watermark;
+    ops::Margins margins;
+    void encode(Writer& w) const;
+    static Edit decode(Reader& r);
+};
+
+/// Writes the document, with every edit applied, into the frame's attached
+/// fd (a fresh temporary file the viewer created). The viewer makes it
+/// durable and renames it into place.
+struct Save {
+    static constexpr MsgType kType = MsgType::Save;
+    void encode(Writer&) const {}
+    static Save decode(Reader&) { return {}; }
+};
+
+struct ListAnnots {
+    static constexpr MsgType kType = MsgType::ListAnnots;
+    void encode(Writer&) const {}
+    static ListAnnots decode(Reader&) { return {}; }
+};
+
+struct ListFields {
+    static constexpr MsgType kType = MsgType::ListFields;
+    void encode(Writer&) const {}
+    static ListFields decode(Reader&) { return {}; }
 };
 
 struct Shutdown {
@@ -242,6 +312,42 @@ struct Failed {
     std::string message;
     void encode(Writer& w) const;
     static Failed decode(Reader& r);
+};
+
+/// An edit was applied. The viewer drops its rendered images of the pages
+/// named (every page, if `all_pages`), and takes `base_sizes` as the new page
+/// sizes: a crop changes them.
+struct Edited {
+    static constexpr MsgType kType = MsgType::Edited;
+    bool all_pages = false;
+    std::vector<int> pages;
+    std::vector<PageSize> base_sizes;
+    int annot_id = 0;  ///< AddAnnot: the new annotation's id
+    /// RedactText: where the text still appears (see ops::RedactResult).
+    std::vector<std::string> remaining;
+    void encode(Writer& w) const;
+    static Edited decode(Reader& r);
+};
+
+struct Saved {
+    static constexpr MsgType kType = MsgType::Saved;
+    std::uint64_t bytes = 0;
+    void encode(Writer& w) const;
+    static Saved decode(Reader& r);
+};
+
+struct AnnotList {
+    static constexpr MsgType kType = MsgType::AnnotList;
+    std::vector<ops::AnnotInfo> items;
+    void encode(Writer& w) const;
+    static AnnotList decode(Reader& r);
+};
+
+struct FieldList {
+    static constexpr MsgType kType = MsgType::FieldList;
+    std::vector<ops::FieldInfo> items;
+    void encode(Writer& w) const;
+    static FieldList decode(Reader& r);
 };
 
 }  // namespace leht::ipc

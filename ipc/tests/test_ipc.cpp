@@ -123,6 +123,158 @@ void test_round_trips() {
     CHECK(rs.page == 8 && rs.generation == 5);
 }
 
+Edit sample_annot_edit() {
+    Edit e;
+    e.kind = Edit::Kind::AddAnnot;
+    e.page = 3;
+    e.annot.kind = leht::ops::AnnotKind::Ink;
+    e.annot.rect = {1, 2, 3, 4};
+    e.annot.strokes = {{{1, 2}, {3, 4}}, {{5, 6}}};
+    e.annot.contents = "note";
+    e.annot.author = "me";
+    e.annot.color[1] = 0.5F;
+    e.annot.opacity = 0.75F;
+    e.annot.stamp = "Approved";
+    return e;
+}
+
+Edited sample_edited() {
+    Edited e;
+    e.pages = {0, 4};
+    e.base_sizes = {{612, 792}, {300, 400}};
+    e.annot_id = 42;
+    e.remaining = {"document metadata (Title)"};
+    return e;
+}
+
+FieldList sample_fields() {
+    leht::ops::FieldInfo f;
+    f.name = "address.street";
+    f.type = leht::ops::FieldType::Choice;
+    f.value = "fi";
+    f.options = {"Estonia", "Finland"};
+    f.page = 2;
+    f.rect = {10, 20, 30, 40};
+    f.read_only = true;
+    f.max_length = 12;
+    return FieldList{{f}};
+}
+
+void test_edit_messages_round_trip() {
+    Edit redact;
+    redact.kind = Edit::Kind::Redact;
+    redact.page = 1;
+    redact.rects = {{1, 2, 3, 4}, {5, 6, 7, 8}};
+    const Edit r2 = round_trip(redact);
+    CHECK(r2.kind == Edit::Kind::Redact && r2.page == 1 && r2.rects.size() == 2 &&
+          r2.rects[1].y1 == 8.0F);
+
+    const Edit a = round_trip(sample_annot_edit());
+    CHECK(a.kind == Edit::Kind::AddAnnot && a.page == 3);
+    CHECK(a.annot.kind == leht::ops::AnnotKind::Ink && a.annot.strokes.size() == 2 &&
+          a.annot.strokes[0][1].y == 4.0F && a.annot.contents == "note" &&
+          a.annot.author == "me" && a.annot.color[1] == 0.5F && a.annot.opacity == 0.75F &&
+          a.annot.stamp == "Approved");
+
+    Edit field;
+    field.kind = Edit::Kind::SetField;
+    field.name = "name";
+    field.text = "Marlon";
+    const Edit f2 = round_trip(field);
+    CHECK(f2.name == "name" && f2.text == "Marlon");
+
+    Edit wm;
+    wm.kind = Edit::Kind::Watermark;
+    wm.pages = "1-3";
+    wm.watermark.text = "DRAFT";
+    wm.watermark.angle = -30;
+    wm.watermark.under = true;
+    const Edit w2 = round_trip(wm);
+    CHECK(w2.pages == "1-3" && w2.watermark.text == "DRAFT" && w2.watermark.angle == -30.0F &&
+          w2.watermark.under);
+
+    Edit crop;
+    crop.kind = Edit::Kind::CropMargins;
+    crop.margins = {1, 2, 3, 4};
+    CHECK(round_trip(crop).margins.bottom == 4.0F);
+
+    Edit del;
+    del.kind = Edit::Kind::DeleteAnnot;
+    del.annot_id = 17;
+    CHECK(round_trip(del).annot_id == 17);
+
+    Edit text;
+    text.kind = Edit::Kind::RedactText;
+    text.text = "secret";
+    CHECK(round_trip(text).text == "secret");
+
+    const Edited e = round_trip(sample_edited());
+    CHECK(!e.all_pages && e.pages == std::vector<int>({0, 4}) && e.base_sizes.size() == 2 &&
+          e.base_sizes[1].height == 400 && e.annot_id == 42 && e.remaining.size() == 1);
+
+    CHECK(round_trip(Saved{123456}).bytes == 123456);
+
+    leht::ops::AnnotInfo info{7, 1, "Highlight", {1, 2, 3, 4}, "c", "a"};
+    const AnnotList al = round_trip(AnnotList{{info}});
+    CHECK(al.items.size() == 1 && al.items[0].id == 7 && al.items[0].type == "Highlight" &&
+          al.items[0].rect.x1 == 3.0F && al.items[0].author == "a");
+
+    const FieldList fl = round_trip(sample_fields());
+    CHECK(fl.items.size() == 1 && fl.items[0].name == "address.street" &&
+          fl.items[0].type == leht::ops::FieldType::Choice && fl.items[0].options.size() == 2 &&
+          fl.items[0].read_only && fl.items[0].max_length == 12);
+}
+
+/// Every prefix of `msg`'s payload, and one trailing byte, must be refused.
+template <typename Msg>
+void check_truncations(const Msg& msg) {
+    const auto full = make_frame(1, msg).payload;
+    for (std::size_t n = 0; n < full.size(); ++n) {
+        const std::vector<std::uint8_t> cut(full.begin(),
+                                            full.begin() + static_cast<std::ptrdiff_t>(n));
+        CHECK(rejects<Msg>(cut));
+    }
+    auto trailing = full;
+    trailing.push_back(0);
+    CHECK(rejects<Msg>(trailing));
+}
+
+void test_edit_messages_reject_hostile_input() {
+    // What the worker sends back is what a compromised worker controls.
+    check_truncations(sample_edited());
+    check_truncations(sample_fields());
+    check_truncations(AnnotList{{leht::ops::AnnotInfo{7, 1, "Ink", {}, "", ""}}});
+    check_truncations(sample_annot_edit());
+
+    Edited neg = sample_edited();
+    neg.annot_id = -1;
+    CHECK(rejects<Edited>(make_frame(1, neg).payload));
+    Edited bad_page = sample_edited();
+    bad_page.pages = {-3};
+    CHECK(rejects<Edited>(make_frame(1, bad_page).payload));
+    Edited huge = sample_edited();
+    huge.base_sizes = {{100000, 10}};
+    CHECK(rejects<Edited>(make_frame(1, huge).payload));
+
+    CHECK(rejects<AnnotList>(make_frame(1, AnnotList{{leht::ops::AnnotInfo{0, 1, "X", {}, "", ""}}})
+                                 .payload));
+
+    FieldList bad_type = sample_fields();
+    auto payload = make_frame(1, bad_type).payload;
+    // The type byte follows the u32 count and the name (u32 length + bytes).
+    const std::size_t type_at = 4 + 4 + bad_type.items[0].name.size();
+    payload[type_at] = 99;
+    CHECK(rejects<FieldList>(payload));
+
+    Edit bad_kind = sample_annot_edit();
+    auto ep = make_frame(1, bad_kind).payload;
+    ep[0] = 42;
+    CHECK(rejects<Edit>(ep));
+    Edit bad_colour = sample_annot_edit();
+    bad_colour.annot.color[0] = 2.0F;
+    CHECK(rejects<Edit>(make_frame(1, bad_colour).payload));
+}
+
 void test_every_truncation_is_rejected() {
     const auto full = make_frame(1, sample_rendered()).payload;
     for (std::size_t n = 0; n < full.size(); ++n) {
@@ -318,7 +470,16 @@ void test_unwanted_fds_are_rejected() {
         CHECK(threw);
     }
     {
-        // Even where fds are allowed, only Open may carry one.
+        // Save carries one too: the output file.
+        auto [a, b] = socket_pair();
+        Channel tx(std::move(a), false);
+        Channel rx(std::move(b), /*accept_fds=*/true);
+        tx.send(1, Save{}, rd.get());
+        auto f = rx.recv();
+        CHECK(f && f->type == MsgType::Save && f->fd);
+    }
+    {
+        // Even where fds are allowed, only Open and Save may carry one.
         auto [a, b] = socket_pair();
         Channel tx(std::move(a), false);
         Channel rx(std::move(b), /*accept_fds=*/true);
@@ -375,6 +536,8 @@ void test_recv_timeout() {
 
 int main() {
     RUN(test_round_trips);
+    RUN(test_edit_messages_round_trip);
+    RUN(test_edit_messages_reject_hostile_input);
     RUN(test_every_truncation_is_rejected);
     RUN(test_lying_bitmaps_are_rejected);
     RUN(test_semantic_limits);

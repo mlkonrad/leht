@@ -241,8 +241,8 @@ std::optional<Frame> Channel::recv_until(Deadline deadline) {
     if (length > 0) {
         read_exact(f.payload.data(), length, fd, /*eof_ok=*/false, deadline);
     }
-    // Only Open legitimately carries a descriptor.
-    if (fd && f.type != MsgType::Open) {
+    // Only Open and Save legitimately carry a descriptor.
+    if (fd && !takes_fd(f.type)) {
         throw ProtocolError("file descriptor attached to a message that takes none");
     }
     f.fd = std::move(fd);
