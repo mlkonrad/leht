@@ -10,10 +10,12 @@
 #include "leht/edit.hpp"
 #include "leht/error.hpp"
 #include "leht/ops/compress.hpp"
+#include "leht/ops/crop.hpp"
 #include "leht/ops/encrypt.hpp"
 #include "leht/ops/merge.hpp"
 #include "leht/ops/pages.hpp"
 #include "leht/ops/redact.hpp"
+#include "leht/ops/watermark.hpp"
 #include "leht/text.hpp"
 #include "leht/renderer.hpp"
 
@@ -53,6 +55,10 @@ constexpr const char* kUsage =
     "  redact    FILE -o OUT.pdf [--text TERM] [--rect P:X0,Y0,X1,Y1]... [-p RANGES]\n"
     "            remove text, images and drawing for good, not just cover them;\n"
     "            exits 3 if TERM still appears somewhere it could not remove\n"
+    "  crop      FILE -o OUT.pdf (--box X0,Y0,X1,Y1 | --margins N[,T,R,B]) [-p RANGES]\n"
+    "            hides, does not remove: the rest of the page stays in the file\n"
+    "  watermark FILE -o OUT.pdf --text TEXT [-p RANGES] [--opacity F] [--angle DEG]\n"
+    "            [--size PT] [--color RRGGBB] [--under]\n"
     "\n"
     "options:\n"
     "  -o PATH        output file or pattern\n"
@@ -71,6 +77,12 @@ constexpr const char* kUsage =
     "  --images M     pixels | remove | keep: what happens to an image under a\n"
     "                 box (default pixels: black out only the covered part)\n"
     "  --no-boxes     leave removed areas blank instead of drawing black boxes\n"
+    "  --box BOX      crop to this box: points from the page's top-left\n"
+    "  --margins M    trim M points from every edge, or LEFT,TOP,RIGHT,BOTTOM\n"
+    "  --opacity F    watermark opacity, above 0 up to 1 (default 0.15)\n"
+    "  --angle DEG    watermark angle, counter-clockwise (default 45)\n"
+    "  --size PT      watermark font size; 0 fits the page (default 0)\n"
+    "  --under        draw the watermark beneath the page content\n"
     "\n"
     "leht is free software under the AGPL-3.0-or-later.\n";
 
@@ -156,7 +168,8 @@ bool takes_value(const std::string& name) {
     static const std::vector<std::string> kValued{
         "-o", "-p", "-z", "-n", "-d", "-q", "--preset",
         "--method", "--user-pw", "--owner-pw", "--password", "--search",
-        "--text", "--rect", "--images"};
+        "--text", "--rect", "--images", "--box", "--margins", "--opacity",
+        "--angle", "--size", "--color"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -443,6 +456,20 @@ int cmd_decrypt(const leht::Context& ctx, const Args& args) {
     return 0;
 }
 
+/// Parses exactly `n` comma-separated finite numbers, or returns false.
+bool parse_floats(const char* p, int n, float* out) {
+    for (int i = 0; i < n; ++i) {
+        char* end = nullptr;
+        const double d = std::strtod(p, &end);
+        if (end == p || !std::isfinite(d) || *end != (i < n - 1 ? ',' : '\0')) {
+            return false;
+        }
+        out[i] = static_cast<float>(d);
+        p = end + 1;
+    }
+    return true;
+}
+
 /// Parses "P:X0,Y0,X1,Y1" (1-based page, points from the top-left).
 std::pair<int, leht::Rect> parse_rect(const std::string& spec) {
     const auto fail = [&]() -> std::pair<int, leht::Rect> {
@@ -459,14 +486,8 @@ std::pair<int, leht::Rect> parse_rect(const std::string& spec) {
         return fail();
     }
     float v[4];
-    const char* p = spec.c_str() + colon + 1;
-    for (int i = 0; i < 4; ++i) {
-        const double d = std::strtod(p, &end);
-        if (end == p || !std::isfinite(d) || *end != (i < 3 ? ',' : '\0')) {
-            return fail();
-        }
-        v[i] = static_cast<float>(d);
-        p = end + 1;
+    if (!parse_floats(spec.c_str() + colon + 1, 4, v)) {
+        return fail();
     }
     const leht::Rect r{v[0], v[1], v[2], v[3]};
     if (r.empty()) {
@@ -564,6 +585,81 @@ int cmd_redact(const leht::Context& ctx, const Args& args) {
     return 0;
 }
 
+int cmd_crop(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+    const std::string box = args.flag("--box");
+    const std::string margins = args.flag("--margins");
+    if (box.empty() == margins.empty()) {
+        throw leht::Error(0, "crop needs exactly one of --box or --margins");
+    }
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    int pages = 0;
+    if (!box.empty()) {
+        float v[4];
+        if (!parse_floats(box.c_str(), 4, v)) {
+            throw leht::Error(0, "--box expects X0,Y0,X1,Y1, got '" + box + "'");
+        }
+        pages = leht::ops::crop(ctx, doc, args.flag("-p"), leht::Rect{v[0], v[1], v[2], v[3]});
+    } else {
+        float v[4];
+        leht::ops::Margins m;
+        if (parse_floats(margins.c_str(), 1, v)) {
+            m = {v[0], v[0], v[0], v[0]};
+        } else if (parse_floats(margins.c_str(), 4, v)) {
+            m = {v[0], v[1], v[2], v[3]};
+        } else {
+            throw leht::Error(0, "--margins expects N or LEFT,TOP,RIGHT,BOTTOM, got '" +
+                                     margins + "'");
+        }
+        pages = leht::ops::crop_margins(ctx, doc, args.flag("-p"), m);
+    }
+    doc.save(output, leht::SaveOptions{});
+    std::printf("cropped %d page%s -> %s\n", pages, pages == 1 ? "" : "s", output.c_str());
+    std::printf("  note: cropping hides the rest of the page; it is still in the file. "
+                "Use 'leht redact' to remove content.\n");
+    return 0;
+}
+
+/// Parses "RRGGBB" (an optional leading '#') into 0-1 components.
+void parse_color(const std::string& text, float out[3]) {
+    const std::string hex = !text.empty() && text[0] == '#' ? text.substr(1) : text;
+    if (hex.size() != 6 || hex.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+        throw leht::Error(0, "--color expects RRGGBB, got '" + text + "'");
+    }
+    for (int i = 0; i < 3; ++i) {
+        const auto byte = std::strtol(hex.substr(static_cast<std::size_t>(i) * 2, 2).c_str(),
+                                      nullptr, 16);
+        out[i] = static_cast<float>(byte) / 255.0F;
+    }
+}
+
+int cmd_watermark(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+
+    leht::ops::WatermarkOptions options;
+    options.text = args.flag("--text");
+    if (options.text.empty()) {
+        throw leht::Error(0, "watermark needs --text");
+    }
+    options.opacity = args.float_flag("--opacity", options.opacity);
+    options.angle = args.float_flag("--angle", options.angle);
+    options.font_size = args.float_flag("--size", options.font_size);
+    options.under = args.has_switch("--under");
+    if (!args.flag("--color").empty()) {
+        parse_color(args.flag("--color"), options.color);
+    }
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    const int pages = leht::ops::watermark(ctx, doc, args.flag("-p"), options);
+    doc.save(output, leht::SaveOptions{});
+    std::printf("watermarked %d page%s -> %s\n", pages, pages == 1 ? "" : "s",
+                output.c_str());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -599,6 +695,8 @@ int main(int argc, char** argv) {
         if (cmd == "encrypt")  { return cmd_encrypt(ctx, args); }
         if (cmd == "decrypt")  { return cmd_decrypt(ctx, args); }
         if (cmd == "redact")   { return cmd_redact(ctx, args); }
+        if (cmd == "crop")     { return cmd_crop(ctx, args); }
+        if (cmd == "watermark") { return cmd_watermark(ctx, args); }
 
         std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
         std::fputs(kUsage, stderr);

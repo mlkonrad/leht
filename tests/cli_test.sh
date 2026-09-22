@@ -79,6 +79,23 @@ fi
 expect 0 "redact --rect, twice"            redact "$IN" --rect 1:0,0,200,100 --rect 2:0,0,50,50 -o "$OUT/r.pdf"
 expect 0 "redact -p limits --text"         redact "$IN" --text fox -p 2-3 --images remove --no-boxes -o "$OUT/r.pdf"
 
+# Crop and watermark.
+expect 1 "crop needs --box or --margins"   crop "$IN" -o "$OUT/c.pdf"
+expect 1 "crop with both"                  crop "$IN" --box 0,0,9,9 --margins 5 -o "$OUT/c.pdf"
+expect 1 "crop bad --box"                  crop "$IN" --box 0,0,9 -o "$OUT/c.pdf"
+expect 1 "crop bad --margins"              crop "$IN" --margins 1,2 -o "$OUT/c.pdf"
+expect 1 "crop negative margins"           crop "$IN" --margins -5 -o "$OUT/c.pdf"
+expect 1 "crop box off the page"           crop "$IN" --box 5000,5000,6000,6000 -o "$OUT/c.pdf"
+expect 0 "crop --box"                      crop "$IN" --box 36,36,400,500 -p 1-3 -o "$OUT/c.pdf"
+expect 0 "crop --margins"                  crop "$IN" --margins 20,30,20,30 -o "$OUT/c.pdf"
+expect 1 "watermark needs --text"          watermark "$IN" -o "$OUT/w.pdf"
+expect 1 "watermark bad --opacity"         watermark "$IN" --text X --opacity 0 -o "$OUT/w.pdf"
+expect 1 "watermark junk --angle"          watermark "$IN" --text X --angle 45deg -o "$OUT/w.pdf"
+expect 1 "watermark bad --color"           watermark "$IN" --text X --color red -o "$OUT/w.pdf"
+expect 1 "watermark non-Latin text"        watermark "$IN" --text "水印" -o "$OUT/w.pdf"
+expect 0 "watermark"                       watermark "$IN" --text DRAFT -o "$OUT/w.pdf"
+expect 0 "watermark all options"           watermark "$IN" --text "Copy 1" -p 2 --opacity 0.4 --angle -30 --size 48 --color '#cc0000' --under -o "$OUT/w.pdf"
+
 # Valid invocations still succeed.
 expect 0 "rotate -d 90"                    rotate "$IN" -d 90 -o "$OUT/r.pdf"
 expect 0 "rotate -d -90"                   rotate "$IN" -d -90 -o "$OUT/r.pdf"

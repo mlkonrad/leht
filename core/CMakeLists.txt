@@ -21,6 +21,8 @@ add_library(lehtcore
     src/ops/pages.cpp
     src/ops/encrypt.cpp
     src/ops/redact.cpp
+    src/ops/crop.cpp
+    src/ops/watermark.cpp
 )
 add_library(leht::core ALIAS lehtcore)
 
