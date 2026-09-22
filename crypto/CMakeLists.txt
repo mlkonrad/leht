@@ -34,7 +34,18 @@ if(LEHT_BUILD_TESTS)
     target_compile_definitions(test_crypto PRIVATE
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
     add_test(NAME test_crypto COMMAND test_crypto)
+
+    # Both halves of signing on real PDFs, checked by pdfsig and qpdf too.
+    add_executable(test_pdf_sign tests/test_pdf_sign.cpp)
+    target_link_libraries(test_pdf_sign PRIVATE leht::crypto OpenSSL::Crypto leht::warnings)
+    target_include_directories(test_pdf_sign PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_compile_definitions(test_pdf_sign PRIVATE
+        LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
+    add_test(NAME test_pdf_sign COMMAND test_pdf_sign)
+
     if(LEHT_SANITIZE)
-        set_tests_properties(test_crypto PROPERTIES ENVIRONMENT "${LEHT_SANITIZER_ENV}")
+        set_tests_properties(test_crypto test_pdf_sign PROPERTIES
+            ENVIRONMENT "${LEHT_SANITIZER_ENV}")
     endif()
 endif()

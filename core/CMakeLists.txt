@@ -25,6 +25,7 @@ add_library(lehtcore
     src/ops/watermark.cpp
     src/ops/annotate.cpp
     src/ops/forms.cpp
+    src/ops/sign.cpp
 )
 add_library(leht::core ALIAS lehtcore)
 

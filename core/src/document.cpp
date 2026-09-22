@@ -404,33 +404,29 @@ bool Document::is_pdf() const {
 namespace {
 
 // Signature fields with a value, found by walking the AcroForm field tree. /FT
-// is inheritable, so it is carried down. The walk is bounded: a hostile file
-// can make /Kids cyclic, and pdf_mark_obj stops a revisit.
-void count_signed(fz_context* ctx, pdf_obj* field, pdf_obj* ft, int depth, int* n) {
-    if (depth > 32 || pdf_mark_obj(ctx, field)) {
+// is inheritable, so it is carried down. A hostile file can make /Kids cyclic
+// or explode it; depth and a visit budget bound the walk without marking
+// objects (marking would need an fz_try to unmark, and fz_try lives only in
+// error.cpp). A revisited field could be counted twice; only a malformed file
+// gets there, and the count only decides between two safe save modes.
+void count_signed(fz_context* ctx, pdf_obj* field, pdf_obj* ft, int depth, int* budget,
+                  int* n) {
+    if (depth > 32 || --*budget < 0) {
         return;
     }
-    fz_try(ctx) {
-        pdf_obj* own = pdf_dict_get(ctx, field, PDF_NAME(FT));
-        if (own != nullptr) {
-            ft = own;
-        }
-        pdf_obj* kids = pdf_dict_get(ctx, field, PDF_NAME(Kids));
-        const int k = pdf_array_len(ctx, kids);
-        for (int i = 0; i < k; ++i) {
-            count_signed(ctx, pdf_array_get(ctx, kids, i), ft, depth + 1, n);
-        }
-        pdf_obj* v = pdf_dict_get(ctx, field, PDF_NAME(V));
-        if (pdf_name_eq(ctx, ft, PDF_NAME(Sig)) && pdf_is_dict(ctx, v) &&
-            pdf_dict_get(ctx, v, PDF_NAME(Contents)) != nullptr) {
-            ++*n;
-        }
+    pdf_obj* own = pdf_dict_get(ctx, field, PDF_NAME(FT));
+    if (own != nullptr) {
+        ft = own;
     }
-    fz_always(ctx) {
-        pdf_unmark_obj(ctx, field);
+    pdf_obj* kids = pdf_dict_get(ctx, field, PDF_NAME(Kids));
+    const int k = pdf_array_len(ctx, kids);
+    for (int i = 0; i < k; ++i) {
+        count_signed(ctx, pdf_array_get(ctx, kids, i), ft, depth + 1, budget, n);
     }
-    fz_catch(ctx) {
-        fz_rethrow(ctx);
+    pdf_obj* v = pdf_dict_get(ctx, field, PDF_NAME(V));
+    if (pdf_name_eq(ctx, ft, PDF_NAME(Sig)) && pdf_is_dict(ctx, v) &&
+        pdf_dict_get(ctx, v, PDF_NAME(Contents)) != nullptr) {
+        ++*n;
     }
 }
 
@@ -449,8 +445,9 @@ int Document::signature_count() const {
         }
         pdf_obj* fields = pdf_dict_getp(g, pdf_trailer(g, pdf), "Root/AcroForm/Fields");
         const int k = pdf_array_len(g, fields);
+        int budget = 100000;
         for (int i = 0; i < k; ++i) {
-            count_signed(g, pdf_array_get(g, fields, i), nullptr, 0, &n);
+            count_signed(g, pdf_array_get(g, fields, i), nullptr, 0, &budget, &n);
         }
     });
     return n;
