@@ -1,8 +1,8 @@
 # Editing
 
-M4 adds editing: redaction, crop, watermark, annotations and form filling. So far this is
-the engine and CLI half (M4a). The viewer's editing tools, which reach these operations
-through the sandboxed worker, are M4b.
+M4 adds editing: redaction, crop, watermark, annotations and form filling. The operations
+live in `core/` and are available from the `leht` CLI (M4a). The viewer uses the same
+operations through its sandboxed worker (M4b, see [In the viewer](#in-the-viewer)).
 
 Every operation acts on an **open document** and leaves saving to a separate step:
 
@@ -144,3 +144,48 @@ MuPDF 1.28 stores a checkbox's or radio group's `/V` as a string (`(Yes)`). The 
 requires a name (`/Yes`), matching the widgets' `/AS`, and other readers and form-data
 exports compare the two. qpdf's JSON view of a filled form caught it. Leht re-stores the
 value as a name after MuPDF sets it.
+
+## In the viewer
+
+The Edit toolbar has Save, Undo, Redo and the tools:
+
+| Tool | What it does |
+|---|---|
+| Select | select and copy text (the default) |
+| Highlight | drag across text; the selection becomes a highlight |
+| Note | click to place a sticky note |
+| Draw | freehand ink |
+| Redact | drag a box: everything under it is **removed**, as for `leht redact` |
+| Erase | click an annotation to delete it; erasable ones are outlined |
+
+**More** holds Save As, Redact Text…, Watermark… and Crop Margins…. A Form panel appears
+for documents with fields; values are edited in place, with a drop-down for checkboxes,
+radio groups and choice fields. The tools work on the unrotated view (Ctrl+R to rotate
+back) and say so otherwise.
+
+**The edit log is the source of truth.** The viewer keeps every edit since the file was
+opened or last saved:
+
+- **Undo** reopens the file in the worker and replays all but the last edit. **Redo**
+  applies it again. There is no MuPDF journal: one mechanism serves undo and crash
+  recovery, and replay is deterministic, so annotation ids come out the same (a worker test
+  checks this).
+- **A crashed or killed worker loses nothing.** Its replacement reopens the file and
+  replays the log. The smoke test `SIGKILL`s the worker between two edits and saving still
+  writes both.
+- **A refused edit is not recorded**, and the worker is rebuilt from file + log in case it
+  got part-way.
+
+**Saving** asks the worker to write into a temp file beside the target, through a passed
+file descriptor. The viewer then sets the file's mode, fsyncs, renames it over the target
+and fsyncs the directory. A failed save leaves the target untouched and removes the temp
+file. After a save the saved file is the document: the log restarts from it, so **undo
+does not reach past a save**. The window title shows `*` while there are unsaved edits,
+and closing or opening another file asks whether to save them.
+
+Redactions are applied at once and can be undone until the file is saved. As with the
+CLI, a text redaction that leaves the term somewhere Leht does not rewrite (metadata,
+bookmarks) is reported in a warning.
+
+Not yet in the viewer: moving or resizing existing annotations, editing free text in
+place, and watermark or crop options beyond the defaults (the CLI has them all).

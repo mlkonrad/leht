@@ -127,11 +127,16 @@ object renumbering path. Confirmed with a pure-C reproducer against **both 1.28.
 Unlike the `obj<<` crash, **this one is still live in current upstream and is worth
 reporting to Artifex.** That has not been done yet.
 
-Leht keeps `do_garbage = 3` regardless. De-duplication is worth far more than 874 bytes —
-merging four copies of one file without it costs four copies of their shared fonts, which
-`test_merge` asserts. For the CLI the leak is irrelevant because the process exits. It will
-matter for the M2 viewer if a session performs many saves, and that is the point to
-revisit it, not now.
+The path-to-path ops (`merge`, `compress`, `extract`, ...) keep `do_garbage = 3`
+regardless. De-duplication is worth far more than 874 bytes: merging four copies of one
+file without it costs four copies of their shared fonts, which `test_merge` asserts, and
+for the CLI the leak is irrelevant because the process exits.
+
+**Editing saves avoid the leak.** `Document::save` (the viewer's Save, and every `leht`
+edit command) defaults to `do_garbage = 1`, which collects without renumbering. It never
+enters the leaking path, so a long editing session does not accumulate the leak. The
+reason for that default is separate: renumbering changes the object numbers the viewer
+uses as annotation ids. See [editing.md](editing.md#saving).
 
 ## Upstream: stack overflow on deep reference chains — live
 
@@ -314,11 +319,20 @@ from outside — the kernel OOM killer, a user's `kill` — **no**.
 | During open (or reading the outline) | `failed()`: "could not open this file safely"; quarantined for the session | fresh worker, open retried |
 | During a page render or selection | that page is drawn as a labelled "could not be displayed safely" placeholder and never retried; a fresh worker reopens the document (re-unlocking it with the password already given) and every other page keeps working | fresh worker, same request retried once |
 | During search | matches so far stand, search finishes; document restored | same |
+| During an edit (M4) | the edit is not made and is not added to the edit log; a fresh worker reopens the file and replays the log, so every earlier edit survives | fresh worker restored from file + log, edit retried once |
+| During a save | nothing is written: the temp file is removed, the target is untouched; document restored from file + log | same |
 | A second time in one document | document closed and quarantined | — |
 | A fourth outside kill in one document | — | document closed with "repeatedly terminated from outside"; **not** quarantined |
 
 Quarantine is keyed on (device, inode, size, mtime), so reopening the same file fails
 fast without spawning anything, while an edited copy gets a fresh chance.
+
+Editing (M4b) needed no change to the sandbox. The worker applies edits to the document it
+already holds, and it saves by writing into a descriptor the viewer passes with `Save`
+(the only message besides `Open` allowed to carry one), using only `write` and `lseek`. The
+viewer creates the temp file, fsyncs it and renames it into place; the worker can do
+none of those. The edit log lives in the viewer, so a worker's death loses nothing the
+user did. See [editing.md](editing.md#in-the-viewer).
 
 ### What it costs
 

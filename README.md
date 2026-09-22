@@ -7,7 +7,8 @@ toolbox in one: view, merge, split, compress, annotate, redact, fill forms and s
 locally, with no account and no upload. It looks correct on GNOME, KDE, XFCE and
 everything else, because it favours no desktop.
 
-> **Status: pre-alpha.** The engine, the `leht` command-line tool and a Qt6 viewer work.
+> **Status: pre-alpha.** The engine, the `leht` command-line tool and a Qt6 viewer with
+> editing (annotations, forms, true redaction) work.
 > The viewer parses every document in a sandboxed worker process, so a malicious PDF costs
 > a respawn, not the application. `LEHT_BUILD_UI` is still `OFF` by default. Expect the CLI
 > surface to shift before 1.0.
@@ -100,9 +101,10 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   and reported. Design, threat model and measured cost:
   [docs/robustness.md](docs/robustness.md#process-isolation).
 
-**In progress — M4 editing.** The engine and CLI are done: true redaction, crop,
-watermarks, annotations and form filling ([docs/editing.md](docs/editing.md)). Next are
-the viewer's editing tools, which drive the same operations through the sandboxed worker.
+- **M4 — editing:** true redaction (content removed, not covered), crop, watermarks,
+  annotations and form filling, in the CLI and in the viewer. The viewer edits through
+  the sandboxed worker, with undo and redo, and a crash loses no edits. See
+  [docs/editing.md](docs/editing.md).
 
 **Next** — M5 signatures (visible stamp, plus cryptographic
 PAdES signing and a verification panel); M6 packaging as Flatpak, RPM and DEB.
