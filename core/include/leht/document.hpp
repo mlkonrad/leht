@@ -87,9 +87,26 @@ public:
     /// accept. XPS, EPUB and images open for viewing but not for editing.
     [[nodiscard]] bool is_pdf() const;
 
+    /// Number of signature fields that hold a signature value (a /V dictionary
+    /// with /Contents), whether or not the signature verifies. 0 for non-PDFs.
+    [[nodiscard]] int signature_count() const;
+
+    /// True when the document can be saved as an incremental update: it is a
+    /// PDF, was not repaired on open, and has not been redacted (redaction must
+    /// drop earlier revisions, which an incremental update keeps).
+    [[nodiscard]] bool can_save_incrementally() const;
+
+    /// Whether save() with `options` would append a revision (true) or rewrite
+    /// the file (false). Throws if Mode::Incremental is asked of a document
+    /// that cannot be saved that way.
+    [[nodiscard]] bool saves_incrementally(const SaveOptions& options) const;
+
     /// Writes the document, with every edit applied so far, to `path`.
     ///
-    /// Always a full rewrite, never an incremental update. The bytes go to a
+    /// A full rewrite or an incremental update, as SaveOptions::mode decides;
+    /// by default a signed document is updated incrementally so its signatures
+    /// stay valid. An incremental save copies the original bytes first and
+    /// appends a revision. Either way the bytes go to a
     /// temporary file beside `path` which is fsynced and then renamed over
     /// it, so a failed save never leaves a half-written file behind -- and
     /// saving over the very file the document was opened from is safe, since
@@ -102,6 +119,15 @@ public:
     /// ownership: the caller owns the descriptor, and with it the job of
     /// making the result durable (fsync) and atomic (rename). This is how the
     /// sandboxed worker saves, since it cannot open paths.
+    ///
+    /// After an incremental save (or a failed attempt at one) this Document
+    /// refuses to save again: MuPDF now takes the file it was opened from to
+    /// include the revision just written, which it does not. Reopen the saved
+    /// file instead, as the viewer does after every save.
+    ///
+    /// `fd` must be open for reading as well as writing, and should be empty:
+    /// an incremental save reads back what it wrote (to fill in signature
+    /// byte ranges), using pread, and never needs to truncate a fresh file.
     void save_fd(int fd, const SaveOptions& options) const;
 
     /// Records that content has been redacted from this document. Every later
@@ -120,6 +146,7 @@ private:
     fz_context* ctx_ = nullptr;  // borrowed, not owned
     fz_document* doc_ = nullptr;
     bool redacted_ = false;
+    mutable bool saved_incrementally_ = false;
 };
 
 }  // namespace leht

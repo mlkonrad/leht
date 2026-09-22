@@ -36,7 +36,22 @@ struct Point {
 };
 
 struct SaveOptions {
+    enum class Mode {
+        /// Incremental when the document carries a signature (and can be saved
+        /// incrementally), a full rewrite otherwise. A full rewrite of a signed
+        /// document breaks every signature in it, so this is the safe default.
+        Auto,
+        /// Always rewrite the whole file.
+        Full,
+        /// Append the changes as a new revision after the original bytes, which
+        /// stay untouched. Throws if the document cannot be saved that way
+        /// (it was repaired on open, or it has been redacted).
+        Incremental,
+    };
+    Mode mode = Mode::Auto;
+
     /// Garbage collection: 0 none, 1 collect, 2 renumber, 3 de-duplicate.
+    /// Ignored by an incremental save, which never rewrites existing objects.
     ///
     /// 1 by default because levels 2 and 3 renumber the objects of the OPEN
     /// document, not just of the file written -- which would change every

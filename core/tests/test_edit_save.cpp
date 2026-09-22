@@ -3,6 +3,8 @@
 #include "leht/document.hpp"
 #include "leht/edit.hpp"
 #include "leht/error.hpp"
+#include "leht/ops/annotate.hpp"
+#include "leht/ops/redact.hpp"
 #include "edit_harness.hpp"
 
 #include <fcntl.h>
@@ -109,9 +111,138 @@ void page_set_sorts_and_deduplicates() {
     CHECK(leht::page_set("", 3) == std::vector<int>({0, 1, 2}));
 }
 
+/// One page with a signature field whose value is a (fake) signature: enough
+/// structure for signature_count() and the save-mode decision, which never look
+/// at whether the signature verifies.
+std::string signed_fixture() {
+    leht::test::PdfWriter w;
+    w.set(1, "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /SigFlags 3 >> >>");
+    w.set(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    w.set(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>");
+    w.set(4, "<< /FT /Sig /T (Sig1) /V 5 0 R /Type /Annot /Subtype /Widget "
+             "/Rect [0 0 0 0] /P 3 0 R /F 132 >>");
+    w.set(5, "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /ETSI.CAdES.detached "
+             "/ByteRange [0 0 0 0] /Contents <00> >>");
+    return w.finish(1);
+}
+
+void note(const Context& ctx, Document& doc) {
+    leht::ops::AnnotSpec spec;
+    spec.kind = leht::ops::AnnotKind::Note;
+    spec.rect = {20, 20, 40, 40};
+    spec.contents = "after";
+    (void)leht::ops::add_annotation(ctx, doc, 0, spec);
+}
+
+void incremental_save_keeps_the_original_bytes() {
+    const Context ctx;
+    const TempPath out("edit_save_incremental.pdf");
+    const std::string original = leht::test::read_file(corpus("text_10p.pdf"));
+    {
+        Document doc = Document::open(ctx, corpus("text_10p.pdf"));
+        CHECK(doc.signature_count() == 0);
+        CHECK(doc.can_save_incrementally());
+        note(ctx, doc);
+        SaveOptions opts;
+        opts.mode = SaveOptions::Mode::Incremental;
+        CHECK(doc.saves_incrementally(opts));
+        doc.save(out.str(), opts);
+    }
+    const std::string saved = leht::test::read_file(out.str());
+    CHECK(saved.size() > original.size());
+    CHECK(saved.compare(0, original.size(), original) == 0);
+    CHECK(qpdf_check(out.str()));
+    const Document again = Document::open(ctx, out.str());
+    CHECK(again.page_count() == 10);
+}
+
+void auto_mode_updates_a_signed_document_incrementally() {
+    const Context ctx;
+    const TempPath in("edit_save_signed_in.pdf");
+    const TempPath out("edit_save_signed_out.pdf");
+    const std::string original = signed_fixture();
+    leht::test::write_file(in.str(), original);
+
+    Document doc = Document::open(ctx, in.str());
+    CHECK(doc.signature_count() == 1);
+    CHECK(doc.saves_incrementally(SaveOptions{}));
+    note(ctx, doc);
+    doc.save(out.str(), SaveOptions{});
+    const std::string saved = leht::test::read_file(out.str());
+    CHECK(saved.compare(0, original.size(), original) == 0);
+    CHECK(Document::open(ctx, out.str()).signature_count() == 1);
+
+    // Full is still available on request, and it is a rewrite.
+    SaveOptions full;
+    full.mode = SaveOptions::Mode::Full;
+    CHECK(!doc.saves_incrementally(full));
+}
+
+void unsigned_documents_are_still_rewritten() {
+    const Context ctx;
+    const Document doc = Document::open(ctx, corpus("text_10p.pdf"));
+    CHECK(!doc.saves_incrementally(SaveOptions{}));
+}
+
+void a_redacted_document_is_never_saved_incrementally() {
+    const Context ctx;
+    const TempPath in("edit_save_signed_redact.pdf");
+    leht::test::write_file(in.str(), signed_fixture());
+    Document doc = Document::open(ctx, in.str());
+    const auto r = leht::ops::redact(ctx, doc, 0, {leht::Rect{100, 100, 150, 150}});
+    CHECK(r.signatures_invalidated == 1);
+    CHECK(!doc.can_save_incrementally());
+    CHECK(!doc.saves_incrementally(SaveOptions{}));
+    SaveOptions inc;
+    inc.mode = SaveOptions::Mode::Incremental;
+    bool threw = false;
+    try {
+        (void)doc.saves_incrementally(inc);
+    } catch (const leht::Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void a_second_save_after_an_incremental_one_is_refused() {
+    // MuPDF treats the open document's file as if it now held the revision it
+    // just wrote. A second incremental save chained its /Prev to an xref that
+    // is not in the original, and qpdf found an xref loop. Refuse instead.
+    const Context ctx;
+    const TempPath a("edit_save_inc_a.pdf");
+    const TempPath b("edit_save_inc_b.pdf");
+    SaveOptions opts;
+    opts.mode = SaveOptions::Mode::Incremental;
+    Document doc = Document::open(ctx, corpus("text_10p.pdf"));
+    note(ctx, doc);
+    const int fd = ::open(a.str().c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    CHECK(fd >= 0);
+    doc.save_fd(fd, opts);
+    ::close(fd);
+    CHECK(qpdf_check(a.str()));
+    bool threw = false;
+    try {
+        doc.save(b.str(), SaveOptions{});
+    } catch (const leht::Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    // The saved file itself saves incrementally again without trouble.
+    Document reopened = Document::open(ctx, a.str());
+    note(ctx, reopened);
+    reopened.save(b.str(), opts);
+    CHECK(qpdf_check(b.str()));
+    CHECK(Document::open(ctx, b.str()).page_count() == 10);
+}
+
 }  // namespace
 
 int main() {
+    RUN(incremental_save_keeps_the_original_bytes);
+    RUN(auto_mode_updates_a_signed_document_incrementally);
+    RUN(unsigned_documents_are_still_rewritten);
+    RUN(a_redacted_document_is_never_saved_incrementally);
+    RUN(a_second_save_after_an_incremental_one_is_refused);
     RUN(save_round_trips);
     RUN(save_fd_writes_into_a_borrowed_descriptor);
     RUN(saving_over_the_open_file_is_safe);

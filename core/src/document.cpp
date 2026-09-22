@@ -29,6 +29,7 @@ struct FdStream {
     int fd;
     std::int64_t offset;  ///< next byte pread() will fetch
     std::int64_t size;
+    int owns_fd;  ///< close fd on drop (a document's input) or not (a save's output)
     unsigned char buffer[8192];
 };
 
@@ -74,7 +75,9 @@ void fd_seek(fz_context* ctx, fz_stream* stm, std::int64_t offset, int whence) {
 
 void fd_drop(fz_context* ctx, void* state) {
     auto* s = static_cast<FdStream*>(state);
-    ::close(s->fd);
+    if (s->owns_fd != 0) {
+        ::close(s->fd);
+    }
     fz_free(ctx, s);
 }
 
@@ -116,6 +119,41 @@ std::int64_t out_tell(fz_context* ctx, void* state) {
     return pos;
 }
 
+// An incremental save reads back what it wrote: it compares the output with
+// the original, and it fills in each signature's /ByteRange and /Contents by
+// streaming the bytes around them. The stream borrows the fd and reads with
+// pread, so the output's own position is left alone.
+fz_stream* out_as_stream(fz_context* ctx, void* state) {
+    const int fd = output_fd(state);
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) {
+        fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot stat output descriptor");
+    }
+    auto* s = static_cast<FdStream*>(fz_calloc(ctx, 1, sizeof(FdStream)));
+    s->fd = fd;
+    s->offset = 0;
+    s->size = st.st_size;
+    s->owns_fd = 0;
+    fz_stream* stm = fz_new_stream(ctx, s, fd_next, fd_drop);
+    stm->seek = fd_seek;
+    return stm;
+}
+
+// MuPDF truncates the output at the end of the copied original. Into the fresh
+// file every save gets, that is already the end, so no ftruncate is needed --
+// which matters because the worker's sandbox does not allow it.
+void out_truncate(fz_context* ctx, void* state) {
+    const int fd = output_fd(state);
+    struct stat st {};
+    const off_t pos = ::lseek(fd, 0, SEEK_CUR);
+    if (pos < 0 || ::fstat(fd, &st) != 0) {
+        fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot stat output descriptor");
+    }
+    if (st.st_size > pos && ::ftruncate(fd, pos) != 0) {
+        fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot truncate output descriptor");
+    }
+}
+
 /// The process umask, read without changing it: umask(2) can only be queried by
 /// setting it, which would race with any other thread creating files.
 mode_t current_umask() {
@@ -133,8 +171,18 @@ mode_t current_umask() {
     return static_cast<mode_t>(mask);
 }
 
-pdf_write_options write_options(const SaveOptions& options, bool redacted) {
+pdf_write_options write_options(const SaveOptions& options, bool redacted,
+                                bool incremental) {
     pdf_write_options opts = pdf_default_write_options;
+    if (incremental) {
+        // Existing objects are never rewritten, so there is nothing to collect
+        // and nothing to linearise; MuPDF refuses both.
+        opts.do_incremental = 1;
+        opts.do_compress = options.compress_streams ? 1 : 0;
+        opts.do_compress_images = 1;
+        opts.do_compress_fonts = options.compress_streams ? 1 : 0;
+        return opts;
+    }
     opts.do_garbage = options.garbage;
     // A redaction removes content from the page's content stream, but the old
     // stream object is still in the xref. Only collection drops it.
@@ -241,6 +289,7 @@ Document Document::open_fd(const Context& ctx, int fd, const std::string& magic)
     state->fd = fd;
     state->offset = 0;
     state->size = st.st_size;
+    state->owns_fd = 1;
 
     // From here the fd belongs to `state`: fz_new_stream drops the state (and
     // so closes the fd) itself if it fails, and the stream's drop does it
@@ -266,7 +315,8 @@ Document Document::open_fd(const Context& ctx, int fd, const std::string& magic)
 Document::Document(Document&& other) noexcept
     : ctx_(std::exchange(other.ctx_, nullptr)),
       doc_(std::exchange(other.doc_, nullptr)),
-      redacted_(std::exchange(other.redacted_, false)) {}
+      redacted_(std::exchange(other.redacted_, false)),
+      saved_incrementally_(std::exchange(other.saved_incrementally_, false)) {}
 
 Document& Document::operator=(Document&& other) noexcept {
     if (this != &other) {
@@ -276,6 +326,7 @@ Document& Document::operator=(Document&& other) noexcept {
         ctx_ = std::exchange(other.ctx_, nullptr);
         doc_ = std::exchange(other.doc_, nullptr);
         redacted_ = std::exchange(other.redacted_, false);
+        saved_incrementally_ = std::exchange(other.saved_incrementally_, false);
     }
     return *this;
 }
@@ -350,6 +401,91 @@ bool Document::is_pdf() const {
     return pdf != nullptr;
 }
 
+namespace {
+
+// Signature fields with a value, found by walking the AcroForm field tree. /FT
+// is inheritable, so it is carried down. The walk is bounded: a hostile file
+// can make /Kids cyclic, and pdf_mark_obj stops a revisit.
+void count_signed(fz_context* ctx, pdf_obj* field, pdf_obj* ft, int depth, int* n) {
+    if (depth > 32 || pdf_mark_obj(ctx, field)) {
+        return;
+    }
+    fz_try(ctx) {
+        pdf_obj* own = pdf_dict_get(ctx, field, PDF_NAME(FT));
+        if (own != nullptr) {
+            ft = own;
+        }
+        pdf_obj* kids = pdf_dict_get(ctx, field, PDF_NAME(Kids));
+        const int k = pdf_array_len(ctx, kids);
+        for (int i = 0; i < k; ++i) {
+            count_signed(ctx, pdf_array_get(ctx, kids, i), ft, depth + 1, n);
+        }
+        pdf_obj* v = pdf_dict_get(ctx, field, PDF_NAME(V));
+        if (pdf_name_eq(ctx, ft, PDF_NAME(Sig)) && pdf_is_dict(ctx, v) &&
+            pdf_dict_get(ctx, v, PDF_NAME(Contents)) != nullptr) {
+            ++*n;
+        }
+    }
+    fz_always(ctx) {
+        pdf_unmark_obj(ctx, field);
+    }
+    fz_catch(ctx) {
+        fz_rethrow(ctx);
+    }
+}
+
+}  // namespace
+
+int Document::signature_count() const {
+    if (doc_ == nullptr) {
+        return 0;
+    }
+    fz_document* doc = doc_;
+    int n = 0;
+    guarded(ctx_, [&](fz_context* g) {
+        pdf_document* pdf = pdf_document_from_fz_document(g, doc);
+        if (pdf == nullptr) {
+            return;
+        }
+        pdf_obj* fields = pdf_dict_getp(g, pdf_trailer(g, pdf), "Root/AcroForm/Fields");
+        const int k = pdf_array_len(g, fields);
+        for (int i = 0; i < k; ++i) {
+            count_signed(g, pdf_array_get(g, fields, i), nullptr, 0, &n);
+        }
+    });
+    return n;
+}
+
+bool Document::can_save_incrementally() const {
+    if (doc_ == nullptr || redacted_) {
+        return false;
+    }
+    fz_document* doc = doc_;
+    int ok = 0;
+    guarded(ctx_, [&](fz_context* g) {
+        pdf_document* pdf = pdf_document_from_fz_document(g, doc);
+        ok = pdf != nullptr && pdf->file != nullptr && pdf_can_be_saved_incrementally(g, pdf);
+    });
+    return ok != 0;
+}
+
+bool Document::saves_incrementally(const SaveOptions& options) const {
+    switch (options.mode) {
+        case SaveOptions::Mode::Full:
+            return false;
+        case SaveOptions::Mode::Incremental:
+            if (!can_save_incrementally()) {
+                throw Error(0, redacted_ ? "a redacted document must be rewritten in full"
+                                         : "this document cannot be saved incrementally "
+                                           "(it was repaired when opened)");
+            }
+            return true;
+        case SaveOptions::Mode::Auto:
+            break;
+    }
+    return signature_count() > 0 && can_save_incrementally();
+}
+
 void Document::save_fd(int fd, const SaveOptions& options) const {
     if (doc_ == nullptr) {
         throw Error(0, "cannot save a moved-from Document");
@@ -364,13 +500,23 @@ void Document::save_fd(int fd, const SaveOptions& options) const {
         throw Error(0, "saving requires a PDF");
     }
 
-    pdf_write_options opts = write_options(options, redacted_);
+    if (saved_incrementally_) {
+        throw Error(0, "this document was saved incrementally; reopen the saved file "
+                       "to save it again");
+    }
+    const bool incremental = saves_incrementally(options);
+    // Set before writing: a half-done incremental save leaves MuPDF's xref as
+    // unreliable as a finished one.
+    saved_incrementally_ = incremental;
+    pdf_write_options opts = write_options(options, redacted_, incremental);
     void* state = reinterpret_cast<void*>(static_cast<std::intptr_t>(fd));
     detail::Owned<fz_output, fz_drop_output> out{ctx_};
     guarded(ctx_, [&](fz_context* g) {
         *out.slot() = fz_new_output(g, 8192, state, out_write, nullptr, nullptr);
         out.get()->seek = out_seek;
         out.get()->tell = out_tell;
+        out.get()->as_stream = out_as_stream;
+        out.get()->truncate = out_truncate;
         pdf_write_document(g, pdf, out.get(), &opts);
         fz_close_output(g, out.get());
     });

@@ -286,6 +286,8 @@ RedactResult redact_pages(const Context& ctx, Document& doc,
     const int page_count = doc.page_count();
     const pdf_redact_options opts = to_mupdf(options);
 
+    const int signed_before = work.empty() ? 0 : doc.signature_count();
+
     // Marked before anything changes: if a later page throws, the pages
     // already redacted must still get the garbage-collected save.
     if (!work.empty()) {
@@ -308,6 +310,7 @@ RedactResult redact_pages(const Context& ctx, Document& doc,
     }
     if (!result.pages.empty()) {
         result.structure_dropped = drop_structure_tree(c, pdf);
+        result.signatures_invalidated = signed_before;
     }
     std::sort(result.pages.begin(), result.pages.end());
     return result;

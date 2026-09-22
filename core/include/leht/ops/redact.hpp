@@ -44,6 +44,10 @@ struct RedactResult {
     std::vector<int> pages;       ///< pages changed, 0-based, ascending
     int annotations_removed = 0;  ///< annotations and form fields a box overlapped
     bool structure_dropped = false;
+    /// Signatures the document held before redacting. A redacted document is
+    /// always rewritten in full, which drops the revisions they sign: every one
+    /// of them is broken by the save.
+    int signatures_invalidated = 0;
 
     /// redact_text() only: places where the needle still appears after
     /// redacting -- document metadata or bookmarks anywhere, and on the pages

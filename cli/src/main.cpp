@@ -557,6 +557,8 @@ int cmd_redact(const leht::Context& ctx, const Args& args) {
         total.areas += r.areas;
         total.annotations_removed += r.annotations_removed;
         total.structure_dropped = total.structure_dropped || r.structure_dropped;
+        total.signatures_invalidated =
+            std::max(total.signatures_invalidated, r.signatures_invalidated);
         pages.insert(pages.end(), r.pages.begin(), r.pages.end());
     };
     for (const auto& [page, areas] : boxes) {
@@ -584,6 +586,13 @@ int cmd_redact(const leht::Context& ctx, const Args& args) {
     if (total.structure_dropped) {
         std::printf("  note: dropped the structure tree (tagged-PDF accessibility), "
                     "since it can repeat page text\n");
+    }
+    if (total.signatures_invalidated > 0) {
+        std::fprintf(stderr,
+                     "leht: warning: this breaks the document's %d signature%s: a redacted "
+                     "file is rewritten in full, without the revisions they sign\n",
+                     total.signatures_invalidated,
+                     total.signatures_invalidated == 1 ? "" : "s");
     }
     if (!term.empty() && total.areas == 0) {
         std::printf("  no occurrences of \"%s\" on the page%s searched\n", term.c_str(),
