@@ -5,9 +5,16 @@
 #include <QThread>
 #include <QVector>
 
+#include <functional>
+
+#include "edit_model.hpp"
 #include "outline_model.hpp"
 
 class PageView;
+class QAction;
+class QActionGroup;
+class QCloseEvent;
+class QTableWidget;
 class RenderWorker;
 class QLabel;
 class QLineEdit;
@@ -48,8 +55,17 @@ private slots:
     void goToPageFromSpin();
     void onPasswordRequired(bool retry);
     void printDialog();
+    void onEditStateChanged(bool canUndo, bool canRedo, bool modified);
+    void onFieldsReady(const QVector<FieldRow>& rows);
+    void onSaved(const QString& path);
 
 public:
+    /// Saves to the file it came from (or asks, if it has none). Returns
+    /// false if nothing was started.
+    bool save();
+    bool saveAs();
+    /// Whether there are edits not yet saved.
+    [[nodiscard]] bool isModified() const { return modified_; }
     /// Prints pages [fromPage, toPage] (1-based; 0,0 = all) to `printer`.
     /// Public so the headless test can print to a PDF. Returns false if nothing
     /// was printed.
@@ -60,8 +76,19 @@ signals:
     void requestAuthenticate(const QString& password);
     void requestSearch(const QString& needle);
 
+protected:
+    void closeEvent(QCloseEvent* event) override;
+
 private:
     void buildActions();
+    void buildEditActions();
+    void updateTitle();
+    /// Asks what to do with unsaved edits. True means carry on now; false
+    /// means stop (cancelled, or a save was started and `then` will run when
+    /// it succeeds).
+    bool resolveUnsaved(std::function<void()> then);
+    /// Runs `fn` on the worker thread, in order with every other request.
+    void onWorker(std::function<void(RenderWorker*)> fn);
 
     PageView* view_ = nullptr;
     QThread workerThread_;
@@ -78,4 +105,15 @@ private:
     bool syncingSpin_ = false;
     int pageCount_ = 0;
     QString currentTitle_;
+
+    // Editing.
+    QString currentPath_;
+    bool modified_ = false;
+    QAction* saveAction_ = nullptr;
+    QAction* undoAction_ = nullptr;
+    QAction* redoAction_ = nullptr;
+    QActionGroup* tools_ = nullptr;
+    QTableWidget* fields_ = nullptr;
+    bool populatingFields_ = false;
+    std::function<void()> afterSave_;  ///< what an unsaved-changes prompt was waiting for
 };

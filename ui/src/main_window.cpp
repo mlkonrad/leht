@@ -4,6 +4,8 @@
 #include "page_view.hpp"
 #include "render_worker.hpp"
 
+#include "leht/ops/forms.hpp"
+
 #include <algorithm>
 
 #include <QApplication>
@@ -24,15 +26,29 @@
 #include <QStatusBar>
 #include <QToolBar>
 
+#include <QActionGroup>
+#include <QCloseEvent>
+#include <QComboBox>
+#include <QMenu>
 #include <QPainter>
 #include <QPrintDialog>
 #include <QPrinter>
+#include <QTableWidget>
+#include <QToolButton>
 #include <QTreeWidget>
 
 #include "outline_model.hpp"
 #include "thumbnail_bar.hpp"
 
 MainWindow::MainWindow() {
+    // Types that cross the worker-thread boundary in queued signals.
+    qRegisterMetaType<AnnotRow>();
+    qRegisterMetaType<QVector<AnnotRow>>();
+    qRegisterMetaType<FieldRow>();
+    qRegisterMetaType<QVector<FieldRow>>();
+    qRegisterMetaType<QVector<QPolygonF>>();
+    qRegisterMetaType<QVector<int>>();
+
     setWindowTitle(tr("Leht"));
     resize(1000, 800);
 
@@ -91,9 +107,66 @@ MainWindow::MainWindow() {
     connect(view_, &PageView::currentPageChanged, this,
             &MainWindow::onCurrentPageChanged);
 
+    // Editing: the view's tools -> worker edits; worker changes -> view.
+    connect(worker_, &RenderWorker::documentEdited, view_, &PageView::onDocumentEdited);
+    connect(worker_, &RenderWorker::documentEdited, this, [this] {
+        onWorker([](RenderWorker* w) {
+            w->listAnnotations();
+            w->listFields();
+        });
+    });
+    connect(worker_, &RenderWorker::annotationsReady, view_, &PageView::setAnnotations);
+    connect(worker_, &RenderWorker::fieldsReady, this, &MainWindow::onFieldsReady);
+    connect(worker_, &RenderWorker::editStateChanged, this, &MainWindow::onEditStateChanged);
+    connect(worker_, &RenderWorker::saved, this, &MainWindow::onSaved);
+    connect(worker_, &RenderWorker::saveFailed, this, [this](const QString& why) {
+        afterSave_ = nullptr;
+        statusBar()->clearMessage();
+        QMessageBox::warning(this, tr("Could not save"), why);
+    });
+    connect(worker_, &RenderWorker::editFailed, this, [this](const QString& why) {
+        QMessageBox::warning(this, tr("Could not make that change"), why);
+    });
+    connect(worker_, &RenderWorker::redactionIncomplete, this, [this](const QStringList& where) {
+        QMessageBox::warning(
+            this, tr("Redaction incomplete"),
+            tr("The text was removed from the pages, but it still appears here:\n\n• %1\n\n"
+               "Leht does not change these on its own. Review them before sharing the file.")
+                .arg(where.join(QStringLiteral("\n• "))));
+    });
+    connect(view_, &PageView::highlightRequested, this,
+            [this](int page, const QVector<QRectF>& boxes) {
+                onWorker([=](RenderWorker* w) { w->addHighlight(page, boxes, QColor(255, 220, 0)); });
+            });
+    connect(view_, &PageView::noteRequested, this, [this](int page, QPointF at) {
+        bool ok = false;
+        const QString text = QInputDialog::getMultiLineText(this, tr("Add note"), tr("Note:"),
+                                                            QString(), &ok);
+        if (ok && !text.isEmpty()) {
+            onWorker([=](RenderWorker* w) { w->addNote(page, at, text); });
+        }
+    });
+    connect(view_, &PageView::inkRequested, this,
+            [this](int page, const QVector<QPolygonF>& strokes) {
+                onWorker([=](RenderWorker* w) { w->addInk(page, strokes, QColor(30, 60, 200)); });
+            });
+    connect(view_, &PageView::redactRequested, this, [this](int page, QRectF box) {
+        onWorker([=](RenderWorker* w) { w->redactArea(page, box); });
+    });
+    connect(view_, &PageView::eraseRequested, this, [this](int id) {
+        onWorker([=](RenderWorker* w) { w->deleteAnnotation(id); });
+    });
+    connect(view_, &PageView::toolRefused, this, [this](const QString& why) {
+        statusBar()->showMessage(why, 5000);
+        if (tools_ != nullptr && !tools_->actions().isEmpty()) {
+            tools_->actions().first()->setChecked(true);  // Select
+        }
+    });
+
     workerThread_.start();
 
     buildActions();
+    buildEditActions();
 
     pageLabel_ = new QLabel(this);
     zoomLabel_ = new QLabel(this);
@@ -163,6 +236,30 @@ MainWindow::MainWindow() {
     statusBar()->addPermanentWidget(pageSpin_);
     connect(pageSpin_, &QSpinBox::editingFinished, this,
             &MainWindow::goToPageFromSpin);
+
+    // Form panel: one row per field, the value editable in place.
+    auto* formDock = new QDockWidget(tr("Form"), this);
+    formDock->setObjectName(QStringLiteral("formDock"));
+    fields_ = new QTableWidget(0, 2, formDock);
+    fields_->setHorizontalHeaderLabels({tr("Field"), tr("Value")});
+    fields_->horizontalHeader()->setStretchLastSection(true);
+    fields_->verticalHeader()->hide();
+    formDock->setWidget(fields_);
+    addDockWidget(Qt::RightDockWidgetArea, formDock);
+    formDock->hide();
+    connect(fields_, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* item) {
+        if (populatingFields_ || item->column() != 1) {
+            return;
+        }
+        const QString name = fields_->item(item->row(), 0)->text();
+        const QString value = item->text();
+        onWorker([=](RenderWorker* w) { w->setFieldValue(name, value); });
+    });
+}
+
+void MainWindow::onWorker(std::function<void(RenderWorker*)> fn) {
+    RenderWorker* w = worker_;
+    QMetaObject::invokeMethod(w, [w, fn = std::move(fn)] { fn(w); }, Qt::QueuedConnection);
 }
 
 MainWindow::~MainWindow() {
@@ -236,6 +333,233 @@ void MainWindow::buildActions() {
     addAction(quit);
 }
 
+void MainWindow::buildEditActions() {
+    QToolBar* bar = addToolBar(tr("Edit"));
+    bar->setObjectName(QStringLiteral("editBar"));
+    bar->setMovable(false);
+
+    saveAction_ = bar->addAction(tr("Save"));
+    saveAction_->setShortcut(QKeySequence::Save);
+    saveAction_->setEnabled(false);
+    connect(saveAction_, &QAction::triggered, this, [this] { (void)save(); });
+
+    auto* saveAsAction = new QAction(tr("Save As…"), this);
+    saveAsAction->setShortcut(QKeySequence::SaveAs);
+    connect(saveAsAction, &QAction::triggered, this, [this] { (void)saveAs(); });
+    addAction(saveAsAction);
+
+    undoAction_ = bar->addAction(tr("Undo"));
+    undoAction_->setShortcut(QKeySequence::Undo);
+    undoAction_->setEnabled(false);
+    connect(undoAction_, &QAction::triggered, this,
+            [this] { onWorker([](RenderWorker* w) { w->undo(); }); });
+    redoAction_ = bar->addAction(tr("Redo"));
+    redoAction_->setShortcut(QKeySequence::Redo);
+    redoAction_->setEnabled(false);
+    connect(redoAction_, &QAction::triggered, this,
+            [this] { onWorker([](RenderWorker* w) { w->redo(); }); });
+
+    bar->addSeparator();
+    tools_ = new QActionGroup(this);
+    tools_->setExclusive(true);
+    const struct {
+        const char* label;
+        const char* tip;
+        PageView::Tool tool;
+    } kTools[] = {
+        {"Select", "Select and copy text", PageView::Tool::Select},
+        {"Highlight", "Drag across text to highlight it", PageView::Tool::Highlight},
+        {"Note", "Click to add a sticky note", PageView::Tool::Note},
+        {"Draw", "Draw freehand", PageView::Tool::Ink},
+        {"Redact", "Drag a box: everything under it is removed from the file, "
+                   "not just covered", PageView::Tool::Redact},
+        {"Erase", "Click an annotation to delete it", PageView::Tool::Erase},
+    };
+    for (const auto& t : kTools) {
+        QAction* a = bar->addAction(tr(t.label));
+        a->setToolTip(tr(t.tip));
+        a->setCheckable(true);
+        tools_->addAction(a);
+        const PageView::Tool tool = t.tool;
+        connect(a, &QAction::triggered, this, [this, tool] { (void)view_->setTool(tool); });
+    }
+    tools_->actions().first()->setChecked(true);
+
+    auto* more = new QToolButton(bar);
+    more->setText(tr("More"));
+    more->setPopupMode(QToolButton::InstantPopup);
+    auto* menu = new QMenu(more);
+    menu->addAction(saveAsAction);
+    menu->addSeparator();
+    QAction* redactText = menu->addAction(tr("Redact Text…"));
+    connect(redactText, &QAction::triggered, this, [this] {
+        bool ok = false;
+        const QString needle = QInputDialog::getText(
+            this, tr("Redact text"),
+            tr("Remove every occurrence of (case-insensitive):"), QLineEdit::Normal, QString(), &ok);
+        if (ok && !needle.isEmpty()) {
+            onWorker([=](RenderWorker* w) { w->redactText(needle); });
+        }
+    });
+    QAction* watermark = menu->addAction(tr("Watermark…"));
+    connect(watermark, &QAction::triggered, this, [this] {
+        bool ok = false;
+        const QString text = QInputDialog::getText(this, tr("Watermark"), tr("Text to stamp on every page:"),
+                                                   QLineEdit::Normal, tr("DRAFT"), &ok);
+        if (ok && !text.isEmpty()) {
+            onWorker([=](RenderWorker* w) { w->addWatermark(text); });
+        }
+    });
+    QAction* crop = menu->addAction(tr("Crop Margins…"));
+    connect(crop, &QAction::triggered, this, [this] {
+        bool ok = false;
+        const double points = QInputDialog::getDouble(
+            this, tr("Crop margins"),
+            tr("Points to trim from every edge of every page.\n"
+               "Cropping hides content; it stays in the file. Use Redact to remove it."),
+            36.0, 0.0, 1000.0, 1, &ok);
+        if (ok && points > 0) {
+            onWorker([=](RenderWorker* w) { w->cropMargins(points); });
+        }
+    });
+    more->setMenu(menu);
+    bar->addWidget(more);
+
+    for (QAction* a : bar->actions()) {
+        a->setEnabled(false);
+    }
+    more->setEnabled(false);
+}
+
+void MainWindow::onEditStateChanged(bool canUndo, bool canRedo, bool modified) {
+    undoAction_->setEnabled(canUndo);
+    redoAction_->setEnabled(canRedo);
+    modified_ = modified;
+    saveAction_->setEnabled(pageCount_ > 0);
+    updateTitle();
+}
+
+void MainWindow::updateTitle() {
+    if (currentTitle_.isEmpty()) {
+        setWindowTitle(tr("Leht"));
+        return;
+    }
+    setWindowTitle(tr("%1%2 — Leht").arg(currentTitle_, modified_ ? QStringLiteral(" *") : QString()));
+}
+
+void MainWindow::onFieldsReady(const QVector<FieldRow>& rows) {
+    auto* dock = findChild<QDockWidget*>(QStringLiteral("formDock"));
+    populatingFields_ = true;
+    fields_->setRowCount(0);
+    fields_->setRowCount(static_cast<int>(rows.size()));
+    for (int i = 0; i < rows.size(); ++i) {
+        const FieldRow& f = rows[i];
+        auto* name = new QTableWidgetItem(f.name);
+        name->setFlags(Qt::ItemIsEnabled);
+        fields_->setItem(i, 0, name);
+        auto* value = new QTableWidgetItem(f.value);
+        if (f.readOnly) {
+            value->setFlags(Qt::ItemIsEnabled);
+            value->setToolTip(tr("Read-only field"));
+        }
+        fields_->setItem(i, 1, value);
+
+        // Fields with a fixed set of values get a drop-down.
+        const auto type = static_cast<leht::ops::FieldType>(f.type);
+        const bool button =
+            type == leht::ops::FieldType::Checkbox || type == leht::ops::FieldType::Radio;
+        if ((button || type == leht::ops::FieldType::Choice) && !f.readOnly) {
+            auto* combo = new QComboBox(fields_);
+            QStringList choices = f.options;
+            if (button) {
+                choices.push_back(QStringLiteral("Off"));
+            }
+            combo->addItems(choices);
+            combo->setCurrentText(f.value);
+            const QString fieldName = f.name;
+            connect(combo, &QComboBox::activated, this, [this, combo, fieldName] {
+                const QString v = combo->currentText();
+                onWorker([=](RenderWorker* w) { w->setFieldValue(fieldName, v); });
+            });
+            fields_->setCellWidget(i, 1, combo);
+        }
+    }
+    populatingFields_ = false;
+    if (dock != nullptr) {
+        dock->setVisible(!rows.isEmpty());
+    }
+}
+
+bool MainWindow::save() {
+    if (pageCount_ <= 0) {
+        return false;
+    }
+    if (currentPath_.isEmpty() || !currentPath_.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+        return saveAs();  // an image or XPS opened for viewing is not written back as PDF in place
+    }
+    statusBar()->showMessage(tr("Saving…"));
+    const QString path = currentPath_;
+    onWorker([=](RenderWorker* w) { w->save(path); });
+    return true;
+}
+
+bool MainWindow::saveAs() {
+    if (pageCount_ <= 0) {
+        return false;
+    }
+    const QString path = QFileDialog::getSaveFileName(this, tr("Save PDF"), currentPath_,
+                                                      tr("PDF documents (*.pdf)"));
+    if (path.isEmpty()) {
+        afterSave_ = nullptr;
+        return false;
+    }
+    statusBar()->showMessage(tr("Saving…"));
+    onWorker([=](RenderWorker* w) { w->save(path); });
+    return true;
+}
+
+void MainWindow::onSaved(const QString& path) {
+    currentPath_ = path;
+    currentTitle_ = QFileInfo(path).fileName();
+    modified_ = false;
+    updateTitle();
+    statusBar()->showMessage(tr("Saved %1").arg(currentTitle_), 3000);
+    if (auto then = std::exchange(afterSave_, nullptr)) {
+        then();
+    }
+}
+
+bool MainWindow::resolveUnsaved(std::function<void()> then) {
+    if (!modified_) {
+        return true;
+    }
+    const auto choice = QMessageBox::question(
+        this, tr("Unsaved changes"),
+        tr("“%1” has changes that are not saved. Save them?").arg(currentTitle_),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (choice == QMessageBox::Discard) {
+        return true;
+    }
+    if (choice == QMessageBox::Save) {
+        afterSave_ = std::move(then);
+        if (!save()) {
+            afterSave_ = nullptr;
+        }
+    }
+    return false;
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    if (resolveUnsaved([this] {
+            modified_ = false;
+            close();
+        })) {
+        event->accept();
+    } else {
+        event->ignore();
+    }
+}
+
 void MainWindow::openDialog() {
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Open PDF"), QString(),
@@ -246,7 +570,16 @@ void MainWindow::openDialog() {
 }
 
 void MainWindow::openPath(const QString& path) {
+    if (!resolveUnsaved([this, path] { openPath(path); })) {
+        return;
+    }
+    modified_ = false;
+    currentPath_ = QFileInfo(path).absoluteFilePath();
     currentTitle_ = QFileInfo(path).fileName();
+    (void)view_->setTool(PageView::Tool::Select);
+    if (tools_ != nullptr) {
+        tools_->actions().first()->setChecked(true);
+    }
     statusBar()->showMessage(tr("Opening %1…").arg(currentTitle_));
     view_->clear();
     if (thumbnails_ != nullptr) {
@@ -257,7 +590,21 @@ void MainWindow::openPath(const QString& path) {
 
 void MainWindow::onOpened(int pageCount, QVector<QSize> baseSizes) {
     pageCount_ = pageCount;
-    setWindowTitle(tr("%1 — Leht").arg(currentTitle_));
+    updateTitle();
+    if (auto* bar = findChild<QToolBar*>(QStringLiteral("editBar"))) {
+        for (QAction* a : bar->actions()) {
+            a->setEnabled(true);
+        }
+        for (QWidget* w : bar->findChildren<QToolButton*>()) {
+            w->setEnabled(true);
+        }
+    }
+    undoAction_->setEnabled(false);
+    redoAction_->setEnabled(false);
+    onWorker([](RenderWorker* w) {
+        w->listAnnotations();
+        w->listFields();
+    });
     statusBar()->clearMessage();
     view_->setPages(baseSizes);
     view_->fitWidth();

@@ -30,6 +30,13 @@
 #include "leht/context.hpp"
 #include "leht/document.hpp"
 #include "leht/error.hpp"
+#include "leht/ops/annotate.hpp"
+#include "leht/ops/forms.hpp"
+#include "leht/text.hpp"
+
+#include <QDir>
+#include <QMouseEvent>
+#include <QTableWidget>
 
 #include <QDockWidget>
 #include <QScrollBar>
@@ -641,6 +648,131 @@ int main(int argc, char** argv) {
         } catch (const leht::Error& e) {
             check(false, "printed PDF opens cleanly");
             std::printf("      open error: %s\n", e.what());
+        }
+    }
+
+    // --- Editing (M4b) -----------------------------------------------------
+    {
+        QTemporaryDir tmp;
+        const QString copy = tmp.filePath(QStringLiteral("edit me.pdf"));
+        QFile::copy(QString::fromStdString(doc), copy);
+        window.openPath(copy);
+        pump(1500);
+        view->setZoom(1.0);
+        view->verticalScrollBar()->setValue(0);
+        pump(500);
+        check(!window.isModified(), "a freshly opened document is unmodified");
+
+        // Where "quick brown" is on page 1, from core in-process.
+        leht::Context ctx;
+        QVector<QRectF> boxes;
+        {
+            leht::Document d = leht::Document::open(ctx, copy.toStdString());
+            const auto hit = leht::TextPage(ctx, d, 0).search("quick brown").front();
+            for (const auto& q : hit.quads) {
+                boxes.push_back(QRectF(QPointF(q.min_x(), q.min_y()), QPointF(q.max_x(), q.max_y())));
+            }
+        }
+
+        const QImage beforeEdit = grabView(window);
+        emit view->highlightRequested(0, boxes);
+        pump(1200);
+        check(window.isModified(), "a highlight marks the document modified");
+        check(grabView(window) != beforeEdit, "the highlight is drawn");
+
+        QMetaObject::invokeMethod(worker, "undo", Qt::QueuedConnection);
+        pump(1200);
+        check(!window.isModified(), "undo takes it back");
+        QMetaObject::invokeMethod(worker, "redo", Qt::QueuedConnection);
+        pump(1200);
+        check(window.isModified(), "redo puts it back");
+
+        // A freehand stroke through real mouse events on the viewport.
+        check(view->setTool(PageView::Tool::Ink), "the ink tool is available unrotated");
+        QWidget* vp = view->viewport();
+        const QPoint start(120, 300);
+        auto mouse = [&](QEvent::Type type, QPoint at, Qt::MouseButtons held) {
+            QMouseEvent e(type, QPointF(at), vp->mapToGlobal(QPointF(at)), Qt::LeftButton, held,
+                          Qt::NoModifier);
+            QApplication::sendEvent(vp, &e);
+        };
+        mouse(QEvent::MouseButtonPress, start, Qt::LeftButton);
+        for (int i = 1; i <= 10; ++i) {
+            mouse(QEvent::MouseMove, start + QPoint(i * 15, (i % 2) * 20), Qt::LeftButton);
+        }
+        mouse(QEvent::MouseButtonRelease, start + QPoint(150, 0), Qt::NoButton);
+        pump(1200);
+        (void)view->setTool(PageView::Tool::Select);
+
+        // Kill the worker from outside mid-session: the fresh one must get
+        // both edits back from the log.
+        const qint64 pid = worker->workerPid();
+        check(pid > 0, "a worker is running");
+        ::kill(static_cast<pid_t>(pid), SIGKILL);
+        pump(300);
+        // The next request notices, respawns and replays.
+        QMetaObject::invokeMethod(worker, "listAnnotations", Qt::QueuedConnection);
+        pump(1500);
+        check(worker->workerPid() != pid, "the killed worker was replaced");
+
+        check(window.save(), "save starts");
+        pump(2000);
+        check(!window.isModified(), "saving clears the modified mark");
+        try {
+            leht::Document saved = leht::Document::open(ctx, copy.toStdString());
+            const auto annots = leht::ops::list_annotations(ctx, saved);
+            std::printf("      saved annotations: %zu\n", annots.size());
+            check(annots.size() == 2, "both edits survived the worker kill and were saved");
+            bool highlight = false;
+            bool ink = false;
+            for (const auto& a : annots) {
+                highlight = highlight || a.type == "Highlight";
+                ink = ink || a.type == "Ink";
+            }
+            check(highlight && ink, "the saved file has the highlight and the drawing");
+        } catch (const leht::Error& e) {
+            check(false, "the saved file opens");
+            std::printf("      open error: %s\n", e.what());
+        }
+        check(QFile::exists(copy) && QDir(tmp.path()).entryList(QDir::Hidden | QDir::Files).size() == 1,
+              "no temporary file is left beside the saved one");
+
+        // Redact a box over the first line, then save and look for the text.
+        emit view->redactRequested(0, boxes.first().adjusted(-1, -1, 1, 1));
+        pump(1500);
+        check(window.isModified(), "a redaction marks the document modified");
+        (void)window.save();
+        pump(2000);
+        try {
+            leht::Document saved = leht::Document::open(ctx, copy.toStdString());
+            const auto left = leht::TextPage(ctx, saved, 0).search("quick brown");
+            check(left.size() == 49, "the redacted line's text is gone from the file (49 of 50 left)");
+        } catch (const leht::Error&) {
+            check(false, "the redacted file opens");
+        }
+
+        // Forms: the panel lists the fields, and a value set there is saved.
+        const QString form = tmp.filePath(QStringLiteral("form.pdf"));
+        if (QFile::copy(QStringLiteral(LEHT_CORPUS_DIR "/form.pdf"), form)) {
+            window.openPath(form);
+            pump(1500);
+            auto* table = window.findChild<QTableWidget*>();
+            check(table != nullptr && table->rowCount() == 2, "the form panel lists two fields");
+            QMetaObject::invokeMethod(worker, "setFieldValue", Qt::QueuedConnection,
+                                      Q_ARG(QString, QStringLiteral("name")),
+                                      Q_ARG(QString, QStringLiteral("Marlon")));
+            pump(1200);
+            check(window.isModified(), "filling a field marks the document modified");
+            (void)window.save();
+            pump(2000);
+            leht::Document saved = leht::Document::open(ctx, form.toStdString());
+            bool filled = false;
+            for (const auto& f : leht::ops::list_fields(ctx, saved)) {
+                filled = filled || (f.name == "name" && f.value == "Marlon");
+            }
+            check(filled, "the filled value is in the saved file");
+        } else {
+            std::printf("  skip  forms (tests/corpus/form.pdf not generated)\n");
         }
     }
 

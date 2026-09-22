@@ -9,7 +9,11 @@
 #include <QSize>
 #include <QString>
 #include <QPair>
+#include <QPolygonF>
+#include <QSet>
 #include <QVector>
+
+#include "edit_model.hpp"
 
 /// Continuous vertical page view.
 ///
@@ -75,6 +79,19 @@ public:
     /// Whether `page` has been marked as failed (see markPageFailed).
     [[nodiscard]] bool isPageFailed(int page) const { return failed_.contains(page); }
 
+    // --- Editing tools ------------------------------------------------------
+    /// What a left-button drag or click does. Every tool but Select works in
+    /// base coordinates, so needs the view unrotated (see setTool).
+    enum class Tool { Select, Highlight, Note, Ink, Redact, Erase };
+    /// Returns false (and keeps Select) if `tool` needs an unrotated view and
+    /// the view is rotated.
+    bool setTool(Tool tool);
+    [[nodiscard]] Tool tool() const { return tool_; }
+
+    /// The annotations currently on the document, for the Erase tool's hit
+    /// test and outlines.
+    void setAnnotations(const QVector<AnnotRow>& rows);
+
 public slots:
     /// A finished render from the worker. Ignored if the zoom has since changed.
     void onRendered(int page, double zoom, int rotation, quint64 generation, QImage image);
@@ -83,6 +100,11 @@ public slots:
     /// a labelled placeholder rather than a blank sheet, so a missing page is
     /// visibly missing instead of looking empty.
     void markPageFailed(int page);
+
+    /// The document changed (see RenderWorker::documentEdited): re-render the
+    /// pages named, taking `baseSizes` as the sizes now. The old images stay
+    /// on screen until the new ones land, so an edit never flashes blank.
+    void onDocumentEdited(QVector<int> pages, bool allPages, QVector<QSize> baseSizes);
 
 signals:
     /// The view wants `page` rendered at `zoom`. `generation` lets the worker
@@ -94,6 +116,15 @@ signals:
     /// A drag or double-click wants text selected on `page`, in base coords.
     void selectRequested(int page, QPointF aBase, QPointF bBase, int mode);
     void matchNavigated(int index, int total);
+
+    // Editing requests, all in base coordinates on one page.
+    void highlightRequested(int page, QVector<QRectF> boxes);
+    void noteRequested(int page, QPointF at);
+    void inkRequested(int page, QVector<QPolygonF> strokes);
+    void redactRequested(int page, QRectF box);
+    void eraseRequested(int annotId);
+    /// A tool could not be used, with the reason, for the status bar.
+    void toolRefused(QString reason);
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
@@ -159,4 +190,23 @@ private:
     bool selecting_ = false;
     int selectAnchorPage_ = -1;
     QPointF selectAnchorBase_;
+    quint64 selectsSent_ = 0;      ///< selection requests emitted...
+    quint64 selectsReceived_ = 0;  ///< ...and answered
+    bool highlightWhenSettled_ = false;
+
+    // Editing tools.
+    Tool tool_ = Tool::Select;
+    QVector<AnnotRow> annotations_;
+    int dragPage_ = -1;            ///< page an ink stroke or redaction box is on
+    QPointF dragStart_;            ///< base coordinates
+    QPointF dragNow_;
+    QPolygonF stroke_;             ///< the ink stroke being drawn, base coordinates
+    /// Renders requested before the last edit show the old document; any that
+    /// arrive late are dropped rather than shown as current.
+    quint64 editFloor_ = 0;
+
+    void emitSelect(int page, QPointF a, QPointF b, int mode);
+    /// Turns the settled selection into a highlight request, then clears it.
+    void finishHighlight();
+    [[nodiscard]] bool editing() const { return tool_ != Tool::Select; }
 };

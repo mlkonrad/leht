@@ -7,12 +7,14 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPen>
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 PageView::PageView(QWidget* parent) : QAbstractScrollArea(parent) {
     setFrameShape(QFrame::NoFrame);
@@ -145,6 +147,10 @@ void PageView::fitPage() {
 
 void PageView::rotateBy(int degrees) {
     rotation_ = (((rotation_ + degrees) % 360) + 360) % 360;
+    if (rotation_ != 0 && editing()) {
+        tool_ = Tool::Select;
+        emit toolRefused(tr("Editing tools need the view unrotated; back to Select."));
+    }
     // Every cached image is now the wrong orientation; drop them and re-render.
     rendered_.clear();
     requested_.clear();
@@ -242,7 +248,10 @@ void PageView::requestVisible() {
 }
 
 void PageView::onRendered(int page, double zoom, int rotation,
-                          quint64 /*generation*/, QImage image) {
+                          quint64 generation, QImage image) {
+    if (generation < editFloor_) {
+        return;  // rendered from the document as it was before an edit
+    }
     requested_.remove(page);
     // Accept it even if zoom/rotation moved on: a scaled stale image beats a
     // blank placeholder, and the fresh one will replace it.
@@ -350,11 +359,84 @@ void PageView::scrollToCurrentMatch() {
 
 // --- Selection --------------------------------------------------------------
 
+void PageView::emitSelect(int page, QPointF a, QPointF b, int mode) {
+    ++selectsSent_;
+    emit selectRequested(page, a, b, mode);
+}
+
 void PageView::setSelection(int page, const QVector<QRectF>& boxes,
                             const QString& text) {
+    ++selectsReceived_;
     selectionPage_ = page;
     selectionBoxes_ = boxes;
     selectionText_ = text;
+    // The highlight tool acts on the selection once the reply to the last
+    // drag position is in: replies arrive in request order.
+    if (highlightWhenSettled_ && selectsReceived_ == selectsSent_) {
+        finishHighlight();
+    }
+    viewport()->update();
+}
+
+void PageView::finishHighlight() {
+    highlightWhenSettled_ = false;
+    if (selectionPage_ >= 0 && !selectionBoxes_.isEmpty()) {
+        emit highlightRequested(selectionPage_, selectionBoxes_);
+    }
+    selectionPage_ = -1;
+    selectionBoxes_.clear();
+    selectionText_.clear();
+    viewport()->update();
+}
+
+bool PageView::setTool(Tool tool) {
+    if (tool != Tool::Select && rotation_ != 0) {
+        emit toolRefused(tr("Editing tools need the view unrotated (Ctrl+R to rotate back)."));
+        tool_ = Tool::Select;
+        return false;
+    }
+    tool_ = tool;
+    highlightWhenSettled_ = false;
+    dragPage_ = -1;
+    stroke_.clear();
+    viewport()->setCursor(tool == Tool::Select ? Qt::IBeamCursor
+                          : tool == Tool::Erase ? Qt::PointingHandCursor
+                                                : Qt::CrossCursor);
+    viewport()->update();
+    return true;
+}
+
+void PageView::setAnnotations(const QVector<AnnotRow>& rows) {
+    annotations_ = rows;
+    viewport()->update();
+}
+
+void PageView::onDocumentEdited(QVector<int> pages, bool allPages, QVector<QSize> baseSizes) {
+    if (!baseSizes.isEmpty() && baseSizes != baseSizes_) {
+        baseSizes_ = baseSizes;  // a crop: the layout moves
+        relayout();
+    }
+    const auto stale = [this](int p) {
+        const auto it = rendered_.find(p);
+        if (it != rendered_.end()) {
+            it->zoom = -1.0;  // keep the image as a proxy, but ask for a new one
+        }
+        requested_.remove(p);
+    };
+    if (allPages) {
+        for (auto it = rendered_.begin(); it != rendered_.end(); ++it) {
+            stale(it.key());
+        }
+        requested_.clear();
+    } else {
+        for (const int p : pages) {
+            stale(p);
+        }
+    }
+    // Anything already in flight shows the document before the edit.
+    bumpGeneration();
+    editFloor_ = generation_;
+    requestVisible();
     viewport()->update();
 }
 
@@ -375,6 +457,33 @@ void PageView::mousePressEvent(QMouseEvent* event) {
     if (page < 0) {
         return;
     }
+    switch (tool_) {
+    case Tool::Note:
+        emit noteRequested(page, base);
+        return;
+    case Tool::Erase:
+        // Topmost first: the last annotation drawn is the one on top.
+        for (auto it = annotations_.crbegin(); it != annotations_.crend(); ++it) {
+            if (it->page == page && it->rect.normalized().adjusted(-2, -2, 2, 2).contains(base)) {
+                emit eraseRequested(it->id);
+                return;
+            }
+        }
+        return;
+    case Tool::Ink:
+        dragPage_ = page;
+        stroke_ = QPolygonF{base};
+        viewport()->update();
+        return;
+    case Tool::Redact:
+        dragPage_ = page;
+        dragStart_ = dragNow_ = base;
+        viewport()->update();
+        return;
+    case Tool::Select:
+    case Tool::Highlight:
+        break;
+    }
     selecting_ = true;
     selectAnchorPage_ = page;
     selectAnchorBase_ = base;
@@ -385,24 +494,57 @@ void PageView::mousePressEvent(QMouseEvent* event) {
 }
 
 void PageView::mouseMoveEvent(QMouseEvent* event) {
-    if (!selecting_) {
-        return;
-    }
     int page = -1;
     QPointF base;
     viewportToPage(event->pos(), page, base);
+    if (dragPage_ >= 0) {
+        // Ink and redaction stay on the page they started on.
+        if (page != dragPage_) {
+            return;
+        }
+        if (tool_ == Tool::Ink) {
+            stroke_.push_back(base);
+        } else {
+            dragNow_ = base;
+        }
+        viewport()->update();
+        return;
+    }
+    if (!selecting_) {
+        return;
+    }
     // Selection stays on the anchor page; clamp the far point to it.
     if (page != selectAnchorPage_) {
         return;
     }
-    emit selectRequested(selectAnchorPage_, selectAnchorBase_, base,
-                         /*Chars=*/0);
+    emitSelect(selectAnchorPage_, selectAnchorBase_, base, /*Chars=*/0);
 }
 
 void PageView::mouseReleaseEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
-        selecting_ = false;
+    if (event->button() != Qt::LeftButton) {
+        return;
     }
+    if (dragPage_ >= 0) {
+        const int page = std::exchange(dragPage_, -1);
+        if (tool_ == Tool::Ink && stroke_.size() >= 2) {
+            emit inkRequested(page, {stroke_});
+        } else if (tool_ == Tool::Redact) {
+            const QRectF box = QRectF(dragStart_, dragNow_).normalized();
+            if (box.width() >= 2 && box.height() >= 2) {
+                emit redactRequested(page, box);
+            }
+        }
+        stroke_.clear();
+        viewport()->update();
+        return;
+    }
+    if (selecting_ && tool_ == Tool::Highlight) {
+        highlightWhenSettled_ = true;
+        if (selectsReceived_ == selectsSent_) {
+            finishHighlight();  // every reply is already in
+        }
+    }
+    selecting_ = false;
 }
 
 void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
@@ -412,8 +554,14 @@ void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
     if (page < 0) {
         return;
     }
+    if (tool_ != Tool::Select && tool_ != Tool::Highlight) {
+        return;
+    }
     // Word select: same point twice, Words mode.
-    emit selectRequested(page, base, base, /*Words=*/1);
+    emitSelect(page, base, base, /*Words=*/1);
+    if (tool_ == Tool::Highlight) {
+        highlightWhenSettled_ = true;
+    }
 }
 
 void PageView::markPageFailed(int page) {
@@ -490,6 +638,33 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
             for (const QRectF& b : selectionBoxes_) {
                 painter.fillRect(baseRectToViewport(p, b), QColor(60, 120, 220, 90));
             }
+        }
+
+        // Erase tool: outline what can be erased.
+        if (tool_ == Tool::Erase) {
+            painter.setPen(QPen(QColor(200, 40, 40), 1, Qt::DashLine));
+            for (const AnnotRow& a : annotations_) {
+                if (a.page == p) {
+                    painter.drawRect(baseRectToViewport(p, a.rect.normalized()));
+                }
+            }
+        }
+
+        // A stroke or redaction box being drawn.
+        if (dragPage_ == p && tool_ == Tool::Ink && stroke_.size() >= 2) {
+            QPolygonF shown;
+            const QRect pr = pageRectInViewport(p);
+            for (const QPointF& pt : stroke_) {
+                shown.push_back(QPointF(pr.x() + pt.x() * zoom_, pr.y() + pt.y() * zoom_));
+            }
+            painter.setPen(QPen(QColor(30, 60, 200), std::max(1.0, 1.5 * zoom_)));
+            painter.drawPolyline(shown);
+        }
+        if (dragPage_ == p && tool_ == Tool::Redact) {
+            const QRectF box = baseRectToViewport(p, QRectF(dragStart_, dragNow_).normalized());
+            painter.fillRect(box, QColor(0, 0, 0, 90));
+            painter.setPen(QPen(Qt::black, 1, Qt::DashLine));
+            painter.drawRect(box);
         }
     }
 
