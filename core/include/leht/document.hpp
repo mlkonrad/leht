@@ -105,7 +105,7 @@ public:
     void save_fd(int fd, const SaveOptions& options) const;
 
     /// Records that content has been redacted from this document. Every later
-    /// save then garbage-collects fully, whatever SaveOptions asks for:
+    /// save then garbage-collects, whatever SaveOptions asks for:
     /// without collection, the unreferenced original content streams would
     /// still be written out, and the redaction would be cosmetic. Called by
     /// ops::redact(); it only ever makes a save stricter.

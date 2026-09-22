@@ -30,11 +30,20 @@ struct Rect {
     }
 };
 
+/// A point in base coordinates (see Rect).
+struct Point {
+    float x = 0, y = 0;
+};
+
 struct SaveOptions {
     /// Garbage collection: 0 none, 1 collect, 2 renumber, 3 de-duplicate.
-    /// Raised to at least 3 when the document has been redacted -- see
-    /// Document::save().
-    int garbage = 3;
+    ///
+    /// 1 by default because levels 2 and 3 renumber the objects of the OPEN
+    /// document, not just of the file written -- which would change every
+    /// ops::AnnotId the caller holds. Use them for a last save before closing
+    /// (they make a smaller file). Raised to at least 1 when the document has
+    /// been redacted -- see Document::save().
+    int garbage = 1;
     bool compress_streams = true;
     /// Linearise for "fast web view". Costs a second pass.
     bool linearize = false;

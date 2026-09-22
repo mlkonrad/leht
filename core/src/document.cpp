@@ -138,8 +138,8 @@ pdf_write_options write_options(const SaveOptions& options, bool redacted) {
     opts.do_garbage = options.garbage;
     // A redaction removes content from the page's content stream, but the old
     // stream object is still in the xref. Only collection drops it.
-    if (redacted && opts.do_garbage < 3) {
-        opts.do_garbage = 3;
+    if (redacted && opts.do_garbage < 1) {
+        opts.do_garbage = 1;
     }
     opts.do_incremental = 0;
     opts.do_compress = options.compress_streams ? 1 : 0;

@@ -23,6 +23,7 @@ add_library(lehtcore
     src/ops/redact.cpp
     src/ops/crop.cpp
     src/ops/watermark.cpp
+    src/ops/annotate.cpp
 )
 add_library(leht::core ALIAS lehtcore)
 

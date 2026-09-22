@@ -12,6 +12,7 @@
 #include "leht/ops/compress.hpp"
 #include "leht/ops/crop.hpp"
 #include "leht/ops/encrypt.hpp"
+#include "leht/ops/annotate.hpp"
 #include "leht/ops/merge.hpp"
 #include "leht/ops/pages.hpp"
 #include "leht/ops/redact.hpp"
@@ -59,6 +60,10 @@ constexpr const char* kUsage =
     "            hides, does not remove: the rest of the page stays in the file\n"
     "  watermark FILE -o OUT.pdf --text TEXT [-p RANGES] [--opacity F] [--angle DEG]\n"
     "            [--size PT] [--color RRGGBB] [--under]\n"
+    "  annots    FILE                         list annotations, with their ids\n"
+    "  annotate  FILE -o OUT.pdf [--highlight|--underline|--strike TEXT]\n"
+    "            [--note P:X,Y:TEXT]... [--stamp P:NAME[:BOX]]... [--delete ID]...\n"
+    "            [--author NAME] [--color RRGGBB]\n"
     "\n"
     "options:\n"
     "  -o PATH        output file or pattern\n"
@@ -83,6 +88,9 @@ constexpr const char* kUsage =
     "  --angle DEG    watermark angle, counter-clockwise (default 45)\n"
     "  --size PT      watermark font size; 0 fits the page (default 0)\n"
     "  --under        draw the watermark beneath the page content\n"
+    "  --note P:X,Y:TEXT  a sticky note on page P at X,Y (points from top-left)\n"
+    "  --stamp P:NAME[:BOX]  a stamp: Approved, Draft, Confidential, Final,\n"
+    "                 NotApproved, ForComment, TopSecret, ...; top-right by default\n"
     "\n"
     "leht is free software under the AGPL-3.0-or-later.\n";
 
@@ -169,7 +177,8 @@ bool takes_value(const std::string& name) {
         "-o", "-p", "-z", "-n", "-d", "-q", "--preset",
         "--method", "--user-pw", "--owner-pw", "--password", "--search",
         "--text", "--rect", "--images", "--box", "--margins", "--opacity",
-        "--angle", "--size", "--color"};
+        "--angle", "--size", "--color", "--highlight", "--underline", "--strike",
+        "--note", "--stamp", "--delete", "--author"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -660,6 +669,170 @@ int cmd_watermark(const leht::Context& ctx, const Args& args) {
     return 0;
 }
 
+const char* kind_name(leht::ops::AnnotKind k) {
+    switch (k) {
+        case leht::ops::AnnotKind::Highlight: return "highlight";
+        case leht::ops::AnnotKind::Underline: return "underline";
+        default: return "strike-out";
+    }
+}
+
+int cmd_annots(const leht::Context& ctx, const Args& args) {
+    leht::Document doc = leht::Document::open(ctx, require_input(args));
+    const auto all = leht::ops::list_annotations(ctx, doc);
+    if (all.empty()) {
+        std::printf("no annotations\n");
+        return 0;
+    }
+    std::printf("%6s %5s  %-10s %s\n", "id", "page", "type", "text");
+    for (const auto& a : all) {
+        std::string text = a.contents;
+        for (char& ch : text) {
+            if (ch == '\n' || ch == '\r') {
+                ch = ' ';
+            }
+        }
+        if (text.size() > 60) {
+            text = text.substr(0, 57) + "...";
+        }
+        const std::string author = a.author.empty() ? "" : "[" + a.author + "] ";
+        std::printf("%6d %5d  %-10s %s%s\n", a.id, a.page + 1, a.type.c_str(), author.c_str(),
+                    text.c_str());
+    }
+    return 0;
+}
+
+/// Splits "P:REST" into a 0-based page and REST.
+std::pair<int, std::string> page_prefix(const std::string& spec, const char* flag) {
+    const std::size_t colon = spec.find(':');
+    char* end = nullptr;
+    errno = 0;
+    const long page = std::strtol(spec.c_str(), &end, 10);
+    if (colon == std::string::npos || end != spec.c_str() + colon || errno == ERANGE ||
+        page < 1 || page > INT_MAX) {
+        throw leht::Error(0, std::string(flag) + " must start with a page number and ':', got '" +
+                                 spec + "'");
+    }
+    return {static_cast<int>(page) - 1, spec.substr(colon + 1)};
+}
+
+int cmd_annotate(const leht::Context& ctx, const Args& args) {
+    using leht::ops::AnnotKind;
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+
+    leht::ops::AnnotSpec base;
+    base.author = args.flag("--author");
+    const bool custom_color = !args.flag("--color").empty();
+    if (custom_color) {
+        parse_color(args.flag("--color"), base.color);
+    }
+
+    // Parse and check everything before touching the document.
+    struct Mark {
+        AnnotKind kind;
+        std::string text;
+    };
+    std::vector<Mark> marks;
+    for (const auto& [flag, kind] : {std::pair{"--highlight", AnnotKind::Highlight},
+                                     std::pair{"--underline", AnnotKind::Underline},
+                                     std::pair{"--strike", AnnotKind::StrikeOut}}) {
+        for (const std::string& text : args.values(flag)) {
+            if (text.empty()) {
+                throw leht::Error(0, std::string(flag) + " needs some text to find");
+            }
+            marks.push_back({kind, text});
+        }
+    }
+    std::vector<std::pair<int, leht::ops::AnnotSpec>> adds;
+    for (const std::string& spec : args.values("--note")) {
+        const auto [page, rest] = page_prefix(spec, "--note");
+        const std::size_t colon = rest.find(':');
+        float xy[2];
+        if (colon == std::string::npos || !parse_floats(rest.substr(0, colon).c_str(), 2, xy)) {
+            throw leht::Error(0, "--note expects PAGE:X,Y:TEXT, got '" + spec + "'");
+        }
+        leht::ops::AnnotSpec note = base;
+        note.kind = AnnotKind::Note;
+        note.rect = leht::Rect{xy[0], xy[1], xy[0], xy[1]};
+        note.contents = rest.substr(colon + 1);
+        adds.emplace_back(page, note);
+    }
+    std::vector<std::pair<int, std::string>> stamps;
+    for (const std::string& spec : args.values("--stamp")) {
+        stamps.push_back(page_prefix(spec, "--stamp"));
+    }
+    std::vector<leht::ops::AnnotId> deletes;
+    for (const std::string& id : args.values("--delete")) {
+        char* end = nullptr;
+        errno = 0;
+        const long value = std::strtol(id.c_str(), &end, 10);
+        if (id.empty() || *end != '\0' || errno == ERANGE || value < 1 || value > INT_MAX) {
+            throw leht::Error(0, "--delete expects an annotation id, got '" + id + "'");
+        }
+        deletes.push_back(static_cast<int>(value));
+    }
+    if (marks.empty() && adds.empty() && stamps.empty() && deletes.empty()) {
+        throw leht::Error(0, "annotate needs --highlight, --underline, --strike, --note, "
+                             "--stamp or --delete");
+    }
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    for (const auto& [page, name_box] : stamps) {
+        leht::ops::AnnotSpec stamp = base;
+        stamp.kind = AnnotKind::Stamp;
+        if (!custom_color) {
+            stamp.color[0] = 0.8F;  // stamps are red by convention
+            stamp.color[1] = 0.1F;
+            stamp.color[2] = 0.1F;
+        }
+        const std::size_t colon = name_box.find(':');
+        stamp.stamp = name_box.substr(0, colon);
+        if (colon != std::string::npos) {
+            float v[4];
+            if (!parse_floats(name_box.c_str() + colon + 1, 4, v)) {
+                throw leht::Error(0, "--stamp box expects X0,Y0,X1,Y1");
+            }
+            stamp.rect = leht::Rect{v[0], v[1], v[2], v[3]};
+        } else if (page < doc.page_count()) {
+            // Top-right corner, clear of the margin.
+            leht::Renderer sizer(ctx, doc);
+            const auto size = sizer.page_size(page, 1.0F);
+            const auto w = static_cast<float>(size.width);
+            stamp.rect = leht::Rect{w - 36 - 180, 36, w - 36, 36 + 54};
+        }
+        adds.emplace_back(page, stamp);
+    }
+
+    int deleted = 0;
+    for (const int id : deletes) {
+        if (!leht::ops::delete_annotation(ctx, doc, id)) {
+            throw leht::Error(0, "no annotation with id " + std::to_string(id) +
+                                     " (see 'leht annots')");
+        }
+        ++deleted;
+    }
+    int added = 0;
+    for (const auto& [page, spec] : adds) {
+        (void)leht::ops::add_annotation(ctx, doc, page, spec);
+        ++added;
+    }
+    for (const Mark& m : marks) {
+        leht::ops::AnnotSpec spec = base;
+        spec.kind = m.kind;
+        const auto ids = leht::ops::mark_text(ctx, doc, m.text, args.flag("-p"), spec);
+        if (ids.empty()) {
+            std::printf("  no occurrences of \"%s\" to %s\n", m.text.c_str(), kind_name(m.kind));
+        }
+        added += static_cast<int>(ids.size());
+    }
+
+    doc.save(output, leht::SaveOptions{});
+    std::printf("added %d, deleted %d annotation%s -> %s\n", added, deleted,
+                added + deleted == 1 ? "" : "s", output.c_str());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -697,6 +870,8 @@ int main(int argc, char** argv) {
         if (cmd == "redact")   { return cmd_redact(ctx, args); }
         if (cmd == "crop")     { return cmd_crop(ctx, args); }
         if (cmd == "watermark") { return cmd_watermark(ctx, args); }
+        if (cmd == "annots")   { return cmd_annots(ctx, args); }
+        if (cmd == "annotate") { return cmd_annotate(ctx, args); }
 
         std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
         std::fputs(kUsage, stderr);

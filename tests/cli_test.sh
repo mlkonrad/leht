@@ -96,6 +96,28 @@ expect 1 "watermark non-Latin text"        watermark "$IN" --text "水印" -o "$
 expect 0 "watermark"                       watermark "$IN" --text DRAFT -o "$OUT/w.pdf"
 expect 0 "watermark all options"           watermark "$IN" --text "Copy 1" -p 2 --opacity 0.4 --angle -30 --size 48 --color '#cc0000' --under -o "$OUT/w.pdf"
 
+# Annotations.
+expect 1 "annotate with nothing to do"     annotate "$IN" -o "$OUT/n.pdf"
+expect 1 "annotate bad --note"             annotate "$IN" --note "1:100:hi" -o "$OUT/n.pdf"
+expect 1 "annotate --note no page"         annotate "$IN" --note "100,100:hi" -o "$OUT/n.pdf"
+expect 1 "annotate --note page 0"          annotate "$IN" --note "0:1,1:hi" -o "$OUT/n.pdf"
+expect 1 "annotate unknown stamp"          annotate "$IN" --stamp 1:Bogus -o "$OUT/n.pdf"
+expect 1 "annotate stamp page too high"    annotate "$IN" --stamp 99:Draft -o "$OUT/n.pdf"
+expect 1 "annotate --delete junk"          annotate "$IN" --delete 12x -o "$OUT/n.pdf"
+expect 1 "annotate --delete missing id"    annotate "$IN" --delete 99999 -o "$OUT/n.pdf"
+expect 1 "annotate empty --highlight"      annotate "$IN" --highlight "" -o "$OUT/n.pdf"
+expect 0 "annotate everything"             annotate "$IN" --highlight fox --underline lazy -p 1 --note "2:72,72:Check: this" --stamp 1:Approved --stamp "3:Draft:100,100,300,160" --author Tester --color 00aa00 -o "$OUT/n.pdf"
+expect 0 "annots lists them"               annots "$OUT/n.pdf"
+if ! grep -q "Check: this" "$OUT/stdout"; then
+    echo "FAIL  annots did not list the note"; failures=$((failures + 1))
+fi
+note_id=$(awk '$3 == "Text" { print $1 }' "$OUT/stdout")
+expect 0 "annotate --delete by id"         annotate "$OUT/n.pdf" --delete "$note_id" -o "$OUT/n2.pdf"
+expect 0 "annots after delete"             annots "$OUT/n2.pdf"
+if grep -q "Check: this" "$OUT/stdout"; then
+    echo "FAIL  deleted note is still listed"; failures=$((failures + 1))
+fi
+
 # Valid invocations still succeed.
 expect 0 "rotate -d 90"                    rotate "$IN" -d 90 -o "$OUT/r.pdf"
 expect 0 "rotate -d -90"                   rotate "$IN" -d -90 -o "$OUT/r.pdf"
