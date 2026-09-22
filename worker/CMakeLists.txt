@@ -7,15 +7,22 @@ add_executable(leht_worker
 set_target_properties(leht_worker PROPERTIES OUTPUT_NAME leht-worker)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SECCOMP REQUIRED IMPORTED_TARGET libseccomp)
-target_link_libraries(leht_worker PRIVATE leht::core leht::ipc leht::warnings PkgConfig::SECCOMP)
+# leht::crypto is here for VERIFICATION only. A signature's CMS blob comes out
+# of the document, so it is hostile input and belongs inside the sandbox. The
+# signing key never comes near this process.
+target_link_libraries(leht_worker PRIVATE leht::core leht::crypto leht::ipc leht::warnings
+                      PkgConfig::SECCOMP)
 
 include(GNUInstallDirs)
 install(TARGETS leht_worker RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/leht)
 
 if(LEHT_BUILD_TESTS)
     add_executable(test_worker tests/test_worker.cpp)
-    target_link_libraries(test_worker PRIVATE leht::core leht::ipc leht::warnings)
-    target_include_directories(test_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests)
+    target_link_libraries(test_worker PRIVATE leht::core leht::crypto leht::ipc leht::warnings)
+    target_include_directories(test_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests
+                               ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/tests)
+    find_package(OpenSSL 3.2 REQUIRED COMPONENTS Crypto)
+    target_link_libraries(test_worker PRIVATE OpenSSL::Crypto)
     target_compile_definitions(test_worker PRIVATE
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus"
         LEHT_WORKER_EXE="$<TARGET_FILE:leht_worker>")

@@ -239,6 +239,120 @@ void check_truncations(const Msg& msg) {
     CHECK(rejects<Msg>(trailing));
 }
 
+PrepareSignature sample_prepare() {
+    PrepareSignature m;
+    m.request.field = "Approver";
+    m.request.page = 2;
+    m.request.rect = {10, 20, 110, 70};
+    m.request.name = "Mari Maasikas";
+    m.request.reason = "Approved";
+    m.request.location = "Tallinn";
+    m.request.time = 1'790'000'000;
+    m.request.reserve = 8192;
+    m.request.appearance.image = {0x89, 'P', 'N', 'G'};
+    m.request.appearance.strokes = {{{1, 2}, {3, 4}}, {{5, 6}}};
+    m.request.appearance.strokes_width = 100;
+    m.request.appearance.strokes_height = 40;
+    m.request.appearance.stroke_width = 1.5F;
+    m.request.appearance.lines = {"Mari Maasikas", "2026-09-22"};
+    return m;
+}
+
+SignatureList sample_signature_list() {
+    CertRow signer;
+    signer.subject = "CN=Mari Maasikas,C=EE";
+    signer.common_name = "Mari Maasikas";
+    signer.issuer = "CN=Test Root";
+    signer.serial = "0a0b";
+    signer.sha256 = "abcdef";
+    signer.not_before = 1'700'000'000;
+    signer.not_after = 1'800'000'000;
+    signer.can_sign = true;
+
+    SignatureRow row;
+    row.field = "Signature1";
+    row.page = 0;
+    row.rect = {1, 2, 3, 4};
+    row.subfilter = "ETSI.CAdES.detached";
+    row.name = "Mari Maasikas";
+    row.claimed_time = "D:20260922121500Z";
+    row.range_ok = true;
+    row.changed_after_signing = true;
+    row.later_signature_covers_changes = true;
+    row.covers_whole_revision = true;
+    row.checked = true;
+    row.intact = true;
+    row.digest = "SHA-256";
+    row.signer = signer;
+    row.chain = {signer, signer};
+    row.trust = 1;
+    row.trust_detail = "self-signed certificate";
+    row.has_signing_certificate_v2 = true;
+    row.has_timestamp = true;
+    row.timestamp_valid = true;
+    row.timestamp_time = 1'790'000'001;
+    row.authority = signer;
+    SignatureList list;
+    list.rows = {row};
+    return list;
+}
+
+void test_signature_messages_round_trip() {
+    const PrepareSignature p = round_trip(sample_prepare());
+    CHECK(p.request.field == "Approver" && p.request.page == 2);
+    CHECK(p.request.rect.x1 == 110.0F && p.request.reserve == 8192);
+    CHECK(p.request.time == 1'790'000'000);
+    CHECK(p.request.name == "Mari Maasikas" && p.request.reason == "Approved");
+    CHECK(p.request.appearance.image.size() == 4 && p.request.appearance.image[0] == 0x89);
+    CHECK(p.request.appearance.strokes.size() == 2 &&
+          p.request.appearance.strokes[0][1].y == 4.0F &&
+          p.request.appearance.strokes[1].size() == 1);
+    CHECK(p.request.appearance.lines.size() == 2);
+
+    CHECK(round_trip(ListSignatures{"-----BEGIN CERTIFICATE-----"}).trust_pem ==
+          "-----BEGIN CERTIFICATE-----");
+
+    SignaturePrepared prepared;
+    prepared.range.v = {0, 1234, 5678, 90};
+    prepared.field = "Signature1";
+    const SignaturePrepared p2 = round_trip(prepared);
+    CHECK(p2.range.v[1] == 1234 && p2.range.end() == 5768 && p2.field == "Signature1");
+
+    const SignatureList l = round_trip(sample_signature_list());
+    CHECK(l.rows.size() == 1);
+    CHECK(l.rows[0].field == "Signature1" && l.rows[0].intact && l.rows[0].trust == 1);
+    CHECK(l.rows[0].chain.size() == 2);
+    CHECK(l.rows[0].signer.not_after == 1'800'000'000);
+    CHECK(l.rows[0].has_timestamp && l.rows[0].timestamp_time == 1'790'000'001);
+    CHECK(l.rows[0].later_signature_covers_changes);
+}
+
+void test_signature_messages_reject_hostile_input() {
+    // A reserve nobody would ask for: a worker must not be talked into
+    // allocating a megabyte-plus hole, nor a hole too small to be a signature.
+    for (const std::uint64_t reserve : {std::uint64_t{0}, std::uint64_t{1023},
+                                        std::uint64_t{1} << 40}) {
+        PrepareSignature m = sample_prepare();
+        m.request.reserve = static_cast<std::size_t>(reserve);
+        CHECK(rejects<PrepareSignature>(make_frame(1, m).payload));
+    }
+    // A negative page, and a byte range with a negative span.
+    {
+        PrepareSignature m = sample_prepare();
+        m.request.page = -1;
+        CHECK(rejects<PrepareSignature>(make_frame(1, m).payload));
+    }
+    {
+        SignaturePrepared m;
+        m.range.v = {0, -1, 10, 10};
+        CHECK(rejects<SignaturePrepared>(make_frame(1, m).payload));
+    }
+    check_truncations(sample_prepare());
+    check_truncations(sample_signature_list());
+    check_truncations(SignaturePrepared{});
+}
+
+
 void test_edit_messages_reject_hostile_input() {
     // What the worker sends back is what a compromised worker controls.
     check_truncations(sample_edited());
@@ -538,6 +652,8 @@ int main() {
     RUN(test_round_trips);
     RUN(test_edit_messages_round_trip);
     RUN(test_edit_messages_reject_hostile_input);
+    RUN(test_signature_messages_round_trip);
+    RUN(test_signature_messages_reject_hostile_input);
     RUN(test_every_truncation_is_rejected);
     RUN(test_lying_bitmaps_are_rejected);
     RUN(test_semantic_limits);

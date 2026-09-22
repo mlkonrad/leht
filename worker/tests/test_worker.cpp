@@ -12,7 +12,11 @@
 #include "leht/ops/annotate.hpp"
 #include "leht/renderer.hpp"
 #include "leht/text.hpp"
-#include "test_harness.hpp"
+#include "leht/crypto/crypto.hpp"
+#include "leht/error.hpp"
+#include "leht/ops/sign.hpp"
+#include "edit_harness.hpp"
+#include "test_pki.hpp"
 
 #include <fcntl.h>
 #include <signal.h>
@@ -623,6 +627,151 @@ void viewer_eof_ends_the_worker() {
     CHECK(status.has_value() && !status->crashed());
 }
 
+/// The worker prepares, this process signs: the split the whole design rests
+/// on. The worker here is the real one, sandboxed, so this also checks that
+/// OpenSSL can verify inside seccomp -- everything it needs must be loaded
+/// before the sandbox goes up.
+void signing_through_the_worker() {
+    static const leht::test::Pki pki;
+    const leht::crypto::Identity id = pki.identity(pki.rsa, pki.rsa_cert);
+
+    const leht::test::TempPath out("worker_signed.pdf");
+    leht::ops::SignatureRequest request;
+    request.name = "Mari Maasikas";
+    request.reason = "Worker test";
+    request.rect = {300, 650, 560, 740};
+    request.appearance.lines = {"Mari Maasikas"};
+    request.reserve = leht::crypto::estimate_signature_size(id, {});
+
+    leht::ops::ByteRange range;
+    {
+        auto w = start();
+        (void)open_ok(*w, corpus("text_10p.pdf"));
+        const int fd = ::open(out.str().c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        CHECK(fd >= 0);
+        w->channel().send(2, PrepareSignature{request}, fd);
+        const Frame reply = next(*w);
+        CHECK(reply.type == MsgType::SignaturePrepared);
+        const auto prepared = decode_as<SignaturePrepared>(reply);
+        CHECK(prepared.field == "Signature1");
+        range = prepared.range;
+
+        // A worker that lied about where the hole is cannot make the key sign
+        // anything else: the check is on the file's bytes.
+        leht::ops::ByteRange lie = range;
+        lie.v[3] += 1;
+        bool threw = false;
+        try {
+            (void)leht::crypto::sign_prepared(fd, lie, id, {});
+        } catch (const leht::Error&) {
+            threw = true;
+        }
+        CHECK(threw);
+
+        const auto result = leht::crypto::sign_prepared(fd, range, id, {});
+        CHECK(result.der_size > 0);
+        ::close(fd);
+        w->channel().send(3, Shutdown{});
+        (void)w->wait_for(std::chrono::seconds(5));
+    }
+
+    // A fresh worker reads it back and verifies it, inside the sandbox.
+    auto w = start();
+    (void)open_ok(*w, out.str());
+    w->channel().send(2, ListSignatures{pki.ca.pem()});
+    const Frame reply = next(*w);
+    CHECK(reply.type == MsgType::SignatureList);
+    const auto list = decode_as<SignatureList>(reply);
+    CHECK(list.rows.size() == 1);
+    const SignatureRow& row = list.rows.front();
+    CHECK(row.field == "Signature1");
+    CHECK(row.page == 0);
+    CHECK(row.subfilter == "ETSI.CAdES.detached");
+    CHECK(row.name == "Mari Maasikas");
+    CHECK(row.range_ok);
+    CHECK(row.checked);
+    CHECK(row.intact);
+    CHECK(row.trust == static_cast<std::uint8_t>(leht::crypto::Trust::Trusted));
+    CHECK(row.signer.common_name == "Mari Maasikas");
+    CHECK(row.chain.size() == 2);
+    CHECK(row.has_signing_certificate_v2);
+    CHECK(!row.changed_after_signing);
+
+    // Without the CA the same signature is intact but untrusted: the two
+    // questions stay apart all the way to the viewer.
+    w->channel().send(3, ListSignatures{""});
+    const auto bare = decode_as<SignatureList>(next(*w));
+    CHECK(bare.rows.size() == 1 && bare.rows[0].intact);
+    CHECK(bare.rows[0].trust == static_cast<std::uint8_t>(leht::crypto::Trust::Untrusted));
+}
+
+/// The preload in leht-worker's main() is load-bearing, not belt and braces:
+/// without it OpenSSL fetches an algorithm the first time it verifies, that
+/// fetch opens a file, and seccomp kills the process. Proving it here keeps
+/// anyone from tidying the preload away.
+void verification_needs_the_preload_inside_the_sandbox() {
+#if defined(__SANITIZE_ADDRESS__)
+    std::printf("      SKIP sanitizer build runs the worker unsandboxed\n");
+    return;
+#else
+    if (::getenv("LEHT_WORKER_NO_SANDBOX") != nullptr) {
+        std::printf("      SKIP the sandbox is off in this environment\n");
+        return;
+    }
+    static const leht::test::Pki pki;
+    const leht::crypto::Identity id = pki.identity(pki.rsa, pki.rsa_cert);
+    const leht::test::TempPath out("worker_preload.pdf");
+    leht::ops::SignatureRequest request;
+    request.reserve = leht::crypto::estimate_signature_size(id, {});
+    {
+        auto w = start();
+        (void)open_ok(*w, corpus("text_10p.pdf"));
+        const int fd = ::open(out.str().c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        CHECK(fd >= 0);
+        w->channel().send(2, PrepareSignature{request}, fd);
+        const auto prepared = decode_as<SignaturePrepared>(next(*w));
+        (void)leht::crypto::sign_prepared(fd, prepared.range, id, {});
+        ::close(fd);
+    }
+    ::setenv("LEHT_WORKER_NO_PRELOAD", "1", 1);
+    auto w = start();
+    ::unsetenv("LEHT_WORKER_NO_PRELOAD");
+    (void)open_ok(*w, out.str());
+    w->channel().send(2, ListSignatures{pki.ca.pem()});
+    // No answer: the worker was killed mid-verification.
+    CHECK(!w->channel().recv().has_value());
+    const auto status = w->wait_for(std::chrono::seconds(5));
+    CHECK(status.has_value() && status->crashed());
+#endif
+}
+
+/// A document whose signature is nonsense must come back as a report, not as a
+/// dead worker: this is hostile DER reaching OpenSSL inside the sandbox.
+void a_broken_signature_is_reported_not_fatal() {
+    leht::test::PdfWriter pdf;
+    pdf.set(1, "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] /SigFlags 3 >> >>");
+    pdf.set(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    pdf.set(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>");
+    pdf.set(4, "<< /FT /Sig /T (Sig1) /V 5 0 R /Type /Annot /Subtype /Widget "
+               "/Rect [0 0 0 0] /P 3 0 R /F 132 >>");
+    pdf.set(5, "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /ETSI.CAdES.detached "
+               "/ByteRange [0 100 200 300] /Contents <deadbeef> >>");
+    const leht::test::TempPath path("worker_bad_sig.pdf");
+    leht::test::write_file(path.str(), pdf.finish(1));
+
+    auto w = start();
+    (void)open_ok(*w, path.str());
+    w->channel().send(2, ListSignatures{""});
+    const auto list = decode_as<SignatureList>(next(*w));
+    CHECK(list.rows.size() == 1);
+    CHECK(!list.rows[0].range_ok);
+    CHECK(!list.rows[0].intact);
+    CHECK(!list.rows[0].range_problem.empty());
+    // Still alive and answering.
+    w->channel().send(3, ListAnnots{});
+    CHECK(next(*w).type == MsgType::AnnotList);
+}
+
 }  // namespace
 
 int main() {
@@ -642,6 +791,9 @@ int main() {
     RUN(forms_through_the_worker);
     RUN(replay_is_deterministic);
     RUN(edits_on_a_non_pdf_fail_cleanly);
+    RUN(signing_through_the_worker);
+    RUN(verification_needs_the_preload_inside_the_sandbox);
+    RUN(a_broken_signature_is_reported_not_fatal);
     RUN(clean_shutdown);
     RUN(viewer_eof_ends_the_worker);
     return 0;

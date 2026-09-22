@@ -18,6 +18,7 @@
 #include "leht/ops/annotate.hpp"
 #include "leht/ops/crop.hpp"
 #include "leht/ops/forms.hpp"
+#include "leht/ops/sign.hpp"
 #include "leht/ops/watermark.hpp"
 #include "leht/renderer.hpp"
 #include "leht/text.hpp"
@@ -30,7 +31,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 3;  // 2: CancelSearch; 3: editing
+inline constexpr std::uint32_t kProtocolVersion = 4;  // 2: CancelSearch; 3: editing; 4: signatures
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -55,6 +56,8 @@ enum class MsgType : std::uint16_t {
     Save = 11,         ///< carries the output file's fd via SCM_RIGHTS
     ListAnnots = 12,
     ListFields = 13,
+    PrepareSignature = 14,  ///< carries the output file's fd via SCM_RIGHTS
+    ListSignatures = 15,
 
     // worker -> viewer
     HelloAck = 100,
@@ -71,10 +74,12 @@ enum class MsgType : std::uint16_t {
     Saved = 111,
     AnnotList = 112,
     FieldList = 113,
+    SignaturePrepared = 114,
+    SignatureList = 115,
 };
 
-/// Whether a frame of `type` may carry a file descriptor: only the two that
-/// hand the worker a file to read (Open) or to write (Save).
+/// Whether a frame of `type` may carry a file descriptor: only those that hand
+/// the worker a file to read (Open) or to write (Save, PrepareSignature).
 [[nodiscard]] bool takes_fd(MsgType type) noexcept;
 
 /// True for every value in MsgType. Frames with any other type are rejected
@@ -208,6 +213,28 @@ struct ListFields {
     static constexpr MsgType kType = MsgType::ListFields;
     void encode(Writer&) const {}
     static ListFields decode(Reader&) { return {}; }
+};
+
+/// Write the document plus a signature with an empty hole into the attached
+/// descriptor. The worker never sees the key: the viewer fills the hole in
+/// afterwards, having checked it against the bytes.
+struct PrepareSignature {
+    static constexpr MsgType kType = MsgType::PrepareSignature;
+    ops::SignatureRequest request;
+    void encode(Writer& w) const;
+    static PrepareSignature decode(Reader& r);
+};
+
+/// List the signatures and verify them -- in the worker, because the CMS blobs
+/// come out of the document and are therefore hostile input.
+///
+/// `trust_pem` is the certificates to trust, as PEM: the viewer reads the
+/// system store (the worker cannot open files) and adds the user's own.
+struct ListSignatures {
+    static constexpr MsgType kType = MsgType::ListSignatures;
+    std::string trust_pem;
+    void encode(Writer& w) const;
+    static ListSignatures decode(Reader& r);
 };
 
 struct Shutdown {
@@ -348,6 +375,67 @@ struct FieldList {
     std::vector<ops::FieldInfo> items;
     void encode(Writer& w) const;
     static FieldList decode(Reader& r);
+};
+
+struct SignaturePrepared {
+    static constexpr MsgType kType = MsgType::SignaturePrepared;
+    ops::ByteRange range;
+    std::string field;
+    void encode(Writer& w) const;
+    static SignaturePrepared decode(Reader& r);
+};
+
+/// A certificate, as much of it as the viewer displays.
+struct CertRow {
+    std::string subject, common_name, issuer, serial, sha256;
+    std::int64_t not_before = 0, not_after = 0;
+    bool is_ca = false;
+    bool can_sign = true;
+};
+
+/// One signature: what the document claims, and what verification made of it.
+///
+/// The CMS blob itself stays in the worker. Nothing here is parsed further by
+/// the viewer, which is the point: the viewer shows strings and flags.
+struct SignatureRow {
+    // From the document.
+    std::string field;
+    int page = -1;
+    Rect rect;
+    std::string subfilter, name, reason, location, claimed_time;
+    bool range_ok = false;
+    std::string range_problem;
+    bool covers_whole_revision = false;
+    bool changed_after_signing = false;
+    bool later_signature_covers_changes = false;
+
+    // From verification. `checked` is false when the byte range made
+    // verification pointless.
+    bool checked = false;
+    bool intact = false;
+    std::string problem;
+    std::string digest;
+    CertRow signer;
+    std::vector<CertRow> chain;
+    /// crypto::Trust, as its underlying value.
+    std::uint8_t trust = 0;
+    std::string trust_detail;
+    bool has_signing_certificate_v2 = false;
+    bool has_signing_time_attribute = false;
+
+    bool has_timestamp = false;
+    bool timestamp_valid = false;
+    std::int64_t timestamp_time = 0;
+    CertRow authority;
+    std::uint8_t timestamp_trust = 0;
+    std::string timestamp_problem;
+};
+
+struct SignatureList {
+    static constexpr MsgType kType = MsgType::SignatureList;
+    std::vector<SignatureRow> rows;
+    void encode(Writer& w) const;
+    static SignatureList decode(Reader& r);
 };
 
 }  // namespace leht::ipc

@@ -146,10 +146,50 @@ std::vector<std::string> get_strings(Reader& r, std::size_t max_len) {
 
 constexpr std::size_t kMaxName = 4096;  ///< field names, annotation types, stamp names
 
+// Signatures.
+constexpr std::size_t kMaxImageBytes = std::size_t{32} << 20;  ///< an appearance graphic
+constexpr std::size_t kMaxStrokes = 4096;        ///< strokes in a drawn signature
+constexpr std::size_t kMaxStrokePoints = 100000; ///< points across all of them
+constexpr std::size_t kMaxLines = 64;            ///< text lines in an appearance
+constexpr std::size_t kMaxCerts = 64;            ///< certificates in a chain
+constexpr std::size_t kMaxSignatures = 4096;
+/// A signature hole: crypto::estimate_signature_size() asks for far less.
+constexpr std::size_t kMaxReserve = std::size_t{1} << 20;
+
+void put_i64(Writer& w, std::int64_t v) { w.u64(static_cast<std::uint64_t>(v)); }
+std::int64_t get_i64(Reader& r) { return static_cast<std::int64_t>(r.u64()); }
+
+void put_cert(Writer& w, const CertRow& c) {
+    w.str(c.subject);
+    w.str(c.common_name);
+    w.str(c.issuer);
+    w.str(c.serial);
+    w.str(c.sha256);
+    put_i64(w, c.not_before);
+    put_i64(w, c.not_after);
+    w.u8(c.is_ca ? 1 : 0);
+    w.u8(c.can_sign ? 1 : 0);
+}
+
+CertRow get_cert(Reader& r) {
+    CertRow c;
+    c.subject = r.str(kMaxString);
+    c.common_name = r.str(kMaxString);
+    c.issuer = r.str(kMaxString);
+    c.serial = r.str(kMaxName);
+    c.sha256 = r.str(kMaxName);
+    c.not_before = get_i64(r);
+    c.not_after = get_i64(r);
+    c.is_ca = r.boolean();
+    c.can_sign = r.boolean();
+    return c;
+}
+
 }  // namespace
 
 bool takes_fd(MsgType type) noexcept {
-    return type == MsgType::Open || type == MsgType::Save;
+    return type == MsgType::Open || type == MsgType::Save ||
+           type == MsgType::PrepareSignature;
 }
 
 bool is_known(std::uint16_t type) noexcept {
@@ -164,6 +204,8 @@ bool is_known(std::uint16_t type) noexcept {
     case MsgType::Edit: case MsgType::Save: case MsgType::ListAnnots:
     case MsgType::ListFields: case MsgType::Edited: case MsgType::Saved:
     case MsgType::AnnotList: case MsgType::FieldList:
+    case MsgType::PrepareSignature: case MsgType::ListSignatures:
+    case MsgType::SignaturePrepared: case MsgType::SignatureList:
         return true;
     }
     return false;
@@ -538,6 +580,197 @@ Edited Edited::decode(Reader& r) {
 
 void Saved::encode(Writer& w) const { w.u64(bytes); }
 Saved Saved::decode(Reader& r) { return {r.u64()}; }
+
+void PrepareSignature::encode(Writer& w) const {
+    const ops::SignatureRequest& q = request;
+    w.str(q.field);
+    w.i32(q.page);
+    put_rect(w, q.rect);
+    w.str(q.name);
+    w.str(q.reason);
+    w.str(q.location);
+    put_i64(w, q.time);
+    w.u64(q.reserve);
+    w.bytes(q.appearance.image);
+    w.f32(q.appearance.strokes_width);
+    w.f32(q.appearance.strokes_height);
+    w.f32(q.appearance.stroke_width);
+    w.u32(static_cast<std::uint32_t>(q.appearance.strokes.size()));
+    for (const std::vector<Point>& stroke : q.appearance.strokes) {
+        w.u32(static_cast<std::uint32_t>(stroke.size()));
+        for (const Point& p : stroke) {
+            w.f32(p.x);
+            w.f32(p.y);
+        }
+    }
+    put_strings(w, q.appearance.lines);
+}
+
+PrepareSignature PrepareSignature::decode(Reader& r) {
+    PrepareSignature m;
+    ops::SignatureRequest& q = m.request;
+    q.field = r.str(kMaxName);
+    q.page = page_index(r);
+    q.rect = get_rect(r);
+    q.name = r.str(kMaxString);
+    q.reason = r.str(kMaxString);
+    q.location = r.str(kMaxString);
+    q.time = get_i64(r);
+    const std::uint64_t reserve = r.u64();
+    if (reserve < 1024 || reserve > kMaxReserve) {
+        throw ProtocolError("signature reserve out of range");
+    }
+    q.reserve = static_cast<std::size_t>(reserve);
+    q.appearance.image = r.bytes(kMaxImageBytes);
+    q.appearance.strokes_width = coord(r);
+    q.appearance.strokes_height = coord(r);
+    q.appearance.stroke_width = coord(r);
+    const std::size_t strokes = r.count(4);
+    if (strokes > kMaxStrokes) {
+        throw ProtocolError("too many strokes in a signature appearance");
+    }
+    std::size_t total = 0;
+    q.appearance.strokes.reserve(strokes);
+    for (std::size_t i = 0; i < strokes; ++i) {
+        const std::size_t points = r.count(8);
+        total += points;
+        if (total > kMaxStrokePoints) {
+            throw ProtocolError("too many points in a signature appearance");
+        }
+        std::vector<Point> stroke;
+        stroke.reserve(points);
+        for (std::size_t j = 0; j < points; ++j) {
+            const float x = coord(r);
+            const float y = coord(r);
+            stroke.push_back(Point{x, y});
+        }
+        q.appearance.strokes.push_back(std::move(stroke));
+    }
+    q.appearance.lines = get_strings(r, kMaxString);
+    if (q.appearance.lines.size() > kMaxLines) {
+        throw ProtocolError("too many text lines in a signature appearance");
+    }
+    return m;
+}
+
+void ListSignatures::encode(Writer& w) const { w.str(trust_pem); }
+ListSignatures ListSignatures::decode(Reader& r) {
+    ListSignatures m;
+    m.trust_pem = r.str(kMaxString);
+    return m;
+}
+
+void SignaturePrepared::encode(Writer& w) const {
+    for (const std::int64_t v : range.v) {
+        put_i64(w, v);
+    }
+    w.str(field);
+}
+
+SignaturePrepared SignaturePrepared::decode(Reader& r) {
+    SignaturePrepared m;
+    for (std::int64_t& v : m.range.v) {
+        v = get_i64(r);
+        // The viewer checks the range against the file before it signs
+        // anything; this only keeps arithmetic on it sane.
+        if (v < 0 || v > (std::int64_t{1} << 48)) {
+            throw ProtocolError("signature byte range out of range");
+        }
+    }
+    m.field = r.str(kMaxName);
+    return m;
+}
+
+void SignatureList::encode(Writer& w) const {
+    w.u32(static_cast<std::uint32_t>(rows.size()));
+    for (const SignatureRow& s : rows) {
+        w.str(s.field);
+        w.i32(s.page);
+        put_rect(w, s.rect);
+        w.str(s.subfilter);
+        w.str(s.name);
+        w.str(s.reason);
+        w.str(s.location);
+        w.str(s.claimed_time);
+        w.u8(s.range_ok ? 1 : 0);
+        w.str(s.range_problem);
+        w.u8(s.covers_whole_revision ? 1 : 0);
+        w.u8(s.changed_after_signing ? 1 : 0);
+        w.u8(s.later_signature_covers_changes ? 1 : 0);
+        w.u8(s.checked ? 1 : 0);
+        w.u8(s.intact ? 1 : 0);
+        w.str(s.problem);
+        w.str(s.digest);
+        put_cert(w, s.signer);
+        w.u32(static_cast<std::uint32_t>(s.chain.size()));
+        for (const CertRow& c : s.chain) {
+            put_cert(w, c);
+        }
+        w.u8(s.trust);
+        w.str(s.trust_detail);
+        w.u8(s.has_signing_certificate_v2 ? 1 : 0);
+        w.u8(s.has_signing_time_attribute ? 1 : 0);
+        w.u8(s.has_timestamp ? 1 : 0);
+        w.u8(s.timestamp_valid ? 1 : 0);
+        put_i64(w, s.timestamp_time);
+        put_cert(w, s.authority);
+        w.u8(s.timestamp_trust);
+        w.str(s.timestamp_problem);
+    }
+}
+
+SignatureList SignatureList::decode(Reader& r) {
+    const std::size_t n = r.count(64);
+    if (n > kMaxSignatures) {
+        throw ProtocolError("too many signatures");
+    }
+    SignatureList m;
+    m.rows.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        SignatureRow s;
+        s.field = r.str(kMaxName);
+        s.page = r.i32();
+        if (s.page < -1 || s.page > kMaxPage) {
+            throw ProtocolError("page index out of range");
+        }
+        s.rect = get_rect(r);
+        s.subfilter = r.str(kMaxName);
+        s.name = r.str(kMaxString);
+        s.reason = r.str(kMaxString);
+        s.location = r.str(kMaxString);
+        s.claimed_time = r.str(kMaxName);
+        s.range_ok = r.boolean();
+        s.range_problem = r.str(kMaxString);
+        s.covers_whole_revision = r.boolean();
+        s.changed_after_signing = r.boolean();
+        s.later_signature_covers_changes = r.boolean();
+        s.checked = r.boolean();
+        s.intact = r.boolean();
+        s.problem = r.str(kMaxString);
+        s.digest = r.str(kMaxName);
+        s.signer = get_cert(r);
+        const std::size_t certs = r.count(18);
+        if (certs > kMaxCerts) {
+            throw ProtocolError("too many certificates in a chain");
+        }
+        s.chain.reserve(certs);
+        for (std::size_t j = 0; j < certs; ++j) {
+            s.chain.push_back(get_cert(r));
+        }
+        s.trust = r.u8();
+        s.trust_detail = r.str(kMaxString);
+        s.has_signing_certificate_v2 = r.boolean();
+        s.has_signing_time_attribute = r.boolean();
+        s.has_timestamp = r.boolean();
+        s.timestamp_valid = r.boolean();
+        s.timestamp_time = get_i64(r);
+        s.authority = get_cert(r);
+        s.timestamp_trust = r.u8();
+        s.timestamp_problem = r.str(kMaxString);
+        m.rows.push_back(std::move(s));
+    }
+    return m;
+}
 
 void AnnotList::encode(Writer& w) const {
     w.u32(static_cast<std::uint32_t>(items.size()));

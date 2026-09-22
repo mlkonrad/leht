@@ -56,6 +56,10 @@ void decode_frame(const Frame& f) {
     case MsgType::Saved: (void)decode_as<Saved>(f); break;
     case MsgType::AnnotList: (void)decode_as<AnnotList>(f); break;
     case MsgType::FieldList: (void)decode_as<FieldList>(f); break;
+    case MsgType::PrepareSignature: (void)decode_as<PrepareSignature>(f); break;
+    case MsgType::ListSignatures: (void)decode_as<ListSignatures>(f); break;
+    case MsgType::SignaturePrepared: (void)decode_as<SignaturePrepared>(f); break;
+    case MsgType::SignatureList: (void)decode_as<SignatureList>(f); break;
     }
 }
 

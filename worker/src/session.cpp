@@ -7,7 +7,9 @@
 #include "leht/error.hpp"
 #include "leht/ops/annotate.hpp"
 #include "leht/ops/crop.hpp"
+#include "leht/crypto/crypto.hpp"
 #include "leht/ops/forms.hpp"
+#include "leht/ops/sign.hpp"
 #include "leht/ops/redact.hpp"
 #include "leht/ops/watermark.hpp"
 #include "leht/renderer.hpp"
@@ -165,6 +167,12 @@ void Session::dispatch(Frame& frame) {
         case MsgType::ListFields:
             (void)decode_as<ListFields>(frame);
             on_list_fields(id);
+            return;
+        case MsgType::PrepareSignature:
+            on_prepare_signature(id, frame);
+            return;
+        case MsgType::ListSignatures:
+            on_list_signatures(id, decode_as<ListSignatures>(frame));
             return;
         default:
             throw ProtocolError("not a request type");
@@ -420,6 +428,100 @@ void Session::on_list_annots(std::uint64_t id) {
         return;
     }
     channel_.send(id, AnnotList{ops::list_annotations(ctx_, *doc_)});
+}
+
+namespace {
+
+ipc::CertRow to_row(const crypto::CertInfo& c) {
+    ipc::CertRow row;
+    row.subject = c.subject;
+    row.common_name = c.common_name;
+    row.issuer = c.issuer;
+    row.serial = c.serial;
+    row.sha256 = c.sha256;
+    row.not_before = c.not_before;
+    row.not_after = c.not_after;
+    row.is_ca = c.is_ca;
+    row.can_sign = c.can_sign;
+    return row;
+}
+
+}  // namespace
+
+void Session::on_prepare_signature(std::uint64_t id, ipc::Frame& frame) {
+    const auto msg = decode_as<PrepareSignature>(frame);
+    if (!require_document(id)) {
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to PrepareSignature"});
+        return;
+    }
+    // The hole this leaves is filled by the viewer, which holds the key. The
+    // worker never sees it, and could not use it if it did: it has no network
+    // and no files of its own.
+    const auto prepared = ops::prepare_signature(ctx_, *doc_, msg.request, frame.fd.get());
+    channel_.send(id, SignaturePrepared{prepared.range, prepared.field});
+}
+
+void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& msg) {
+    if (!require_document(id)) {
+        return;
+    }
+    crypto::TrustStore trust;
+    if (!msg.trust_pem.empty()) {
+        try {
+            (void)trust.add_pem(msg.trust_pem);
+        } catch (const Error&) {
+            // A damaged store is the viewer's problem, not this document's:
+            // carry on with what parsed, and report nothing as trusted.
+        }
+    }
+    SignatureList out;
+    for (const ops::SignatureInfo& s : ops::list_signatures(ctx_, *doc_)) {
+        ipc::SignatureRow row;
+        row.field = s.field;
+        row.page = s.page;
+        row.rect = s.rect;
+        row.subfilter = s.subfilter;
+        row.name = s.name;
+        row.reason = s.reason;
+        row.location = s.location;
+        row.claimed_time = s.claimed_time;
+        row.range_ok = s.range_ok;
+        row.range_problem = s.range_problem;
+        row.covers_whole_revision = s.covers_whole_revision;
+        row.changed_after_signing = s.changed_after_signing;
+        row.later_signature_covers_changes = s.later_signature_covers_changes;
+        if (s.range_ok) {
+            // Hostile DER, parsed here rather than in the viewer. That is the
+            // whole reason verification happens in the sandbox.
+            const crypto::CmsReport r =
+                crypto::verify_cms(s.contents, ops::signed_bytes(ctx_, *doc_, s.range), trust);
+            row.checked = true;
+            row.intact = r.intact();
+            row.problem = r.problem;
+            row.digest = r.digest;
+            row.signer = to_row(r.signer);
+            for (const crypto::CertInfo& c : r.chain) {
+                row.chain.push_back(to_row(c));
+            }
+            row.trust = static_cast<std::uint8_t>(r.trust);
+            row.trust_detail = r.trust_detail;
+            row.has_signing_certificate_v2 = r.has_signing_certificate_v2;
+            row.has_signing_time_attribute = r.has_signing_time_attribute;
+            if (r.timestamp) {
+                row.has_timestamp = true;
+                row.timestamp_valid = r.timestamp->valid;
+                row.timestamp_time = r.timestamp->time;
+                row.authority = to_row(r.timestamp->authority);
+                row.timestamp_trust = static_cast<std::uint8_t>(r.timestamp->trust);
+                row.timestamp_problem = r.timestamp->problem;
+            }
+        }
+        out.rows.push_back(std::move(row));
+    }
+    channel_.send(id, out);
 }
 
 void Session::on_list_fields(std::uint64_t id) {

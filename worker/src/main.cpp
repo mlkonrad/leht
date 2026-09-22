@@ -10,6 +10,8 @@
 // Not meant to be run by hand: it expects its socket on fd 3.
 
 #include "sandbox.hpp"
+
+#include "leht/crypto/crypto.hpp"
 #include "session.hpp"
 
 #include "leht/context.hpp"
@@ -111,6 +113,17 @@ int main(int argc, char** argv) {
         // MuPDF is initialised first, while it may still read what it needs,
         // and the sandbox goes up before the first untrusted byte arrives.
         leht::Context ctx;
+        // OpenSSL the same way: no config file is read (the sandbox forbids
+        // opening one), and every algorithm verification can reach for is
+        // fetched now, because a lazy fetch later would be a file open, and
+        // seccomp answers that with SIGKILL.
+        leht::crypto::init(/*load_config=*/false);
+        // LEHT_WORKER_NO_PRELOAD skips it, which is not an option anyone
+        // should use: the test suite sets it to prove that without the
+        // preload the worker dies on the first verification.
+        if (!env_set("LEHT_WORKER_NO_PRELOAD")) {
+            leht::crypto::preload_algorithms();
+        }
         if (sandbox) {
             leht::worker::apply_sandbox(options);
         }
