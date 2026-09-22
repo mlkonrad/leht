@@ -20,6 +20,7 @@ add_library(lehtcore
     src/ops/compress.cpp
     src/ops/pages.cpp
     src/ops/encrypt.cpp
+    src/ops/redact.cpp
 )
 add_library(leht::core ALIAS lehtcore)
 

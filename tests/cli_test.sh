@@ -60,6 +60,25 @@ expect 0 "text extract one page"         text "$IN" -p 1
 expect 0 "text search"                   text "$IN" --search line
 expect 1 "text page out of range"        text "$IN" -p 999
 
+# Redaction: a mistake must never quietly produce an unredacted file.
+expect 1 "redact with nothing to redact"   redact "$IN" -o "$OUT/x.pdf"
+expect 1 "redact bad --rect"               redact "$IN" --rect 1:1,2,3 -o "$OUT/x.pdf"
+expect 1 "redact --rect without page"      redact "$IN" --rect 1,2,3,4 -o "$OUT/x.pdf"
+expect 1 "redact --rect empty box"         redact "$IN" --rect 1:10,10,5,5 -o "$OUT/x.pdf"
+expect 1 "redact --rect junk number"       redact "$IN" --rect 1:10,10,5x,50 -o "$OUT/x.pdf"
+expect 1 "redact --rect page 0"            redact "$IN" --rect 0:0,0,9,9 -o "$OUT/x.pdf"
+expect 1 "redact --rect page out of range" redact "$IN" --rect 99:0,0,9,9 -o "$OUT/x.pdf"
+expect 1 "redact -p without --text"        redact "$IN" -p 1 --rect 1:0,0,9,9 -o "$OUT/x.pdf"
+expect 1 "redact unknown --images"         redact "$IN" --text fox --images blur -o "$OUT/x.pdf"
+expect 1 "redact a non-PDF"                redact "$CORPUS/page.png" --text x -o "$OUT/x.pdf"
+[[ -e "$OUT/x.pdf" ]] && { echo "FAIL  a refused redact still wrote output"; failures=$((failures + 1)); }
+expect 0 "redact --text"                   redact "$IN" --text "quick brown" -o "$OUT/r.pdf"
+if command -v pdftotext >/dev/null && pdftotext "$OUT/r.pdf" - | grep -qi "quick brown"; then
+    echo "FAIL  redacted text still extractable"; failures=$((failures + 1))
+fi
+expect 0 "redact --rect, twice"            redact "$IN" --rect 1:0,0,200,100 --rect 2:0,0,50,50 -o "$OUT/r.pdf"
+expect 0 "redact -p limits --text"         redact "$IN" --text fox -p 2-3 --images remove --no-boxes -o "$OUT/r.pdf"
+
 # Valid invocations still succeed.
 expect 0 "rotate -d 90"                    rotate "$IN" -d 90 -o "$OUT/r.pdf"
 expect 0 "rotate -d -90"                   rotate "$IN" -d -90 -o "$OUT/r.pdf"

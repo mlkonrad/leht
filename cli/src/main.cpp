@@ -7,14 +7,17 @@
 
 #include "leht/context.hpp"
 #include "leht/document.hpp"
+#include "leht/edit.hpp"
 #include "leht/error.hpp"
 #include "leht/ops/compress.hpp"
 #include "leht/ops/encrypt.hpp"
 #include "leht/ops/merge.hpp"
 #include "leht/ops/pages.hpp"
+#include "leht/ops/redact.hpp"
 #include "leht/text.hpp"
 #include "leht/renderer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <climits>
@@ -47,6 +50,9 @@ constexpr const char* kUsage =
     "  compress  FILE -o OUT.pdf [--preset P] [-q N] [--linearize]\n"
     "  encrypt   FILE -o OUT.pdf [--user-pw PW] [--owner-pw PW] [--method M]\n"
     "  decrypt   FILE -o OUT.pdf [--password PW]\n"
+    "  redact    FILE -o OUT.pdf [--text TERM] [--rect P:X0,Y0,X1,Y1]... [-p RANGES]\n"
+    "            remove text, images and drawing for good, not just cover them;\n"
+    "            exits 3 if TERM still appears somewhere it could not remove\n"
     "\n"
     "options:\n"
     "  -o PATH        output file or pattern\n"
@@ -59,6 +65,12 @@ constexpr const char* kUsage =
     "  --preset P     lossless | print | ebook | screen   (default ebook)\n"
     "  --method M     aes256 | aes128 | rc4               (default aes256)\n"
     "  --linearize    optimise for progressive web loading\n"
+    "  --text TERM    redact every occurrence of TERM (case-insensitive)\n"
+    "  --rect P:BOX   redact a box on page P: points from the page's top-left,\n"
+    "                 e.g. 1:72,100,300,120. May be repeated\n"
+    "  --images M     pixels | remove | keep: what happens to an image under a\n"
+    "                 box (default pixels: black out only the covered part)\n"
+    "  --no-boxes     leave removed areas blank instead of drawing black boxes\n"
     "\n"
     "leht is free software under the AGPL-3.0-or-later.\n";
 
@@ -66,8 +78,20 @@ constexpr const char* kUsage =
 struct Args {
     std::string command;
     std::vector<std::string> positional;
-    std::map<std::string, std::string> flags;
+    std::map<std::string, std::string> flags;          ///< last value wins
+    std::vector<std::pair<std::string, std::string>> all_flags;  ///< every value, in order
     std::vector<std::string> switches;
+
+    /// Every value given for a repeatable flag, in command-line order.
+    [[nodiscard]] std::vector<std::string> values(const std::string& name) const {
+        std::vector<std::string> out;
+        for (const auto& [flag_name, value] : all_flags) {
+            if (flag_name == name) {
+                out.push_back(value);
+            }
+        }
+        return out;
+    }
 
     [[nodiscard]] bool has_switch(const std::string& name) const {
         for (const std::string& s : switches) {
@@ -131,7 +155,8 @@ struct Args {
 bool takes_value(const std::string& name) {
     static const std::vector<std::string> kValued{
         "-o", "-p", "-z", "-n", "-d", "-q", "--preset",
-        "--method", "--user-pw", "--owner-pw", "--password", "--search"};
+        "--method", "--user-pw", "--owner-pw", "--password", "--search",
+        "--text", "--rect", "--images"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -153,6 +178,7 @@ Args parse(int argc, char** argv) {
                     throw leht::Error(0, token + " needs a value");
                 }
                 args.flags[token] = argv[++i];
+                args.all_flags.emplace_back(token, argv[i]);
             } else {
                 args.switches.push_back(token);
             }
@@ -417,6 +443,127 @@ int cmd_decrypt(const leht::Context& ctx, const Args& args) {
     return 0;
 }
 
+/// Parses "P:X0,Y0,X1,Y1" (1-based page, points from the top-left).
+std::pair<int, leht::Rect> parse_rect(const std::string& spec) {
+    const auto fail = [&]() -> std::pair<int, leht::Rect> {
+        throw leht::Error(0, "--rect expects PAGE:X0,Y0,X1,Y1, got '" + spec + "'");
+    };
+    const std::size_t colon = spec.find(':');
+    if (colon == std::string::npos) {
+        return fail();
+    }
+    char* end = nullptr;
+    errno = 0;
+    const long page = std::strtol(spec.c_str(), &end, 10);
+    if (end != spec.c_str() + colon || errno == ERANGE || page < 1 || page > INT_MAX) {
+        return fail();
+    }
+    float v[4];
+    const char* p = spec.c_str() + colon + 1;
+    for (int i = 0; i < 4; ++i) {
+        const double d = std::strtod(p, &end);
+        if (end == p || !std::isfinite(d) || *end != (i < 3 ? ',' : '\0')) {
+            return fail();
+        }
+        v[i] = static_cast<float>(d);
+        p = end + 1;
+    }
+    const leht::Rect r{v[0], v[1], v[2], v[3]};
+    if (r.empty()) {
+        throw leht::Error(0, "--rect box encloses nothing: '" + spec + "'");
+    }
+    return {static_cast<int>(page) - 1, r};
+}
+
+leht::ops::RedactImages parse_images(const std::string& name) {
+    if (name.empty() || name == "pixels") { return leht::ops::RedactImages::Pixels; }
+    if (name == "remove")                 { return leht::ops::RedactImages::Remove; }
+    if (name == "keep")                   { return leht::ops::RedactImages::Keep; }
+    throw leht::Error(0, "unknown --images mode '" + name +
+                             "' (expected pixels, remove or keep)");
+}
+
+/// Exit status when the output was written but the term still appears
+/// somewhere redaction could not reach: a script must not mistake that for a
+/// clean result.
+constexpr int kExitRemaining = 3;
+
+int cmd_redact(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+    const std::string term = args.flag("--text");
+    const std::vector<std::string> rects = args.values("--rect");
+    if (term.empty() && rects.empty()) {
+        throw leht::Error(0, "redact needs --text TERM or --rect PAGE:BOX");
+    }
+    if (!args.flag("-p").empty() && term.empty()) {
+        throw leht::Error(0, "-p limits --text; with --rect, name the page in the box");
+    }
+
+    leht::ops::RedactOptions options;
+    options.images = parse_images(args.flag("--images"));
+    options.black_boxes = !args.has_switch("--no-boxes");
+
+    // Parse everything before touching the document.
+    std::map<int, std::vector<leht::Rect>> boxes;
+    for (const std::string& spec : rects) {
+        const auto [page, rect] = parse_rect(spec);
+        boxes[page].push_back(rect);
+    }
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    if (doc.needs_password()) {
+        throw leht::Error(0, "document is encrypted; decrypt it first");
+    }
+
+    leht::ops::RedactResult total;
+    std::vector<int> pages;
+    const auto add = [&](const leht::ops::RedactResult& r) {
+        total.areas += r.areas;
+        total.annotations_removed += r.annotations_removed;
+        total.structure_dropped = total.structure_dropped || r.structure_dropped;
+        pages.insert(pages.end(), r.pages.begin(), r.pages.end());
+    };
+    for (const auto& [page, areas] : boxes) {
+        add(leht::ops::redact(ctx, doc, page, areas, options));
+    }
+    if (!term.empty()) {
+        const auto r = leht::ops::redact_text(ctx, doc, term, args.flag("-p"), options);
+        add(r);
+        total.remaining = r.remaining;
+    }
+    std::sort(pages.begin(), pages.end());
+    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+
+    doc.save(output, leht::SaveOptions{});
+
+    std::printf("redacted %d area%s on %zu page%s -> %s\n", total.areas,
+                total.areas == 1 ? "" : "s", pages.size(), pages.size() == 1 ? "" : "s",
+                output.c_str());
+    if (total.annotations_removed > 0) {
+        std::printf("  removed %d overlapping annotation%s or form field%s\n",
+                    total.annotations_removed,
+                    total.annotations_removed == 1 ? "" : "s",
+                    total.annotations_removed == 1 ? "" : "s");
+    }
+    if (total.structure_dropped) {
+        std::printf("  note: dropped the structure tree (tagged-PDF accessibility), "
+                    "since it can repeat page text\n");
+    }
+    if (!term.empty() && total.areas == 0) {
+        std::printf("  no occurrences of \"%s\" on the page%s searched\n", term.c_str(),
+                    args.flag("-p").empty() ? "s" : "");
+    }
+    if (!total.remaining.empty()) {
+        std::fprintf(stderr, "leht: warning: \"%s\" still appears in:\n", term.c_str());
+        for (const std::string& where : total.remaining) {
+            std::fprintf(stderr, "  - %s\n", where.c_str());
+        }
+        return kExitRemaining;
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -451,6 +598,7 @@ int main(int argc, char** argv) {
         if (cmd == "split")    { return cmd_split(ctx, args); }
         if (cmd == "encrypt")  { return cmd_encrypt(ctx, args); }
         if (cmd == "decrypt")  { return cmd_decrypt(ctx, args); }
+        if (cmd == "redact")   { return cmd_redact(ctx, args); }
 
         std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
         std::fputs(kUsage, stderr);

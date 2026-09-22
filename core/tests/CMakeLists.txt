@@ -36,6 +36,7 @@ leht_add_test(test_robustness)
 leht_add_test(test_bombs)
 leht_add_test(test_open_fd)
 leht_add_test(test_edit_save)
+leht_add_test(test_redact)
 
 # Independent cross-check against poppler. Self-consistency proves nothing about
 # correctness; agreement with a different rasteriser does. Skips cleanly (exit
