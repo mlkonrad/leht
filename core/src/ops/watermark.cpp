@@ -95,16 +95,22 @@ void unused_name(fz_context* g, pdf_obj* dict, char* out, std::size_t size) {
 /// Wraps the page's existing content between `q_ref` and `end_ref` (streams
 /// holding "q" and "Q"), so whatever graphics state it leaves behind cannot
 /// affect what is drawn after it, then adds `mark` before or after it.
-void add_content(fz_context* g, pdf_obj* page_obj, pdf_obj* q_ref, pdf_obj* end_ref,
-                 pdf_obj* mark, bool under) {
+///
+/// A single content stream is first replaced by an array holding it. That
+/// array is created into `new_list`, an outer-frame slot, so it is released
+/// even when a later call throws -- as one does when resolving /Contents
+/// makes MuPDF repair a damaged file mid-edit.
+void add_content(fz_context* g, pdf_document* pdf, pdf_obj* page_obj, pdf_obj** new_list,
+                 pdf_obj* q_ref, pdf_obj* end_ref, pdf_obj* mark, bool under) {
     pdf_obj* contents = pdf_dict_get(g, page_obj, PDF_NAME(Contents));
     pdf_obj* list = contents;
     if (!pdf_is_array(g, contents)) {
-        pdf_obj* old = pdf_keep_obj(g, contents);
-        list = pdf_dict_put_array(g, page_obj, PDF_NAME(Contents), 4);
-        if (old != nullptr) {
-            pdf_array_push_drop(g, list, old);
+        *new_list = pdf_new_array(g, pdf, 4);
+        if (contents != nullptr) {
+            pdf_array_push(g, *new_list, contents);
         }
+        pdf_dict_put(g, page_obj, PDF_NAME(Contents), *new_list);
+        list = *new_list;
     }
     pdf_array_insert(g, list, q_ref, 0);
     pdf_array_push(g, list, end_ref);
@@ -214,6 +220,7 @@ int watermark(const Context& ctx, Document& doc, const std::string& pages,
         detail::OwnedBuffer end_buf{c};
         detail::OwnedPdfObj q_ref{c};
         detail::OwnedPdfObj end_ref{c};
+        detail::OwnedPdfObj new_list{c};
         const float alpha = options.opacity;
         const bool under = options.under;
         guarded(c, [&](fz_context* g) {
@@ -249,7 +256,8 @@ int watermark(const Context& ctx, Document& doc, const std::string& pages,
             *q_ref.slot() = pdf_add_stream(g, pdf, q_buf.get(), nullptr, 0);
             *end_buf.slot() = fz_new_buffer_from_copied_data(g, kRestore, 2);
             *end_ref.slot() = pdf_add_stream(g, pdf, end_buf.get(), nullptr, 0);
-            add_content(g, p->obj, q_ref.get(), end_ref.get(), mark.get(), under);
+            add_content(g, pdf, p->obj, new_list.slot(), q_ref.get(), end_ref.get(), mark.get(),
+                        under);
         });
         ++marked;
     }

@@ -11,6 +11,7 @@
 #include "edit_harness.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 
@@ -247,6 +248,43 @@ void watermark_follows_the_page_as_displayed() {
     CHECK(std::abs((q.min_y() + q.max_y()) / 2 - static_cast<float>(size.height) / 2) < 30);
 }
 
+void watermark_survives_a_repair_mid_edit() {
+    // The xref entry for the page's /Contents points at the wrong object, so
+    // resolving it makes MuPDF repair the file in the middle of the edit. The
+    // repair's scan also finds a second, later definition of the page object
+    // -- null -- so the page the edit holds stops being a dictionary, and the
+    // next write to it throws. The edit must fail cleanly: under ASan this
+    // checks that it leaks nothing (fuzz_edit found a reference that was
+    // kept and never dropped on exactly this path).
+    PdfWriter w;
+    w.set(1, "<< /Type /Catalog /Pages 2 0 R >>");
+    w.set(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    w.set(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> "
+             "/Contents 4 0 R >>");
+    w.set(4, PdfWriter::stream("", "BT /F1 12 Tf 72 700 Td (x) Tj ET"));
+    std::string pdf = w.finish(1);
+    // Point object 4's xref entry at object 1.
+    const std::size_t xref = pdf.find("xref\n");
+    const std::size_t entry4 = xref + std::string("xref\n0 5\n").size() + 4 * 20;
+    const std::size_t obj1 = pdf.find("1 0 obj");
+    char offset[11];
+    std::snprintf(offset, sizeof(offset), "%010zu", obj1);
+    pdf.replace(entry4, 10, offset);
+    pdf += "3 0 obj\nnull\nendobj\n";
+
+    const Context ctx;
+    const TempPath in("watermark_repair.pdf");
+    write_file(in.str(), pdf);
+    Document doc = Document::open(ctx, in.str());
+    WatermarkOptions o;
+    o.text = "X";
+    try {
+        (void)watermark(ctx, doc, "", o);
+    } catch (const leht::Error&) {
+        // Refusing is fine; crashing or leaking is not.
+    }
+}
+
 void watermark_refuses_bad_options() {
     const Context ctx;
     Document doc = Document::open(ctx, corpus("text_10p.pdf"));
@@ -279,6 +317,7 @@ int main() {
     RUN(watermark_marks_the_chosen_pages);
     RUN(watermark_is_immune_to_the_page_state_and_names);
     RUN(watermark_follows_the_page_as_displayed);
+    RUN(watermark_survives_a_repair_mid_edit);
     RUN(watermark_refuses_bad_options);
     return 0;
 }
