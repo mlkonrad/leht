@@ -64,8 +64,14 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      - name: Generate the test corpus
+        # Generated, not committed (CONTRIBUTING.md). Needs the freshly built
+        # leht for the encrypted fixture, so it runs after the build.
+        run: LEHT_BIN=build/cli/leht tests/corpus/generate.sh
+
       - name: Test
-        run: ctest --test-dir build --output-on-failure -j "$(nproc)"
+        # A per-test timeout: a hung test fails in minutes, not at the job limit.
+        run: ctest --test-dir build --output-on-failure -j "$(nproc)" --timeout 600
 
       - name: Mutation fuzz
         if: matrix.fuzz

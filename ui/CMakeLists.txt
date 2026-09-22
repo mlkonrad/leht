@@ -61,5 +61,8 @@ if(LEHT_BUILD_TESTS)
     # freeing the context out from under live documents) was found this way.
     set_tests_properties(ui_smoke PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ASAN_OPTIONS=detect_leaks=0"
-        SKIP_RETURN_CODE 77)
+        SKIP_RETURN_CODE 77
+        # Normally ~90 s. A modal dialog nobody can dismiss offscreen (e.g.
+        # "Could not open document" on a missing corpus) otherwise hangs forever.
+        TIMEOUT 300)
 endif()
