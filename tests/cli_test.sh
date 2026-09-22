@@ -118,6 +118,28 @@ if grep -q "Check: this" "$OUT/stdout"; then
     echo "FAIL  deleted note is still listed"; failures=$((failures + 1))
 fi
 
+# Forms.
+FORM="$CORPUS/form.pdf"
+if [[ -f "$FORM" ]]; then
+    expect 0 "form lists fields"               form "$FORM"
+    grep -q "^name " "$OUT/stdout" || { echo "FAIL  form did not list 'name'"; failures=$((failures + 1)); }
+    expect 1 "fill with nothing to do"         fill "$FORM" -o "$OUT/f.pdf"
+    expect 1 "fill without ="                  fill "$FORM" name -o "$OUT/f.pdf"
+    expect 1 "fill unknown field"              fill "$FORM" nope=1 -o "$OUT/f.pdf"
+    expect 1 "fill bad checkbox value"         fill "$FORM" agree=maybe -o "$OUT/f.pdf"
+    expect 1 "fill over the length limit"      fill "$FORM" name=abcdefghijklmnopqrstuvwxyz -o "$OUT/f.pdf"
+    [[ -e "$OUT/f.pdf" ]] && { echo "FAIL  a refused fill still wrote output"; failures=$((failures + 1)); }
+    expect 0 "fill two fields"                 fill "$FORM" name=Marlon "agree=yes" -o "$OUT/f.pdf"
+    expect 0 "form shows the values"           form "$OUT/f.pdf"
+    grep -q '"Marlon"' "$OUT/stdout" || { echo "FAIL  filled value not listed"; failures=$((failures + 1)); }
+    expect 0 "fill --flatten"                  fill "$OUT/f.pdf" --flatten -o "$OUT/flat.pdf"
+    expect 0 "flattened form has no fields"    form "$OUT/flat.pdf"
+    grep -q "no form fields" "$OUT/stdout" || { echo "FAIL  flatten left fields"; failures=$((failures + 1)); }
+else
+    echo "  skip  forms (run tests/corpus/generate.sh for form.pdf)"
+fi
+expect 0 "form on a file without one"      form "$IN"
+
 # Valid invocations still succeed.
 expect 0 "rotate -d 90"                    rotate "$IN" -d 90 -o "$OUT/r.pdf"
 expect 0 "rotate -d -90"                   rotate "$IN" -d -90 -o "$OUT/r.pdf"

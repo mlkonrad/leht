@@ -166,6 +166,30 @@ PY
     echo "  made  outlined.pdf (3 pages, 2-level outline)"
 fi
 
+# An AcroForm, for the form commands: a text field with a length limit and a
+# checkbox. pdfmark writes the widgets; the explicit /AcroForm PUT is needed,
+# since ghostscript does not create one for widget annotations on its own.
+if [[ ! -f form.pdf ]]; then
+    cat > form.ps <<'FORM'
+%!PS-Adobe-3.0
+/Helvetica findfont 12 scalefont setfont
+72 725 moveto (Name:) show
+72 675 moveto (Agree:) show
+[ /_objdef {helv} /type /dict /OBJ pdfmark
+[ {helv} << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> /PUT pdfmark
+[ /_objdef {name} /Subtype /Widget /Rect [120 700 320 720] /FT /Tx /T (name) /F 4
+  /MaxLen 20 /DA (/Helv 12 Tf 0 g) /ANN pdfmark
+[ /_objdef {agree} /Subtype /Widget /Rect [120 660 132 672] /FT /Btn /T (agree) /F 4
+  /V /Off /AS /Off /MK << /CA (4) >> /DA (/ZaDb 0 Tf 0 g) /ANN pdfmark
+[ {Catalog} << /AcroForm << /Fields [ {name} {agree} ] /DA (/Helv 0 Tf 0 g)
+  /DR << /Font << /Helv {helv} >> >> >> >> /PUT pdfmark
+showpage
+FORM
+    gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -sOutputFile=form.pdf form.ps
+    rm -f form.ps
+    echo "  made  form.pdf (AcroForm: a text field and a checkbox)"
+fi
+
 # Encrypted fixture for the viewer's password-flow test. Built with the leht CLI
 # if one is present; the test skips when it is absent.
 LEHT_BIN="${LEHT_BIN:-$(command -v leht 2>/dev/null || echo ../../build/cli/leht)}"

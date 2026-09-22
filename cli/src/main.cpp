@@ -12,6 +12,7 @@
 #include "leht/ops/compress.hpp"
 #include "leht/ops/crop.hpp"
 #include "leht/ops/encrypt.hpp"
+#include "leht/ops/forms.hpp"
 #include "leht/ops/annotate.hpp"
 #include "leht/ops/merge.hpp"
 #include "leht/ops/pages.hpp"
@@ -64,6 +65,9 @@ constexpr const char* kUsage =
     "  annotate  FILE -o OUT.pdf [--highlight|--underline|--strike TEXT]\n"
     "            [--note P:X,Y:TEXT]... [--stamp P:NAME[:BOX]]... [--delete ID]...\n"
     "            [--author NAME] [--color RRGGBB]\n"
+    "  form      FILE                         list form fields and their values\n"
+    "  fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]\n"
+    "            fill form fields; never runs the document's JavaScript\n"
     "\n"
     "options:\n"
     "  -o PATH        output file or pattern\n"
@@ -89,6 +93,7 @@ constexpr const char* kUsage =
     "  --size PT      watermark font size; 0 fits the page (default 0)\n"
     "  --under        draw the watermark beneath the page content\n"
     "  --note P:X,Y:TEXT  a sticky note on page P at X,Y (points from top-left)\n"
+    "  --flatten      bake fields into the page so they can no longer be edited\n"
     "  --stamp P:NAME[:BOX]  a stamp: Approved, Draft, Confidential, Final,\n"
     "                 NotApproved, ForComment, TopSecret, ...; top-right by default\n"
     "\n"
@@ -833,6 +838,72 @@ int cmd_annotate(const leht::Context& ctx, const Args& args) {
     return 0;
 }
 
+int cmd_form(const leht::Context& ctx, const Args& args) {
+    leht::Document doc = leht::Document::open(ctx, require_input(args));
+    const auto fields = leht::ops::list_fields(ctx, doc);
+    if (fields.empty()) {
+        std::printf("no form fields\n");
+        return 0;
+    }
+    for (const auto& f : fields) {
+        std::string flags;
+        if (f.read_only) {
+            flags += " read-only";
+        }
+        if (f.required) {
+            flags += " required";
+        }
+        if (f.max_length > 0) {
+            flags += " max " + std::to_string(f.max_length);
+        }
+        std::printf("%-30s %-9s p%-3d = \"%s\"%s\n", f.name.c_str(),
+                    leht::ops::field_type_name(f.type), f.page + 1, f.value.c_str(),
+                    flags.c_str());
+        if (!f.options.empty()) {
+            std::string opts;
+            for (const std::string& o : f.options) {
+                opts += (opts.empty() ? "" : " | ") + o;
+            }
+            std::printf("%-30s   options: %s\n", "", opts.c_str());
+        }
+    }
+    return 0;
+}
+
+int cmd_fill(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+    std::vector<std::pair<std::string, std::string>> values;
+    for (std::size_t i = 1; i < args.positional.size(); ++i) {
+        const std::string& assignment = args.positional[i];
+        const std::size_t eq = assignment.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            throw leht::Error(0, "expected NAME=VALUE, got '" + assignment + "'");
+        }
+        values.emplace_back(assignment.substr(0, eq), assignment.substr(eq + 1));
+    }
+    const bool flat = args.has_switch("--flatten");
+    if (values.empty() && !flat) {
+        throw leht::Error(0, "fill needs at least one NAME=VALUE (or --flatten)");
+    }
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    for (const auto& [name, value] : values) {
+        leht::ops::set_field(ctx, doc, name, value);
+    }
+    int flattened = 0;
+    if (flat) {
+        flattened = leht::ops::flatten(ctx, doc);
+    }
+    doc.save(output, leht::SaveOptions{});
+    std::printf("filled %zu field%s", values.size(), values.size() == 1 ? "" : "s");
+    if (flat) {
+        std::printf(", flattened %d", flattened);
+    }
+    std::printf(" -> %s\n", output.c_str());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -872,6 +943,8 @@ int main(int argc, char** argv) {
         if (cmd == "watermark") { return cmd_watermark(ctx, args); }
         if (cmd == "annots")   { return cmd_annots(ctx, args); }
         if (cmd == "annotate") { return cmd_annotate(ctx, args); }
+        if (cmd == "form")     { return cmd_form(ctx, args); }
+        if (cmd == "fill")     { return cmd_fill(ctx, args); }
 
         std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
         std::fputs(kUsage, stderr);
