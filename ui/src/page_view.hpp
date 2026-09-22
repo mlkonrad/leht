@@ -82,7 +82,7 @@ public:
     // --- Editing tools ------------------------------------------------------
     /// What a left-button drag or click does. Every tool but Select works in
     /// base coordinates, so needs the view unrotated (see setTool).
-    enum class Tool { Select, Highlight, Note, Ink, Redact, Erase };
+    enum class Tool { Select, Highlight, Note, Ink, Redact, Erase, Sign };
     /// Returns false (and keeps Select) if `tool` needs an unrotated view and
     /// the view is rotated.
     bool setTool(Tool tool);
@@ -122,6 +122,8 @@ signals:
     void noteRequested(int page, QPointF at);
     void inkRequested(int page, QVector<QPolygonF> strokes);
     void redactRequested(int page, QRectF box);
+    /// A box was dragged with the Sign tool: where a visible signature goes.
+    void signRequested(int page, QRectF box);
     void eraseRequested(int annotId);
     /// A tool could not be used, with the reason, for the status bar.
     void toolRefused(QString reason);

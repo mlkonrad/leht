@@ -149,6 +149,27 @@ public slots:
     void listAnnotations();
     void listFields();
 
+    // --- Signing (M5) --------------------------------------------------------
+    //
+    // The private key never reaches the worker, which is the process that
+    // parses hostile PDFs. The worker writes the document plus a signature
+    // whose /Contents is a hole of zeros; this side then checks, on the bytes
+    // of the file itself, that the signed ranges are everything but that hole,
+    // signs them, and fills it in. A worker that lied about the hole can
+    // produce an invalid signature, never a signature over other bytes.
+
+    /// Signs the document (with any unsaved edits, in the same revision) and
+    /// writes it to `path`. Emits saved() -- signing IS a save, so the edit log
+    /// restarts from the signed file -- or saveFailed().
+    void signDocument(QString path, SignSpec spec);
+
+    /// Verifies every signature and emits signaturesReady(). Verification runs
+    /// in the worker; the trust store travels there as PEM.
+    void listSignatures();
+
+    /// Certificates to trust beyond the system's, remembered between sessions.
+    void addTrustedCertificate(QString pemPath);
+
 signals:
     void opened(int pageCount, QVector<QSize> baseSizes);
     void outlineReady(QVector<OutlineRow> rows);
@@ -178,6 +199,7 @@ signals:
     void saveFailed(QString message);
     void annotationsReady(QVector<AnnotRow> rows);
     void fieldsReady(QVector<FieldRow> rows);
+    void signaturesReady(QVector<SigRow> rows);
 
 private:
     /// What the viewer was doing when a worker died, which decides the response.
@@ -262,6 +284,10 @@ private:
     int externalKills_ = 0;                ///< worker deaths from outside (OOM, kill)
     bool hostile_ = false;                 ///< the current worker was killed for sending garbage
     static constexpr int kMaxExternalKills = 3;
+
+    /// The system trust store plus the user's own certificates, as PEM.
+    /// Reading files is this side's job; the worker cannot open any.
+    [[nodiscard]] std::string trustPem();
 
     std::unique_ptr<leht::PageCache> cache_;
     QAtomicInteger<quint64> generation_ = 0;

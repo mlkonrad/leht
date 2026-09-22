@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "main_window.hpp"
 
+#include "sign_dialog.hpp"
+#include "leht/crypto/crypto.hpp"
+
+#include <QDateTime>
+#include <QTreeWidgetItem>
+
 #include "page_view.hpp"
 #include "render_worker.hpp"
 
@@ -155,8 +161,15 @@ MainWindow::MainWindow() {
                 onWorker([=](RenderWorker* w) { w->addInk(page, strokes, QColor(30, 60, 200)); });
             });
     connect(view_, &PageView::redactRequested, this, [this](int page, QRectF box) {
+        if (!confirmBreakingSignatures(tr("A redaction"))) {
+            return;
+        }
         onWorker([=](RenderWorker* w) { w->redactArea(page, box); });
     });
+    connect(view_, &PageView::signRequested, this, [this](int page, QRectF box) {
+        startSigning(page, box);
+    });
+    connect(worker_, &RenderWorker::signaturesReady, this, &MainWindow::onSignaturesReady);
     connect(view_, &PageView::eraseRequested, this, [this](int id) {
         onWorker([=](RenderWorker* w) { w->deleteAnnotation(id); });
     });
@@ -171,6 +184,7 @@ MainWindow::MainWindow() {
 
     buildActions();
     buildEditActions();
+    buildSignaturePanel();
 
     pageLabel_ = new QLabel(this);
     zoomLabel_ = new QLabel(this);
@@ -378,6 +392,7 @@ void MainWindow::buildEditActions() {
         {"Redact", "Drag a box: everything under it is removed from the file, "
                    "not just covered", PageView::Tool::Redact},
         {"Erase", "Click an annotation to delete it", PageView::Tool::Erase},
+        {"Sign", "Drag a box to place a signature there", PageView::Tool::Sign},
     };
     for (const auto& t : kTools) {
         QAction* a = bar->addAction(tr(t.label));
@@ -401,7 +416,7 @@ void MainWindow::buildEditActions() {
         const QString needle = QInputDialog::getText(
             this, tr("Redact text"),
             tr("Remove every occurrence of (case-insensitive):"), QLineEdit::Normal, QString(), &ok);
-        if (ok && !needle.isEmpty()) {
+        if (ok && !needle.isEmpty() && confirmBreakingSignatures(tr("A redaction"))) {
             onWorker([=](RenderWorker* w) { w->redactText(needle); });
         }
     });
@@ -414,6 +429,20 @@ void MainWindow::buildEditActions() {
             onWorker([=](RenderWorker* w) { w->addWatermark(text); });
         }
     });
+    menu->addSeparator();
+    QAction* signInvisibly = menu->addAction(tr("Sign Invisibly…"));
+    signInvisibly->setToolTip(tr("Sign the document without marking a page"));
+    connect(signInvisibly, &QAction::triggered, this, [this] { startSigning(0, QRectF()); });
+    QAction* trustCert = menu->addAction(tr("Trust a Certificate…"));
+    connect(trustCert, &QAction::triggered, this, [this] {
+        const QString path = QFileDialog::getOpenFileName(
+            this, tr("Trust a certificate"), QString(),
+            tr("Certificates (*.pem *.crt *.cer);;All files (*)"));
+        if (!path.isEmpty()) {
+            onWorker([=](RenderWorker* w) { w->addTrustedCertificate(path); });
+        }
+    });
+    menu->addSeparator();
     QAction* crop = menu->addAction(tr("Crop Margins…"));
     connect(crop, &QAction::triggered, this, [this] {
         bool ok = false;
@@ -433,6 +462,202 @@ void MainWindow::buildEditActions() {
         a->setEnabled(false);
     }
     more->setEnabled(false);
+}
+
+void MainWindow::buildSignaturePanel() {
+    // A banner rather than a dialog: a document's signatures are a standing
+    // fact about it, not an event, and the one thing a reader must not have to
+    // go looking for.
+    signatureBanner_ = new QToolBar(tr("Signatures"), this);
+    signatureBanner_->setObjectName(QStringLiteral("signatureBanner"));
+    signatureBanner_->setMovable(false);
+    signatureBannerLabel_ = new QLabel(signatureBanner_);
+    signatureBannerLabel_->setTextFormat(Qt::PlainText);
+    signatureBanner_->addWidget(signatureBannerLabel_);
+    QAction* details = signatureBanner_->addAction(tr("Details"));
+    addToolBar(Qt::TopToolBarArea, signatureBanner_);
+    signatureBanner_->hide();
+
+    auto* dock = new QDockWidget(tr("Signatures"), this);
+    dock->setObjectName(QStringLiteral("signatureDock"));
+    signatures_ = new QTreeWidget(dock);
+    signatures_->setHeaderLabels({tr("Signature"), tr("Details")});
+    signatures_->setColumnWidth(0, 180);
+    dock->setWidget(signatures_);
+    addDockWidget(Qt::RightDockWidgetArea, dock);
+    dock->hide();
+    connect(details, &QAction::triggered, dock, &QWidget::show);
+
+    // Clicking a signature goes to the page it is on.
+    connect(signatures_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
+        const QVariant page = item->data(0, Qt::UserRole);
+        if (page.isValid() && page.toInt() >= 0) {
+            view_->goToPage(page.toInt());
+        }
+    });
+}
+
+namespace {
+
+QString trustWord(int trust) {
+    switch (static_cast<leht::crypto::Trust>(trust)) {
+        case leht::crypto::Trust::Trusted:     return MainWindow::tr("trusted");
+        case leht::crypto::Trust::Untrusted:   return MainWindow::tr("not trusted");
+        case leht::crypto::Trust::Expired:     return MainWindow::tr("certificate expired");
+        case leht::crypto::Trust::NotYetValid: return MainWindow::tr("certificate not yet valid");
+        case leht::crypto::Trust::Unknown:     return MainWindow::tr("not checked");
+    }
+    return MainWindow::tr("not checked");
+}
+
+/// One line saying what this signature is worth, and the colour to say it in.
+std::pair<QString, QColor> verdict(const SigRow& row) {
+    if (!row.rangeOk || !row.intact) {
+        return {MainWindow::tr("Broken"), QColor(170, 20, 20)};
+    }
+    const bool trusted = static_cast<leht::crypto::Trust>(row.trust) ==
+                         leht::crypto::Trust::Trusted;
+    if (row.changedAfterSigning && !row.laterSignatureCoversChanges) {
+        return {MainWindow::tr("Intact, but the document was changed afterwards"),
+                QColor(170, 110, 0)};
+    }
+    if (!trusted) {
+        return {MainWindow::tr("Intact, signer not trusted"), QColor(170, 110, 0)};
+    }
+    return {MainWindow::tr("Valid"), QColor(20, 120, 40)};
+}
+
+QString localTime(qint64 unix_seconds) {
+    return QDateTime::fromSecsSinceEpoch(unix_seconds).toString(Qt::ISODate);
+}
+
+}  // namespace
+
+void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
+    signatureCount_ = static_cast<int>(rows.size());
+    signatures_->clear();
+    auto* dock = findChild<QDockWidget*>(QStringLiteral("signatureDock"));
+    if (rows.isEmpty()) {
+        signatureBanner_->hide();
+        if (dock != nullptr) {
+            dock->hide();
+        }
+        return;
+    }
+
+    int worst = 0;  // 0 valid, 1 a warning, 2 broken
+    for (const SigRow& row : rows) {
+        const auto [word, colour] = verdict(row);
+        auto* item = new QTreeWidgetItem(signatures_);
+        item->setText(0, row.signerCommonName.isEmpty() ? row.field : row.signerCommonName);
+        item->setText(1, word);
+        item->setForeground(1, colour);
+        item->setData(0, Qt::UserRole, row.page);
+        const auto add = [item](const QString& key, const QString& value) {
+            if (!value.isEmpty()) {
+                auto* child = new QTreeWidgetItem(item);
+                child->setText(0, key);
+                child->setText(1, value);
+                child->setData(0, Qt::UserRole, -1);
+            }
+        };
+        if (!row.rangeOk) {
+            add(tr("Problem"), row.rangeProblem);
+        } else if (!row.intact) {
+            add(tr("Problem"), row.problem);
+        }
+        add(tr("Field"), row.field);
+        add(tr("Signer"), row.signer);
+        add(tr("Issuer"), row.issuer);
+        add(tr("Trust"), row.trustDetail.isEmpty() ? trustWord(row.trust)
+                                                   : tr("%1: %2").arg(trustWord(row.trust),
+                                                                      row.trustDetail));
+        if (row.notAfter != 0) {
+            add(tr("Certificate valid until"), localTime(row.notAfter));
+        }
+        add(tr("Algorithm"), row.digest.isEmpty() ? row.subfilter
+                                                  : tr("%1, %2").arg(row.digest, row.subfilter));
+        add(tr("Claimed time"), row.claimedTime);
+        if (row.hasTimestamp) {
+            add(tr("Timestamp"),
+                row.timestampValid
+                    ? tr("%1, by %2 (%3)").arg(localTime(row.timestampTime), row.authority,
+                                               trustWord(row.timestampTrust))
+                    : tr("not valid: %1").arg(row.timestampProblem));
+        } else if (row.intact) {
+            add(tr("Timestamp"), tr("none: nothing proves when this was signed"));
+        }
+        add(tr("Reason"), row.reason);
+        add(tr("Location"), row.location);
+        if (row.changedAfterSigning) {
+            add(tr("Changed"), row.laterSignatureCoversChanges
+                                   ? tr("yes, and a later signature covers those changes")
+                                   : tr("yes: the document was added to after this signature"));
+        }
+        add(tr("Certificate fingerprint"), row.fingerprint);
+
+        if (!row.rangeOk || !row.intact) {
+            worst = 2;
+        } else if (worst < 1 && (row.changedAfterSigning && !row.laterSignatureCoversChanges)) {
+            worst = 1;
+        } else if (worst < 1 && static_cast<leht::crypto::Trust>(row.trust) !=
+                                    leht::crypto::Trust::Trusted) {
+            worst = 1;
+        }
+    }
+    signatures_->expandAll();
+
+    const QString summary =
+        worst == 2 ? tr("⚠ This document has a broken signature.")
+        : worst == 1 ? tr("This document is signed, with something worth checking.")
+                     : tr("✓ Signed and verified.");
+    signatureBannerLabel_->setText(tr(" %1  (%n signature(s)) ", nullptr, signatureCount_)
+                                       .arg(summary));
+    QPalette pal = signatureBannerLabel_->palette();
+    pal.setColor(QPalette::WindowText, worst == 2 ? QColor(170, 20, 20)
+                                       : worst == 1 ? QColor(140, 90, 0)
+                                                    : QColor(20, 110, 40));
+    signatureBannerLabel_->setPalette(pal);
+    signatureBanner_->show();
+    if (dock != nullptr && worst > 0) {
+        dock->show();
+    }
+}
+
+bool MainWindow::confirmBreakingSignatures(const QString& what) {
+    if (signatureCount_ == 0) {
+        return true;
+    }
+    const auto answer = QMessageBox::warning(
+        this, tr("This document is signed"),
+        tr("%1 cannot be added as a new revision: it rewrites the file, and the %n existing "
+           "signature(s) will no longer verify.\n\nCarry on?", nullptr, signatureCount_)
+            .arg(what),
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    return answer == QMessageBox::Yes;
+}
+
+void MainWindow::startSigning(int page, QRectF rect) {
+    if (pageCount_ == 0) {
+        return;
+    }
+    SignDialog dialog(this, page, rect, QString());
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    SignSpec spec = dialog.spec();
+    // Signing writes a file, so it needs a path. A document opened read-only
+    // from somewhere unwritable is signed with Save As.
+    QString target = currentPath_;
+    if (target.isEmpty()) {
+        target = QFileDialog::getSaveFileName(this, tr("Save signed document as"), QString(),
+                                              tr("PDF documents (*.pdf)"));
+        if (target.isEmpty()) {
+            return;
+        }
+    }
+    statusBar()->showMessage(tr("Signing…"));
+    onWorker([=](RenderWorker* w) { w->signDocument(target, spec); });
 }
 
 void MainWindow::onEditStateChanged(bool canUndo, bool canRedo, bool modified) {
@@ -605,9 +830,11 @@ void MainWindow::onOpened(int pageCount, QVector<QSize> baseSizes) {
     }
     undoAction_->setEnabled(false);
     redoAction_->setEnabled(false);
+    signatureCount_ = 0;
     onWorker([](RenderWorker* w) {
         w->listAnnotations();
         w->listFields();
+        w->listSignatures();
     });
     statusBar()->clearMessage();
     view_->setPages(baseSizes);

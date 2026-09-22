@@ -8,12 +8,16 @@ qt_add_library(leht_viewer_lib STATIC
     src/main_window.cpp
     src/page_view.cpp
     src/render_worker.cpp
+    src/sign_dialog.cpp
     src/thumbnail_bar.cpp
 )
 target_include_directories(leht_viewer_lib PUBLIC src)
 # leht::warnings is deliberately not applied: Qt's moc output and headers do not
 # pass our -Werror pedantic set, and they are not ours to fix. core/ stays strict.
-target_link_libraries(leht_viewer_lib PUBLIC leht::core leht::ipc Qt6::Widgets Qt6::PrintSupport)
+# leht::crypto: the viewer is the trusted process. It holds the signing key,
+# and leht-worker never does -- see docs/signing.md.
+target_link_libraries(leht_viewer_lib PUBLIC leht::core leht::crypto leht::ipc
+                      Qt6::Widgets Qt6::PrintSupport)
 
 # The viewer parses nothing itself: every document goes to leht-worker (M3).
 # Both locations are baked in; render_worker.cpp tries the installed one first
@@ -33,6 +37,10 @@ if(LEHT_BUILD_TESTS)
     target_link_libraries(ui_smoke_test PRIVATE leht_viewer_lib)
     target_compile_definitions(ui_smoke_test PRIVATE
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
+    # The test PKI is generated at run time; no key is committed.
+    find_package(OpenSSL 3.2 REQUIRED COMPONENTS Crypto)
+    target_link_libraries(ui_smoke_test PRIVATE OpenSSL::Crypto)
+    target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/tests)
     add_test(NAME ui_smoke COMMAND ui_smoke_test)
     # Offscreen so it runs headless in CI; skips (77) if even that is unavailable.
     # detect_leaks=0: Qt leaks a lot at exit under LSan (its own caches, not

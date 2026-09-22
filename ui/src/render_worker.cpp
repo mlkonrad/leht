@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "render_worker.hpp"
 
+#include <QSettings>
+
+#include "leht/crypto/crypto.hpp"
+#include "leht/error.hpp"
+
 #include "leht/ipc/protocol.hpp"
 #include "leht/page_cache.hpp"
 
@@ -950,6 +955,231 @@ void RenderWorker::save(QString path) {
     (void)openInWorker(/*silent=*/true);
     emit saved(path_);
     publishEditState();
+}
+
+
+// --- signing (M5) -----------------------------------------------------------
+
+std::string RenderWorker::trustPem() {
+    // Built afresh every time, deliberately: a cache here once went on
+    // reporting a signer as untrusted after the user had just added the very
+    // certificate that vouches for them. Reading ~150 system certificates
+    // costs a few milliseconds, and verification is not a hot path.
+    leht::crypto::TrustStore store = leht::crypto::TrustStore::system();
+    QSettings settings;
+    for (const QString& path :
+         settings.value(QStringLiteral("trustedCertificates")).toStringList()) {
+        QFile file(path);
+        if (file.open(QIODevice::ReadOnly)) {
+            try {
+                (void)store.add_pem(file.readAll().toStdString());
+            } catch (const leht::Error&) {
+                // A certificate the user added that no longer parses is not
+                // worth failing every verification over.
+            }
+        }
+    }
+    return store.pem();
+}
+
+void RenderWorker::addTrustedCertificate(QString pemPath) {
+    QSettings settings;
+    QStringList paths = settings.value(QStringLiteral("trustedCertificates")).toStringList();
+    if (!paths.contains(pemPath)) {
+        paths.push_back(pemPath);
+        settings.setValue(QStringLiteral("trustedCertificates"), paths);
+    }
+    listSignatures();
+}
+
+void RenderWorker::signDocument(QString path, SignSpec spec) {
+    if (!proc_.load()) {
+        emit saveFailed(tr("No document is open."));
+        return;
+    }
+
+    // The key is read and used here, in the trusted process. It is never sent
+    // anywhere, and the password is wiped when this function returns.
+    std::unique_ptr<leht::crypto::Identity> identity;
+    leht::crypto::SignOptions options;
+    options.tsa_url = spec.tsaUrl.trimmed().toStdString();
+    try {
+        QFile key(spec.p12Path);
+        if (!key.open(QIODevice::ReadOnly)) {
+            emit saveFailed(tr("Cannot read %1: %2").arg(spec.p12Path, key.errorString()));
+            return;
+        }
+        const QByteArray bytes = key.readAll();
+        leht::crypto::Secret password{spec.password.toStdString()};
+        spec.password.fill(QChar(0));
+        spec.password.clear();
+        identity = std::make_unique<leht::crypto::Identity>(leht::crypto::Identity::from_pkcs12(
+            leht::crypto::Bytes(bytes.begin(), bytes.end()), password));
+    } catch (const leht::Error& e) {
+        emit saveFailed(QString::fromUtf8(e.what()));
+        return;
+    }
+
+    leht::ipc::PrepareSignature request;
+    leht::ops::SignatureRequest& r = request.request;
+    r.field = spec.field.toStdString();
+    r.page = spec.page;
+    if (!spec.rect.isEmpty()) {
+        r.rect = leht::Rect{static_cast<float>(spec.rect.left()),
+                            static_cast<float>(spec.rect.top()),
+                            static_cast<float>(spec.rect.right()),
+                            static_cast<float>(spec.rect.bottom())};
+    }
+    r.name = spec.name.toStdString();
+    r.reason = spec.reason.toStdString();
+    r.location = spec.location.toStdString();
+    r.reserve = leht::crypto::estimate_signature_size(*identity, options);
+    r.appearance.image.assign(spec.image.begin(), spec.image.end());
+    for (const QPolygonF& stroke : spec.strokes) {
+        std::vector<leht::Point> points;
+        for (const QPointF& p : stroke) {
+            points.push_back(leht::Point{static_cast<float>(p.x()), static_cast<float>(p.y())});
+        }
+        r.appearance.strokes.push_back(std::move(points));
+    }
+    r.appearance.strokes_width = static_cast<float>(spec.strokesCanvas.width());
+    r.appearance.strokes_height = static_cast<float>(spec.strokesCanvas.height());
+    for (const QString& line : spec.lines) {
+        r.appearance.lines.push_back(line.toStdString());
+    }
+
+    const QFileInfo info(path);
+    QByteArray temp = QFile::encodeName(info.absolutePath() + QStringLiteral("/.") +
+                                        info.fileName() + QStringLiteral(".leht-XXXXXX"));
+    const int fd = ::mkostemp(temp.data(), O_CLOEXEC);
+    if (fd < 0) {
+        emit saveFailed(tr("Cannot create a file in %1: %2")
+                            .arg(info.absolutePath(), QString::fromUtf8(std::strerror(errno))));
+        return;
+    }
+    const auto discard = [&](const QString& why) {
+        ::close(fd);
+        ::unlink(temp.constData());
+        emit saveFailed(why);
+    };
+
+    auto reply = sendRequest(request, fd) ? receive() : std::nullopt;
+    if (!reply) {
+        discard(tr("The document worker stopped while signing; nothing was written."));
+        (void)workerLost(Phase::Edit, -1);
+        return;
+    }
+    leht::ipc::SignaturePrepared prepared;
+    try {
+        if (reply->type == leht::ipc::MsgType::Failed) {
+            discard(QString::fromStdString(leht::ipc::decode_as<leht::ipc::Failed>(*reply).message));
+            return;
+        }
+        prepared = leht::ipc::decode_as<leht::ipc::SignaturePrepared>(*reply);
+    } catch (const leht::ipc::ProtocolError&) {
+        discard(tr("The document worker answered the signing request with garbage; "
+                   "nothing was written."));
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+        return;
+    }
+
+    try {
+        // Checks the hole against the file's own bytes before signing it.
+        (void)leht::crypto::sign_prepared(fd, prepared.range, *identity, options);
+    } catch (const leht::Error& e) {
+        discard(QString::fromUtf8(e.what()));
+        return;
+    }
+
+    struct stat st {};
+    const QByteArray target = QFile::encodeName(info.absoluteFilePath());
+    const mode_t mode = ::stat(target.constData(), &st) == 0 ? (st.st_mode & 07777)
+                                                             : (0666 & ~currentUmask());
+    if (::fchmod(fd, mode) != 0 || ::fsync(fd) != 0) {
+        discard(QString::fromUtf8(std::strerror(errno)));
+        return;
+    }
+    ::close(fd);
+    if (::rename(temp.constData(), target.constData()) != 0) {
+        const int err = errno;
+        ::unlink(temp.constData());
+        emit saveFailed(QString::fromUtf8(std::strerror(err)));
+        return;
+    }
+    const int dir = ::open(QFile::encodeName(info.absolutePath()).constData(),
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir >= 0) {
+        (void)::fsync(dir);
+        ::close(dir);
+    }
+
+    // Signing is a save: the signed file is the document now, and the edit log
+    // starts again from it. Undo does not reach back past a signature, which is
+    // just as well -- undoing into it would only break it.
+    path_ = info.absoluteFilePath();
+    log_.clear();
+    redo_.clear();
+    (void)openInWorker(/*silent=*/true);
+    emit saved(path_);
+    publishEditState();
+    listSignatures();
+}
+
+void RenderWorker::listSignatures() {
+    QVector<SigRow> rows;
+    leht::ipc::ListSignatures request;
+    request.trust_pem = trustPem();
+    auto reply = proc_.load() ? roundTrip(request, Phase::Edit, -1) : std::nullopt;
+    try {
+        if (reply && reply->type == leht::ipc::MsgType::SignatureList) {
+            const auto list = leht::ipc::decode_as<leht::ipc::SignatureList>(*reply);
+            for (const leht::ipc::SignatureRow& s : list.rows) {
+                SigRow row;
+                row.field = QString::fromStdString(s.field);
+                row.page = s.page;
+                row.rect = QRectF(QPointF(s.rect.x0, s.rect.y0), QPointF(s.rect.x1, s.rect.y1));
+                row.subfilter = QString::fromStdString(s.subfilter);
+                row.name = QString::fromStdString(s.name);
+                row.reason = QString::fromStdString(s.reason);
+                row.location = QString::fromStdString(s.location);
+                row.claimedTime = QString::fromStdString(s.claimed_time);
+                row.rangeOk = s.range_ok;
+                row.rangeProblem = QString::fromStdString(s.range_problem);
+                row.changedAfterSigning = s.changed_after_signing;
+                row.laterSignatureCoversChanges = s.later_signature_covers_changes;
+                row.checked = s.checked;
+                row.intact = s.intact;
+                row.problem = QString::fromStdString(s.problem);
+                row.digest = QString::fromStdString(s.digest);
+                row.signer = QString::fromStdString(s.signer.subject);
+                row.signerCommonName = QString::fromStdString(s.signer.common_name);
+                row.issuer = QString::fromStdString(s.signer.issuer);
+                row.serial = QString::fromStdString(s.signer.serial);
+                row.fingerprint = QString::fromStdString(s.signer.sha256);
+                row.notBefore = s.signer.not_before;
+                row.notAfter = s.signer.not_after;
+                for (const leht::ipc::CertRow& c : s.chain) {
+                    row.chain.push_back(QString::fromStdString(c.subject));
+                }
+                row.trust = s.trust;
+                row.trustDetail = QString::fromStdString(s.trust_detail);
+                row.hasTimestamp = s.has_timestamp;
+                row.timestampValid = s.timestamp_valid;
+                row.timestampTime = s.timestamp_time;
+                row.authority = QString::fromStdString(s.authority.common_name);
+                row.timestampTrust = s.timestamp_trust;
+                row.timestampProblem = QString::fromStdString(s.timestamp_problem);
+                rows.push_back(std::move(row));
+            }
+        } else if (reply) {
+            (void)leht::ipc::decode_as<leht::ipc::Failed>(*reply);  // not a PDF: no signatures
+        }
+    } catch (const leht::ipc::ProtocolError&) {
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+    }
+    emit signaturesReady(rows);
 }
 
 void RenderWorker::listAnnotations() {

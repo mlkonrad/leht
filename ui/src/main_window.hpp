@@ -57,6 +57,7 @@ private slots:
     void printDialog();
     void onEditStateChanged(bool canUndo, bool canRedo, bool modified);
     void onFieldsReady(const QVector<FieldRow>& rows);
+    void onSignaturesReady(const QVector<SigRow>& rows);
     void onSaved(const QString& path);
 
 public:
@@ -82,6 +83,15 @@ protected:
 private:
     void buildActions();
     void buildEditActions();
+    void buildSignaturePanel();
+    /// Opens the Sign dialog for a box on `page` (an empty box signs
+    /// invisibly), then signs -- which saves, so it asks where to when the
+    /// document has no path yet.
+    void startSigning(int page, QRectF rect);
+    /// True unless the user calls off an edit that would break signatures.
+    /// A redaction cannot be appended: it rewrites the file, and every
+    /// signature in it goes with the revisions it drops.
+    [[nodiscard]] bool confirmBreakingSignatures(const QString& what);
     void updateTitle();
     /// Asks what to do with unsaved edits. True means carry on now; false
     /// means stop (cancelled, or a save was started and `then` will run when
@@ -114,6 +124,10 @@ private:
     QAction* redoAction_ = nullptr;
     QActionGroup* tools_ = nullptr;
     QTableWidget* fields_ = nullptr;
+    QTreeWidget* signatures_ = nullptr;
+    QToolBar* signatureBanner_ = nullptr;
+    QLabel* signatureBannerLabel_ = nullptr;
+    int signatureCount_ = 0;
     bool populatingFields_ = false;
     std::function<void()> afterSave_;  ///< what an unsaved-changes prompt was waiting for
 };

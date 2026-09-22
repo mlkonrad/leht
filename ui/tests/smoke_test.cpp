@@ -33,6 +33,11 @@
 #include "leht/ops/annotate.hpp"
 #include "leht/ops/forms.hpp"
 #include "leht/text.hpp"
+#include "leht/crypto/crypto.hpp"
+#include "test_pki.hpp"
+
+#include <QSettings>
+#include <QToolBar>
 
 #include <QDir>
 #include <QMouseEvent>
@@ -773,6 +778,75 @@ int main(int argc, char** argv) {
             check(filled, "the filled value is in the saved file");
         } else {
             std::printf("  skip  forms (tests/corpus/form.pdf not generated)\n");
+        }
+
+        // Signing, the whole way through the viewer: the worker leaves a hole,
+        // this process fills it, and the panel reports what the worker made of
+        // the result. The dialog is skipped -- it only fills in a SignSpec.
+        const QString toSign = tmp.filePath(QStringLiteral("to_sign.pdf"));
+        QFile::remove(toSign);
+        if (QFile::copy(QStringLiteral(LEHT_CORPUS_DIR "/text_10p.pdf"), toSign)) {
+            static const leht::test::Pki pki;
+            const QString p12 = tmp.filePath(QStringLiteral("signer.p12"));
+            const QString ca = tmp.filePath(QStringLiteral("ca.pem"));
+            {
+                const auto bytes = leht::test::pkcs12(pki.rsa, pki.rsa_cert, {&pki.ca}, "pw");
+                QFile f(p12);
+                check(f.open(QIODevice::WriteOnly), "the test key file opens for writing");
+                f.write(reinterpret_cast<const char*>(bytes.data()),
+                        static_cast<qint64>(bytes.size()));
+                QFile c(ca);
+                check(c.open(QIODevice::WriteOnly), "the test CA file opens for writing");
+                c.write(pki.ca.pem().c_str());
+            }
+            // Trust our test CA, and nothing else the user may have added.
+            QSettings settings;
+            settings.setValue(QStringLiteral("trustedCertificates"), QStringList{ca});
+
+            window.openPath(toSign);
+            pump(1500);
+            QVector<SigRow> reported;
+            QObject::connect(worker, &RenderWorker::signaturesReady, &window,
+                             [&reported](const QVector<SigRow>& rows) { reported = rows; });
+
+            SignSpec spec;
+            spec.p12Path = p12;
+            spec.password = QStringLiteral("pw");
+            spec.page = 0;
+            spec.rect = QRectF(300, 650, 240, 80);
+            spec.name = QStringLiteral("Mari Maasikas");
+            spec.reason = QStringLiteral("Smoke test");
+            spec.strokes = {QPolygonF({QPointF(0, 30), QPointF(30, 5), QPointF(60, 35)})};
+            spec.strokesCanvas = QSizeF(80, 40);
+            spec.lines = QStringList{QStringLiteral("Mari Maasikas")};
+            QMetaObject::invokeMethod(worker, "signDocument", Qt::QueuedConnection,
+                                      Q_ARG(QString, toSign), Q_ARG(SignSpec, spec));
+            pump(3000);
+
+            check(!reported.isEmpty(), "the signature panel was told about a signature");
+            if (!reported.isEmpty()) {
+                const SigRow& row = reported.first();
+                check(row.intact, "the viewer's signature verifies");
+                check(row.trust == static_cast<int>(leht::crypto::Trust::Trusted),
+                      "the added certificate makes the signer trusted");
+                check(row.signerCommonName == QStringLiteral("Mari Maasikas"),
+                      "the panel names the signer");
+                check(!row.changedAfterSigning, "nothing was added after signing");
+                check(row.page == 0, "the signature is on the page it was drawn on");
+            }
+            check(!window.isModified(), "signing leaves nothing unsaved");
+            auto* banner = window.findChild<QToolBar*>(QStringLiteral("signatureBanner"));
+            check(banner != nullptr && banner->isVisibleTo(&window),
+                  "the signed-document banner is shown");
+            try {
+                leht::Document signedDoc = leht::Document::open(ctx, toSign.toStdString());
+                check(signedDoc.signature_count() == 1, "the file on disk carries one signature");
+            } catch (const leht::Error&) {
+                check(false, "the signed file opens");
+            }
+            settings.remove(QStringLiteral("trustedCertificates"));
+        } else {
+            std::printf("  skip  signing (could not copy the corpus file)\n");
         }
     }
 

@@ -476,6 +476,7 @@ void PageView::mousePressEvent(QMouseEvent* event) {
         viewport()->update();
         return;
     case Tool::Redact:
+    case Tool::Sign:
         dragPage_ = page;
         dragStart_ = dragNow_ = base;
         viewport()->update();
@@ -528,10 +529,14 @@ void PageView::mouseReleaseEvent(QMouseEvent* event) {
         const int page = std::exchange(dragPage_, -1);
         if (tool_ == Tool::Ink && stroke_.size() >= 2) {
             emit inkRequested(page, {stroke_});
-        } else if (tool_ == Tool::Redact) {
+        } else if (tool_ == Tool::Redact || tool_ == Tool::Sign) {
             const QRectF box = QRectF(dragStart_, dragNow_).normalized();
             if (box.width() >= 2 && box.height() >= 2) {
-                emit redactRequested(page, box);
+                if (tool_ == Tool::Redact) {
+                    emit redactRequested(page, box);
+                } else {
+                    emit signRequested(page, box);
+                }
             }
         }
         stroke_.clear();
@@ -660,10 +665,13 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
             painter.setPen(QPen(QColor(30, 60, 200), std::max(1.0, 1.5 * zoom_)));
             painter.drawPolyline(shown);
         }
-        if (dragPage_ == p && tool_ == Tool::Redact) {
+        if (dragPage_ == p && (tool_ == Tool::Redact || tool_ == Tool::Sign)) {
             const QRectF box = baseRectToViewport(p, QRectF(dragStart_, dragNow_).normalized());
-            painter.fillRect(box, QColor(0, 0, 0, 90));
-            painter.setPen(QPen(Qt::black, 1, Qt::DashLine));
+            const bool signing = tool_ == Tool::Sign;
+            // Redaction is drawn as what it does -- a black box. A signature
+            // box is only a frame: nothing under it is touched.
+            painter.fillRect(box, signing ? QColor(30, 90, 200, 40) : QColor(0, 0, 0, 90));
+            painter.setPen(QPen(signing ? QColor(30, 90, 200) : Qt::black, 1, Qt::DashLine));
             painter.drawRect(box);
         }
     }
