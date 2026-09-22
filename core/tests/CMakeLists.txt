@@ -81,8 +81,11 @@ endif()
 if(LEHT_BUILD_FUZZ)
     add_test(NAME fuzz_corpus_replay
              COMMAND leht_fuzz_open ${CMAKE_SOURCE_DIR}/tests/corpus 0)
+    # Every edit operation over every corpus file, as a regression check.
+    add_test(NAME fuzz_edit_corpus_replay
+             COMMAND leht_fuzz_edit ${CMAKE_SOURCE_DIR}/tests/corpus 0)
     if(LEHT_SANITIZE)
-        set_tests_properties(fuzz_corpus_replay PROPERTIES
+        set_tests_properties(fuzz_corpus_replay fuzz_edit_corpus_replay PROPERTIES
             ENVIRONMENT "${LEHT_SANITIZER_ENV}")
     endif()
 endif()
