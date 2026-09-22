@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Leht
+GenericName=PDF Viewer
+Comment=View, edit and sign PDF documents
+Comment[et]=Vaata, muuda ja allkirjasta PDF-dokumente
+Exec=leht-viewer %f
+Icon=@LEHT_APP_ID@
+Terminal=false
+StartupNotify=true
+StartupWMClass=leht-viewer
+Categories=Office;Viewer;Qt;
+MimeType=application/pdf;
+Keywords=PDF;document;viewer;redact;sign;signature;annotate;

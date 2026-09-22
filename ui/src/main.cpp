@@ -3,6 +3,7 @@
 #include "outline_model.hpp"
 
 #include <QApplication>
+#include <QIcon>
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
@@ -10,6 +11,11 @@ int main(int argc, char** argv) {
     qRegisterMetaType<QVector<OutlineRow>>();
     QApplication::setApplicationName(QStringLiteral("Leht"));
     QApplication::setApplicationDisplayName(QStringLiteral("Leht"));
+    // Ties windows to the installed .desktop file: the Wayland app_id, and so
+    // the icon and grouping in docks and task switchers.
+    QGuiApplication::setDesktopFileName(QStringLiteral(LEHT_APP_ID));
+    QApplication::setWindowIcon(
+        QIcon::fromTheme(QStringLiteral(LEHT_APP_ID), QIcon(QStringLiteral(":/leht/leht.svg"))));
 
     MainWindow window;
     window.show();

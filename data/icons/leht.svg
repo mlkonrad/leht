@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Provisional mark (docs/branding.md): a sheet with one turned corner, which
+     is also a leaf. A placeholder until a designer draws the real one. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- The sheet: square corners on the spine side, a leaf's round on the other. -->
+  <path d="M28 12 H84 L112 40 V100 Q112 116 96 116 H28 Q16 116 16 104 V24 Q16 12 28 12 Z"
+        fill="#2f7d5b"/>
+  <!-- The turned corner. -->
+  <path d="M84 12 V32 Q84 40 92 40 H112 Z" fill="#9fd3b8"/>
+  <!-- A midrib that is also a line of text. -->
+  <path d="M34 96 Q58 88 70 70 T96 50" fill="none" stroke="#e8f5ee"
+        stroke-width="6" stroke-linecap="round"/>
+</svg>

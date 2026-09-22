@@ -23,6 +23,11 @@ option(LEHT_SANITIZE     "Enable AddressSanitizer + UBSan"   OFF)
 option(LEHT_BUILD_FUZZ   "Build the fuzz target"              ON)
 
 include(CompilerWarnings)
+include(GNUInstallDirs)
+
+# Reverse-DNS application ID: the .desktop file, icon and Wayland app_id all
+# carry it. Provisional -- it is fixed for good at the first packaged release.
+set(LEHT_APP_ID "page.leht.Leht")
 
 # Sanitizer environment, shared by every test that runs Leht code -- the library
 # executables AND the CLI script. Kept in one variable so a new test cannot be
@@ -56,6 +61,7 @@ if(LEHT_BUILD_CLI)
 endif()
 if(LEHT_BUILD_UI)
     add_subdirectory(ui)
+    add_subdirectory(data)
 endif()
 if(LEHT_BUILD_BENCH)
     add_subdirectory(bench)
@@ -65,6 +71,7 @@ if(LEHT_BUILD_FUZZ)
 endif()
 if(LEHT_BUILD_TESTS)
     add_subdirectory(core/tests)
+    add_subdirectory(tests)
 endif()
 
 message(STATUS "")

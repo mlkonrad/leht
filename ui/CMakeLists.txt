@@ -20,17 +20,29 @@ target_link_libraries(leht_viewer_lib PUBLIC leht::core leht::crypto leht::ipc
                       Qt6::Widgets Qt6::PrintSupport)
 
 # The viewer parses nothing itself: every document goes to leht-worker (M3).
-# Both locations are baked in; render_worker.cpp tries the installed one first
-# and falls back to the build tree, so tests and in-tree runs work unchanged.
-include(GNUInstallDirs)
+# The locations are baked in; render_worker.cpp tries the install tree first
+# (relative to the binary, so a relocated or DESTDIR install finds its own
+# worker, then the configured prefix) and falls back to the build tree, so
+# tests and in-tree runs work unchanged.
+file(RELATIVE_PATH LEHT_WORKER_RELATIVE_PATH
+     "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBEXECDIR}/leht/leht-worker")
 add_dependencies(leht_viewer_lib leht_worker)
 target_compile_definitions(leht_viewer_lib PRIVATE
+    LEHT_WORKER_RELATIVE_PATH="${LEHT_WORKER_RELATIVE_PATH}"
     LEHT_WORKER_INSTALLED_PATH="${CMAKE_INSTALL_FULL_LIBEXECDIR}/leht/leht-worker"
     LEHT_WORKER_BUILD_PATH="$<TARGET_FILE:leht_worker>")
 
+# The icon is compiled in as well as installed: the window has one when run
+# from the build tree, where no icon theme knows about it.
 qt_add_executable(leht_viewer src/main.cpp)
+qt_add_resources(leht_viewer "icon"
+    PREFIX "/leht"
+    BASE "${CMAKE_SOURCE_DIR}/data/icons"
+    FILES "${CMAKE_SOURCE_DIR}/data/icons/leht.svg")
 set_target_properties(leht_viewer PROPERTIES OUTPUT_NAME leht-viewer)
+target_compile_definitions(leht_viewer PRIVATE LEHT_APP_ID="${LEHT_APP_ID}")
 target_link_libraries(leht_viewer PRIVATE leht_viewer_lib)
+install(TARGETS leht_viewer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(LEHT_BUILD_TESTS)
     qt_add_executable(ui_smoke_test tests/smoke_test.cpp)

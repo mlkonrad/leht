@@ -10,6 +10,7 @@
 #include "leht/page_cache.hpp"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QFileInfo>
 #include <QMutex>
 #include <QMutexLocker>
@@ -72,15 +73,18 @@ QVector<QRectF> toRects(const std::vector<leht::TextQuad>& quads) {
 }
 
 /// Where leht-worker lives, in order of preference: an explicit override, next
-/// to the running binary (a relocated install or an app bundle), the install
-/// location, and the build tree (tests and running from the build directory).
+/// to the running binary (an app bundle), libexec relative to the binary (a
+/// relocated or DESTDIR install), the configured install location, and the
+/// build tree (tests and running from the build directory).
 QString workerPath() {
     const QString env = qEnvironmentVariable("LEHT_WORKER_PATH");
     if (!env.isEmpty()) {
         return env;
     }
+    const QString appDir = QCoreApplication::applicationDirPath();
     for (const QString& candidate :
-         {QCoreApplication::applicationDirPath() + QStringLiteral("/leht-worker"),
+         {appDir + QStringLiteral("/leht-worker"),
+          QDir::cleanPath(appDir + QStringLiteral("/" LEHT_WORKER_RELATIVE_PATH)),
           QStringLiteral(LEHT_WORKER_INSTALLED_PATH),
           QStringLiteral(LEHT_WORKER_BUILD_PATH)}) {
         if (QFileInfo(candidate).isExecutable()) {
