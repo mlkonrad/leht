@@ -103,6 +103,29 @@ Real fuzzing is run **by hand**:
 ./build/fuzz/leht_fuzz_open tests/corpus 4000
 ```
 
+Coverage-guided, with clang and leak checking (needs `llvm-symbolizer`):
+
+```sh
+cmake -S . -B build-fuzz -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DLEHT_SANITIZE=ON \
+      -DLEHT_MUPDF_ROOT=/path/to/mupdf-1.28.4   # built with -fsanitize=fuzzer-no-link to see inside MuPDF
+cmake --build build-fuzz --target leht_fuzz_open leht_fuzz_ops leht_fuzz_ipc
+mkdir -p work seeds && cp tests/corpus/{text_10p,outlined,locked,damaged}.pdf seeds/
+LSAN_OPTIONS=suppressions=$PWD/tests/lsan.supp ASAN_OPTIONS=fast_unwind_on_malloc=0 \
+  ./build-fuzz/fuzz/leht_fuzz_ops work seeds -max_total_time=900 -jobs=2 -workers=2 \
+  -rss_limit_mb=4096 -timeout=60 -artifact_prefix=art-
+```
+
+Seed `fuzz_ops` with small files only: the 160- and 500-page corpus files hold it to about
+one execution per second. Run each target in its own directory, because `-jobs` writes
+`fuzz-N.log` into the current one. `fuzz_ipc` needs no MuPDF instrumentation: it
+exercises the viewer's decoder for worker output.
+
+After changing the sandbox, or upgrading MuPDF or glibc, re-check what the worker really
+does (`strace` is a test-time tool, not a dependency). Run
+`strace -f -s 256 -o trace.txt ./build/worker/test_worker`, then check that, after each
+worker's successful `seccomp(SECCOMP_SET_MODE_FILTER, ...)`, only allowlisted calls appear.
+`docs/robustness.md` records the last result.
+
 The mutation fuzzer is deliberately **not** in the default suite. It is unbounded and
 nondeterministic, and on MuPDF older than 1.28.4 it aborts within roughly 22 iterations on
 an upstream bug that has since been fixed — wiring a test into CI that goes red for reasons

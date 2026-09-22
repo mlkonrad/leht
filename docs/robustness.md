@@ -197,6 +197,13 @@ controls:
 | `fuzz_ops` | libFuzzer, MuPDF instrumented, ASan/UBSan | 14,302 (4 jobs x 30 min, 4,032 edges) | one timeout → quadratic page lookup (upstream); no memory errors |
 | `fuzz_ipc` | libFuzzer + ASan/UBSan | 6,751,008 (4 jobs x 15 min) | clean |
 | `fuzz_ipc` | mutation driver + ASan/UBSan | 200,000 | clean |
+| `fuzz_open` | libFuzzer, MuPDF instrumented, **LSan on** | 201,755 (2 jobs x 15 min, 7,192 edges) | clean |
+| `fuzz_ops` | libFuzzer, MuPDF instrumented, **LSan on**, small seeds | 32,257 (2 jobs x 15 min, 4,193 edges) | clean |
+| `fuzz_ipc` | libFuzzer + ASan/UBSan, **LSan on** | 3,091,841 (2 jobs x 15 min) | clean |
+
+The three "LSan on" rows (2026-09-22) ran with `llvm-symbolizer` installed and
+`LSAN_OPTIONS=suppressions=tests/lsan.supp`, so every input was leak-checked with only the
+known upstream save leak suppressed. Earlier rows ran with `-detect_leaks=0`.
 
 "Nothing found yet", not "nothing there". Two caveats matter:
 
@@ -263,6 +270,16 @@ Applied by the worker after MuPDF initialises and before the first untrusted byt
 
 MuPDF here compiles its fonts in and links no fontconfig, so text in non-embedded fonts —
 CJK included — renders with no filesystem access; that was checked under the sandbox.
+
+**Cross-checked with `strace`** (2026-09-22), tracing every worker spawned by the worker
+tests and the viewer smoke test — 32 sandboxed workers, covering open, render, thumbnails,
+search and its cancellation, selection, encrypted documents, printing, crashes and the
+request timeout. After each installed its filter, the only syscalls made were `pread64`
+on the passed document, `recvmsg`/`sendmsg`/`shutdown` on the socket, memory
+(`brk`, `mmap`, `munmap`, `mprotect`, `madvise`), threads (`clone3` → `ENOSYS` as intended,
+then `clone`, `futex`, `rseq`, `set_robust_list`), signals, `fstat`, `close` and exit. No
+`open`, `socket`, `exec`, `fork` or executable mapping, and nothing refused except the
+deliberate `clone3`. Re-run the analysis after a MuPDF or glibc upgrade.
 
 Each forbidden action has a CTest (`worker_sandbox_denies_*`) requiring death by `SIGSYS`
 specifically. To extend the list after a MuPDF upgrade, run with
@@ -347,17 +364,14 @@ public `core/` header (the API surface *is* the wire format), and one independen
       indirect-reference-chain stack overflow (generator ready), the outline-depth
       stack overflow, and the quadratic page lookup (both: pure-C reproducer +
       generator ready). None sent yet.
-- [ ] Install `llvm-symbolizer` (Fedora `llvm`) so LSan suppressions resolve under
-      libFuzzer. Without it libFuzzer must run with `-detect_leaks=0`.
-- [ ] Run libFuzzer with `LSAN_OPTIONS=suppressions=tests/lsan.supp`. Without it the
-      known save leak is reported at exit together with everything it holds: the
-      2026-09-22 run showed 150 reports per job, and every *direct* one was
-      `renumberobj`; the rest (the new `/Encrypt` dictionary among them) were indirect,
-      reachable only through those. Re-running the whole corpus through `encrypt` with
-      suppressions on found nothing.
-- [ ] Give `fuzz_ops` far more time. The 2026-09-22 run (30 min, instrumented MuPDF) ran at
-      ~1 exec/s on the 500-page seed and still found a timeout; trim the seed corpus to
-      small files so it explores faster.
+- [x] ~~Install `llvm-symbolizer`; run libFuzzer with the LSan suppressions~~ — done
+      2026-09-22; all three targets clean with per-input leak checks (see the table). Run
+      them as `LSAN_OPTIONS=suppressions=tests/lsan.supp ./leht_fuzz_... -jobs=N ...`:
+      without the suppressions the known save leak is reported at exit together with
+      everything it holds (the ~150 reports per job seen earlier, all traced to it).
+- [ ] Give `fuzz_ops` far more time. Seeding it with the small corpus files only
+      (`text_10p`, `outlined`, `locked`, `damaged`) took it from ~1 to ~20–30 exec/s; hours,
+      not minutes, is still the right order for the op layer.
 - [x] ~~Decide when process isolation lands~~ — built in M3, straight after the viewer
 - [x] ~~Lazy page sizes~~ — `page_size` reads page bounds, not content; a 500-page open
       went from ~350 ms to ~20 ms
