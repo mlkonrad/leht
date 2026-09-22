@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Three builds, all on Fedora (the one distribution that ships MuPDF 1.28):
+#   system   -- Fedora's own MuPDF 1.28.2, as a Fedora user would build it
+#   pinned   -- MuPDF 1.28.4 from tools/build-mupdf.sh, the version we vouch for
+#   asan     -- 1.28.4 under ASan + UBSan, plus a mutation-fuzz run, which is
+#               only meaningful on 1.28.4 (1.28.2 aborts within ~22 iterations)
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:44
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: system MuPDF
+            mupdf: system
+            cmake_args: -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          - name: MuPDF 1.28.4
+            mupdf: pinned
+            cmake_args: -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          - name: MuPDF 1.28.4, ASan + UBSan
+            mupdf: pinned
+            cmake_args: -DCMAKE_BUILD_TYPE=Debug -DLEHT_SANITIZE=ON
+            fuzz: true
+    steps:
+      - name: Install git, for checkout
+        run: dnf -y install git
+      - uses: actions/checkout@v4
+      - name: Install build and test dependencies
+        # One list, shared with tools/ci-local.sh.
+        run: tools/ci-deps.sh
+
+      - name: Cache MuPDF 1.28.4
+        if: matrix.mupdf == 'pinned'
+        uses: actions/cache@v4
+        with:
+          path: /opt/leht-cache
+          key: mupdf-${{ hashFiles('tools/build-mupdf.sh') }}-fedora44
+
+      - name: Build MuPDF 1.28.4
+        if: matrix.mupdf == 'pinned'
+        run: echo "MUPDF_ROOT=$(tools/build-mupdf.sh /opt/leht-cache)" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DLEHT_BUILD_UI=ON
+          ${{ matrix.cmake_args }}
+          ${{ env.MUPDF_ROOT && format('-DLEHT_MUPDF_ROOT={0}', env.MUPDF_ROOT) || '' }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j "$(nproc)"
+
+      - name: Mutation fuzz
+        if: matrix.fuzz
+        run: tools/fuzz-smoke.sh build
