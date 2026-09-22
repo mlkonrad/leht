@@ -3,9 +3,17 @@
 
 #include "leht/context.hpp"
 #include "leht/document.hpp"
+#include "leht/edit.hpp"
 #include "leht/error.hpp"
+#include "leht/ops/annotate.hpp"
+#include "leht/ops/crop.hpp"
+#include "leht/ops/forms.hpp"
+#include "leht/ops/redact.hpp"
+#include "leht/ops/watermark.hpp"
 #include "leht/renderer.hpp"
 #include "leht/text.hpp"
+
+#include <sys/stat.h>
 
 #include <cstdio>
 #include <exception>
@@ -144,6 +152,20 @@ void Session::dispatch(Frame& frame) {
         case MsgType::Select:
             on_select(id, decode_as<Select>(frame));
             return;
+        case MsgType::Edit:
+            on_edit(id, decode_as<Edit>(frame));
+            return;
+        case MsgType::Save:
+            on_save(id, frame);
+            return;
+        case MsgType::ListAnnots:
+            (void)decode_as<ListAnnots>(frame);
+            on_list_annots(id);
+            return;
+        case MsgType::ListFields:
+            (void)decode_as<ListFields>(frame);
+            on_list_fields(id);
+            return;
         default:
             throw ProtocolError("not a request type");
         }
@@ -190,21 +212,24 @@ void Session::on_authenticate(std::uint64_t id, const Authenticate& m) {
     }
 }
 
+std::vector<PageSize> Session::base_sizes() {
+    std::vector<PageSize> sizes;
+    const int pages = doc_->page_count();
+    sizes.reserve(static_cast<std::size_t>(pages));
+    for (int p = 0; p < pages; ++p) {
+        try {
+            sizes.push_back(renderer_->page_size(p, 1.0F));
+        } catch (const Error&) {
+            sizes.push_back(PageSize{});  // a broken page, not a broken document
+        }
+    }
+    return sizes;
+}
+
 void Session::finish_open(std::uint64_t id) {
     renderer_ = std::make_unique<Renderer>(ctx_, *doc_);
     text_pages_.clear();
-
-    Opened opened;
-    const int pages = doc_->page_count();
-    opened.base_sizes.reserve(static_cast<std::size_t>(pages));
-    for (int p = 0; p < pages; ++p) {
-        try {
-            opened.base_sizes.push_back(renderer_->page_size(p, 1.0F));
-        } catch (const Error&) {
-            opened.base_sizes.push_back(PageSize{});  // a broken page, not a broken document
-        }
-    }
-    channel_.send(id, opened);
+    channel_.send(id, Opened{base_sizes()});
 
     Outline outline;
     try {
@@ -307,6 +332,101 @@ void Session::on_select(std::uint64_t id, const Select& m) {
     }
     Selection sel = text_page(m.page).select(m.ax, m.ay, m.bx, m.by, m.mode);
     channel_.send(id, SelectionResult{m.page, std::move(sel.quads), std::move(sel.text)});
+}
+
+bool Session::require_document(std::uint64_t id) {
+    if (!doc_ || !renderer_) {
+        channel_.send(id, Failed{"no document is open"});
+        return false;
+    }
+    return true;
+}
+
+void Session::on_edit(std::uint64_t id, const Edit& m) {
+    if (!require_document(id)) {
+        return;
+    }
+    Edited out;
+    switch (m.kind) {
+    case Edit::Kind::Redact: {
+        const ops::RedactResult r = ops::redact(ctx_, *doc_, m.page, m.rects);
+        out.pages = r.pages;
+        break;
+    }
+    case Edit::Kind::RedactText: {
+        ops::RedactResult r = ops::redact_text(ctx_, *doc_, m.text);
+        out.pages = r.pages;
+        out.remaining = std::move(r.remaining);
+        break;
+    }
+    case Edit::Kind::AddAnnot:
+        out.annot_id = ops::add_annotation(ctx_, *doc_, m.page, m.annot);
+        out.pages = {m.page};
+        break;
+    case Edit::Kind::DeleteAnnot: {
+        int page = -1;
+        for (const ops::AnnotInfo& a : ops::list_annotations(ctx_, *doc_)) {
+            if (a.id == m.annot_id) {
+                page = a.page;
+            }
+        }
+        if (page < 0 || !ops::delete_annotation(ctx_, *doc_, m.annot_id)) {
+            channel_.send(id, Failed{"no annotation with that id"});
+            return;
+        }
+        out.pages = {page};
+        break;
+    }
+    case Edit::Kind::SetField:
+        ops::set_field(ctx_, *doc_, m.name, m.text);
+        out.all_pages = true;  // a field's widgets may be on several pages
+        break;
+    case Edit::Kind::Watermark:
+        (void)ops::watermark(ctx_, *doc_, m.pages, m.watermark);
+        out.pages = page_set(m.pages, doc_->page_count());
+        break;
+    case Edit::Kind::CropMargins:
+        (void)ops::crop_margins(ctx_, *doc_, m.pages, m.margins);
+        out.pages = page_set(m.pages, doc_->page_count());
+        break;
+    }
+    // Every cached display list and text layer may now be out of date.
+    renderer_->clear_cache();
+    text_pages_.clear();
+    out.base_sizes = base_sizes();
+    channel_.send(id, out);
+}
+
+void Session::on_save(std::uint64_t id, Frame& frame) {
+    (void)decode_as<Save>(frame);
+    if (!require_document(id)) {
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to Save"});
+        return;
+    }
+    // The descriptor stays owned by the frame and closes with it. The viewer
+    // makes the file durable and renames it; the worker can do neither.
+    doc_->save_fd(frame.fd.get(), SaveOptions{});
+    struct stat st {};
+    const std::uint64_t bytes =
+        ::fstat(frame.fd.get(), &st) == 0 ? static_cast<std::uint64_t>(st.st_size) : 0;
+    channel_.send(id, Saved{bytes});
+}
+
+void Session::on_list_annots(std::uint64_t id) {
+    if (!require_document(id)) {
+        return;
+    }
+    channel_.send(id, AnnotList{ops::list_annotations(ctx_, *doc_)});
+}
+
+void Session::on_list_fields(std::uint64_t id) {
+    if (!require_document(id)) {
+        return;
+    }
+    channel_.send(id, FieldList{ops::list_fields(ctx_, *doc_)});
 }
 
 }  // namespace leht::worker

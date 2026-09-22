@@ -9,6 +9,7 @@
 #include "leht/document.hpp"
 #include "leht/ipc/process.hpp"
 #include "leht/ipc/protocol.hpp"
+#include "leht/ops/annotate.hpp"
 #include "leht/renderer.hpp"
 #include "leht/text.hpp"
 #include "test_harness.hpp"
@@ -438,6 +439,176 @@ void search_can_be_cancelled() {
     CHECK(next(*w).type == MsgType::Rendered);
 }
 
+// --- editing (M4b) -------------------------------------------------------------
+
+Edited edit_ok(WorkerProcess& w, const Edit& e, std::uint64_t id = 900) {
+    w.channel().send(id, e);
+    const Frame f = next(w);
+    CHECK(f.id == id);
+    if (f.type == MsgType::Failed) {
+        std::fprintf(stderr, "edit failed: %s\n", decode_as<Failed>(f).message.c_str());
+    }
+    return decode_as<Edited>(f);
+}
+
+Edit highlight_edit(const std::string& path, int page, const char* needle) {
+    leht::Context ctx;
+    leht::Document doc = leht::Document::open(ctx, path);
+    const auto hits = leht::TextPage(ctx, doc, page).search(needle);
+    CHECK(!hits.empty());
+    Edit e;
+    e.kind = Edit::Kind::AddAnnot;
+    e.page = page;
+    e.annot.kind = leht::ops::AnnotKind::Highlight;
+    e.annot.quads = hits.front().quads;
+    e.annot.contents = "worker";
+    return e;
+}
+
+/// Saves through the sandboxed worker into a temp file; returns its path.
+std::string save_via_worker(WorkerProcess& w, const char* name) {
+    const std::string path = (std::filesystem::temp_directory_path() / name).string();
+    const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    CHECK(fd >= 0);
+    w.channel().send(950, Save{}, fd);
+    ::close(fd);
+    const Frame f = next(w);
+    if (f.type == MsgType::Failed) {
+        std::fprintf(stderr, "save failed: %s\n", decode_as<Failed>(f).message.c_str());
+    }
+    CHECK(decode_as<Saved>(f).bytes > 0);
+    return path;
+}
+
+void edits_apply_render_and_save() {
+    const std::string in = corpus("text_10p.pdf");
+    auto w = start();
+    (void)open_ok(*w, in);
+
+    // Render before, edit, render after: the cached display list must not
+    // hide the change.
+    w->channel().send(901, Render{0, 1.0F, 0, 1});
+    const Rendered before = decode_as<Rendered>(next(*w));
+    const Edited e = edit_ok(*w, highlight_edit(in, 0, "quick brown"));
+    CHECK(e.annot_id > 0 && e.pages == std::vector<int>({0}) && e.base_sizes.size() == 10);
+    w->channel().send(902, Render{0, 1.0F, 0, 1});
+    const Rendered after = decode_as<Rendered>(next(*w));
+    CHECK(before.bitmap.pixels != after.bitmap.pixels);
+
+    w->channel().send(903, ListAnnots{});
+    const AnnotList list = decode_as<AnnotList>(next(*w));
+    CHECK(list.items.size() == 1 && list.items[0].id == e.annot_id &&
+          list.items[0].type == "Highlight" && list.items[0].contents == "worker");
+
+    // A crop changes the page size, and Edited says so.
+    Edit crop;
+    crop.kind = Edit::Kind::CropMargins;
+    crop.pages = "2";
+    crop.margins = {10, 20, 30, 40};
+    const Edited c = edit_ok(*w, crop);
+    CHECK(c.pages == std::vector<int>({1}));
+    CHECK(c.base_sizes[1].width == e.base_sizes[1].width - 40);
+    CHECK(c.base_sizes[1].height == e.base_sizes[1].height - 60);
+
+    // Save from inside the sandbox: write and lseek on a passed fd only.
+    const std::string out = save_via_worker(*w, "leht_worker_save.pdf");
+    leht::Context ctx;
+    leht::Document doc = leht::Document::open(ctx, out);
+    const auto annots = leht::ops::list_annotations(ctx, doc);
+    CHECK(annots.size() == 1 && annots[0].id == e.annot_id);
+    CHECK(leht::Renderer(ctx, doc).page_size(1, 1.0F).width == c.base_sizes[1].width);
+    std::filesystem::remove(out);
+
+    // Deleting by id, then a bad id.
+    Edit del;
+    del.kind = Edit::Kind::DeleteAnnot;
+    del.annot_id = e.annot_id;
+    CHECK(edit_ok(*w, del).pages == std::vector<int>({0}));
+    w->channel().send(904, del);
+    CHECK(next(*w).type == MsgType::Failed);
+}
+
+void redaction_through_the_worker() {
+    auto w = start();
+    (void)open_ok(*w, corpus("text_10p.pdf"));
+    Edit e;
+    e.kind = Edit::Kind::RedactText;
+    e.text = "quick brown";
+    const Edited r = edit_ok(*w, e);
+    CHECK(r.pages.size() == 10 && r.remaining.empty());
+
+    const std::string out = save_via_worker(*w, "leht_worker_redact.pdf");
+    leht::Context ctx;
+    leht::Document doc = leht::Document::open(ctx, out);
+    for (int p = 0; p < doc.page_count(); ++p) {
+        CHECK(leht::TextPage(ctx, doc, p).search("quick brown").empty());
+    }
+    std::filesystem::remove(out);
+}
+
+void forms_through_the_worker() {
+    const std::string form = corpus("form.pdf");
+    if (!std::filesystem::exists(form)) {
+        std::printf("  skip (tests/corpus/form.pdf not generated)\n");
+        return;
+    }
+    auto w = start();
+    (void)open_ok(*w, form);
+    w->channel().send(910, ListFields{});
+    const FieldList before = decode_as<FieldList>(next(*w));
+    CHECK(before.items.size() == 2);
+
+    Edit set;
+    set.kind = Edit::Kind::SetField;
+    set.name = "name";
+    set.text = "Marlon";
+    CHECK(edit_ok(*w, set).all_pages);
+    w->channel().send(911, ListFields{});
+    const FieldList after = decode_as<FieldList>(next(*w));
+    const auto it = std::find_if(after.items.begin(), after.items.end(),
+                                 [](const auto& f) { return f.name == "name"; });
+    CHECK(it != after.items.end() && it->value == "Marlon");
+
+    // A value the field refuses is an ordinary failure, not a dead worker.
+    set.text = std::string(50, 'x');  // over MaxLen 20
+    w->channel().send(912, set);
+    CHECK(next(*w).type == MsgType::Failed);
+    w->channel().send(913, ListFields{});
+    CHECK(next(*w).type == MsgType::FieldList);
+}
+
+void replay_is_deterministic() {
+    // Undo and crash recovery replay the edit log into a fresh document. The
+    // ids it hands out must be the ones the viewer already holds.
+    const std::string in = corpus("text_10p.pdf");
+    const Edit a = highlight_edit(in, 0, "quick brown");
+    const Edit b = highlight_edit(in, 3, "lazy dog");
+    std::vector<int> ids[2];
+    for (auto& run : ids) {
+        auto w = start();
+        (void)open_ok(*w, in);
+        run.push_back(edit_ok(*w, a).annot_id);
+        run.push_back(edit_ok(*w, b).annot_id);
+    }
+    CHECK(ids[0] == ids[1]);
+    CHECK(ids[0][0] != ids[0][1]);
+}
+
+void edits_on_a_non_pdf_fail_cleanly() {
+    auto w = start();
+    (void)open_ok(*w, corpus("page.png"));
+    Edit e;
+    e.kind = Edit::Kind::RedactText;
+    e.text = "x";
+    w->channel().send(920, e);
+    CHECK(next(*w).type == MsgType::Failed);
+    w->channel().send(921, ListAnnots{});
+    CHECK(next(*w).type == MsgType::Failed);
+    // Still alive and serving.
+    w->channel().send(922, Render{0, 0.5F, 0, 1});
+    CHECK(next(*w).type == MsgType::Rendered);
+}
+
 void clean_shutdown() {
     auto w = start();
     w->channel().send(1, Shutdown{});
@@ -466,6 +637,11 @@ int main() {
     RUN(worker_is_sandboxed);
     RUN(sandbox_forbids_escape_routes);
     RUN(search_can_be_cancelled);
+    RUN(edits_apply_render_and_save);
+    RUN(redaction_through_the_worker);
+    RUN(forms_through_the_worker);
+    RUN(replay_is_deterministic);
+    RUN(edits_on_a_non_pdf_fail_cleanly);
     RUN(clean_shutdown);
     RUN(viewer_eof_ends_the_worker);
     return 0;

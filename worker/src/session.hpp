@@ -50,9 +50,17 @@ private:
     void on_render(std::uint64_t id, const ipc::Render& m);
     void on_search(std::uint64_t id, const ipc::Search& m);
     void on_select(std::uint64_t id, const ipc::Select& m);
+    void on_edit(std::uint64_t id, const ipc::Edit& m);
+    void on_save(std::uint64_t id, ipc::Frame& frame);
+    void on_list_annots(std::uint64_t id);
+    void on_list_fields(std::uint64_t id);
 
     void finish_open(std::uint64_t id);
     void close_document() noexcept;
+    /// Whether a document is open and unlocked; answers Failed if not.
+    bool require_document(std::uint64_t id);
+    /// The size of every page at zoom 1.0, as Opened reports them.
+    std::vector<PageSize> base_sizes();
     TextPage& text_page(int page);
 
     ipc::Channel& channel_;
