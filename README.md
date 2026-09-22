@@ -56,6 +56,8 @@ leht annots    FILE                               list annotations, with ids
 leht annotate  FILE -o OUT.pdf [--highlight TEXT] [--note P:X,Y:TEXT] [--stamp P:NAME]...
 leht form      FILE                               list form fields
 leht fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]
+leht sign      FILE -o OUT.pdf --p12 ID.p12 [--box P:X0,Y0,X1,Y1] [--tsa URL]
+leht verify    FILE [--trust CA.pem]... [--json]  check every signature
 ```
 
 `-o` output · `-p` pages · `-z` zoom (1.0 = 72 DPI) · `-n` pages per file · `-d` degrees ·
@@ -68,6 +70,14 @@ fields, thumbnails, marked-content `/ActualText`, the structure tree and earlier
 revisions. Anywhere the term still appears (metadata, bookmarks) is listed, and `redact`
 exits 3. **Cropping only hides.** `fill` never runs a document's JavaScript. Details and
 how each claim is tested: [docs/editing.md](docs/editing.md).
+
+**A signature signs a file, not a document.** Signing appends a revision and leaves the
+original bytes untouched, so signatures already in the file stay valid — and so saving a
+signed document now appends rather than rewrites. `verify` keeps four questions apart: are
+these the signed bytes, whose key was it, is that name trustworthy, and was anything added
+afterwards. Exit codes say the same: 4 broken, 5 untrusted, 6 changed after signing. The
+private key never enters the sandboxed worker that parses the PDF, and the signature blobs
+coming out of a document are only ever parsed inside it: [docs/signing.md](docs/signing.md).
 
 **Page ranges are 1-based and inclusive:** `1-5,8,12-`. A **descending range reverses those
 pages** — `-p 5-1` flips them. That is deliberate, not a parsing accident.
@@ -105,9 +115,13 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   annotations and form filling, in the CLI and in the viewer. The viewer edits through
   the sandboxed worker, with undo and redo, and a crash loses no edits. See
   [docs/editing.md](docs/editing.md).
+- **M5 — signatures:** PAdES signing from a PKCS#12 key (B-B, or B-T with a timestamp
+  authority), verification that keeps integrity, identity, trust and later changes apart,
+  incremental saving so signatures survive, and a visible signature mark that says it is
+  only a picture. The key stays out of the sandbox; the hostile DER stays inside it. See
+  [docs/signing.md](docs/signing.md).
 
-**Next** — M5 signatures (visible stamp, plus cryptographic
-PAdES signing and a verification panel); M6 packaging as Flatpak, RPM and DEB.
+**Next** — M6 packaging as Flatpak, RPM and DEB.
 
 **Explicitly out of scope for v1: in-place text editing.** It requires font matching
 against subsetted embedded fonts plus line reflow, works only on simple documents, and
@@ -125,6 +139,7 @@ Windows and macOS are not v1 targets. Qt6 keeps that door open at no extra cost 
 | `ui/` | The Qt6 Widgets viewer. Parses nothing itself. Off by default at build time. |
 | `worker/` | `leht-worker`: the sandboxed process that parses documents for the viewer. |
 | `ipc/` | The viewer ⇄ worker wire format. Decodes as if the worker were hostile. |
+| `crypto/` | Signing and verification: PKCS#12, CMS/PAdES, RFC 3161. **Links OpenSSL only, never MuPDF, and parses no PDF.** |
 | `bench/` | Benchmark harness — timings against a real-world corpus. |
 | `tests/corpus/` | Generated test PDFs. Unit tests live in `core/tests/`. |
 
@@ -139,8 +154,8 @@ measured constraint, not a style choice. See [docs/threading.md](docs/threading.
 
 ## Building
 
-Requires CMake 3.28+, Ninja, a C++20 compiler, MuPDF and libseccomp (for `leht-worker`).
-Qt6 only for the viewer.
+Requires CMake 3.28+, Ninja, a C++20 compiler, MuPDF, OpenSSL 3.2+ and libseccomp (for
+`leht-worker`). Qt6 only for the viewer.
 
 **MuPDF 1.28.4 or newer is strongly recommended.** Older versions — including the 1.28.2
 that Fedora 44 ships — abort the process on some malformed files. Leht still builds and
@@ -149,11 +164,11 @@ works against them, and the build warns; don't open untrusted PDFs on one. See
 
 ```sh
 # Fedora
-sudo dnf install gcc-c++ cmake ninja-build mupdf-devel libseccomp-devel
+sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel
 sudo dnf install qt6-qtbase-devel            # only for the viewer
 
 # Debian / Ubuntu
-sudo apt install g++ cmake ninja-build libmupdf-dev libseccomp-dev
+sudo apt install g++ cmake ninja-build libmupdf-dev libssl-dev libseccomp-dev
 sudo apt install qt6-base-dev                # only for the viewer
 ```
 

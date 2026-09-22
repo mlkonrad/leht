@@ -16,8 +16,10 @@ exercise, and several edits compose into one save.
 
 ## Saving
 
-- **Always a full rewrite**, never an incremental update. Incremental saving arrives with M5,
-  where appending a revision is what keeps an existing signature valid.
+- **A full rewrite by default** — but an **incremental update** when the document is
+  signed, since a rewrite would replace the very bytes its signatures cover. That is
+  `SaveOptions::mode`, and [docs/signing.md](signing.md#incremental-saving) has the rules,
+  including why a redacted document is never saved that way.
 - **Atomic.** `save()` writes a temporary file beside the target, fsyncs it and renames it
   over the target, then fsyncs the directory. A failed save leaves the target untouched.
   Saving over the file the document was opened from is safe, because the open document

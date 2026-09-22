@@ -17,9 +17,10 @@ known, weighed cost of the model, not an oversight.
 
 | Component | Licence | Role |
 |---|---|---|
-| **MuPDF** | AGPL-3.0 (Artifex; commercial licence also sold) | Everything: render, text, merge, compress, linearise, AES-256, annotations, redaction, forms, PKCS#12 signing |
+| **MuPDF** | AGPL-3.0 (Artifex; commercial licence also sold) | Everything PDF: render, text, merge, compress, linearise, AES-256, annotations, redaction, forms, and the signature dictionary's placement (the cryptography is OpenSSL's) |
 | **Qt6** | LGPL-3.0, dynamically linked | UI toolkit for the viewer |
 | **libseccomp** | LGPL-2.1-only, dynamically linked | Builds the seccomp-bpf filter that sandboxes `leht-worker` (M3) |
+| **OpenSSL** (libcrypto, libssl) | Apache-2.0, dynamically linked | Signing and verification: PKCS#12, CMS/PAdES, RFC 3161 timestamps, and TLS for an https timestamp authority (M5) |
 | **Tesseract** | Apache-2.0 | OCR, later phase |
 
 **qpdf was removed from the build.** MuPDF 1.28 covers the structure work it was brought in
@@ -30,6 +31,11 @@ runtime dependencies, so their licences do not enter the chain.
 
 AGPL-3.0 + LGPL-3.0 and LGPL-2.1 (both dynamic) + Apache-2.0 → **the app ships AGPL-3.0**. Compatible and
 consistent, and simpler than it was: one copyleft library, not two.
+
+OpenSSL 3 is Apache-2.0, which is GPLv3-compatible, so it raises nothing new — unlike
+OpenSSL 1.x, whose old licence needed an exception clause. Nothing in `crypto/` is derived
+from OpenSSL's code. MuPDF's own PKCS#7 helpers are not used (Fedora does not build them);
+the CMS work is ours, over libcrypto.
 
 Artifex's terms are strict and worth stating plainly: link MuPDF into your software and
 *the entirety of that software* must be AGPL; offer it as a service and the entire
@@ -60,4 +66,4 @@ insulated — and it happens to preserve an exit. Hold the line regardless.
 - [ ] Third-party notices file listing MuPDF, Qt and (later) Tesseract with their terms
 - [ ] `SPDX-License-Identifier: AGPL-3.0-or-later` headers in source files
 - [ ] AGPL §13 network-use clause: revisit if anything server-side is ever offered
-- [ ] Flatpak/RPM/DEB metadata carries the correct licence field at M5
+- [ ] Flatpak/RPM/DEB metadata carries the correct licence field at M6

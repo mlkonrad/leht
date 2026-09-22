@@ -208,6 +208,11 @@ controls:
 | `fuzz_edit` (M4) | libFuzzer, MuPDF instrumented, **LSan on**, small seeds | 14,702 (2 jobs x 15 min) | **one leak, ours** → fixed (see below) |
 | `fuzz_edit` (M4) | same, resumed from that corpus after the fix | 15,674 (2 jobs x 15 min, 9,897 edges) | clean |
 
+`fuzz_verify` (M5) is the newest target: a signature's CMS blob, straight from a document,
+into OpenSSL's parser and our attribute and timestamp walk. Its invariant is that
+`verify_cms()` always returns a report — it never throws and never reads out of bounds —
+and the corpus replay feeds it whole PDFs, none of which is a signature.
+
 `fuzz_edit` runs every M4 edit operation (redaction, watermark, crop, annotations, form
 filling and flattening) on a fresh copy of each input. Its first run found a real leak in
 Leht's own code. Resolving a page's `/Contents` can make MuPDF repair a damaged file
@@ -356,6 +361,24 @@ content — just to read its dimensions, and the viewer sizes every page on open
 reads the page dictionary instead (`fz_bound_page`, identical bounds), and each page's
 content is parsed on its first render. Measured back to back under the same load:
 348 → 18 ms in-process, 367 → 38 ms through the worker.
+
+### OpenSSL inside the sandbox (M5)
+
+Verifying a signature means handing attacker-controlled DER to an ASN.1 parser, so it runs
+in the worker, not the viewer. Two consequences, both load-bearing:
+
+- **No lazy loading.** OpenSSL fetches algorithms from its providers on first use, and a
+  fetch can open a file — which seccomp answers with SIGKILL. `leht-worker` calls
+  `crypto::preload_algorithms()` before `apply_sandbox()`, and `crypto::init(false)` so no
+  `openssl.cnf` is read. A test (`LEHT_WORKER_NO_PRELOAD=1`) checks that the worker really
+  does die without it, so the preload cannot be mistaken for decoration and removed.
+- **No new syscalls.** The allowlist is unchanged: OpenSSL needs nothing beyond what MuPDF
+  already used (`getrandom` was already allowed for it). The trust store arrives as PEM
+  bytes over the socket, because the worker cannot open `/etc/pki`.
+
+The private key goes the other way and never enters the worker at all; see
+[signing.md](signing.md#the-key-never-enters-the-sandbox) for why the split is the way
+round it is, and what the trusted side checks before it signs.
 
 ### What is deliberately not isolated
 

@@ -2,14 +2,15 @@
 
 ## Set up
 
-Build dependencies — CMake 3.28+, Ninja, a C++20 compiler, MuPDF, and libseccomp for
-`leht-worker`, the sandboxed process the viewer parses documents in. That is the whole
-list; `core/` links no second PDF library. A CLI-only build can drop libseccomp with
+Build dependencies — CMake 3.28+, Ninja, a C++20 compiler, MuPDF, OpenSSL 3.2+ (signing
+and verification, M5), and libseccomp for `leht-worker`, the sandboxed process the viewer
+parses documents in. That is the whole list; `core/` links no second PDF library, and
+`crypto/` links no PDF library at all. A CLI-only build can drop libseccomp with
 `-DLEHT_BUILD_WORKER=OFF`.
 
 ```sh
 # Fedora
-sudo dnf install gcc-c++ cmake ninja-build mupdf-devel libseccomp-devel
+sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel
 ```
 
 Building the viewer (`-DLEHT_BUILD_UI=ON`) additionally needs **`qt6-qtbase-devel`**. The
@@ -28,6 +29,9 @@ sudo dnf install mupdf qpdf ghostscript poppler-utils python3-pillow python3-num
   `-devel` packages do not ship. `qpdf --check` is valuable here precisely *because* qpdf
   is not the library under test: it is an independent opinion on whether output is valid.
 - `ghostscript` — used by the corpus generator only.
+- `poppler-utils` also provides **`pdfsig`**, the independent verifier the signing tests
+  check every signed file with. No key or certificate is committed: the tests build a
+  throwaway PKI, and a local timestamp authority, at run time.
 - `poppler-utils`, Pillow, NumPy — for the render cross-check described under Testing.
 - `libasan`, `libubsan` — **required for `-DLEHT_SANITIZE=ON` to link.** Fedora ships the
   compiler-side `libasan.so` symlink without the runtime, so a sanitizer build configures
