@@ -200,6 +200,19 @@ controls:
 | `fuzz_open` | libFuzzer, MuPDF instrumented, **LSan on** | 201,755 (2 jobs x 15 min, 7,192 edges) | clean |
 | `fuzz_ops` | libFuzzer, MuPDF instrumented, **LSan on**, small seeds | 32,257 (2 jobs x 15 min, 4,193 edges) | clean |
 | `fuzz_ipc` | libFuzzer + ASan/UBSan, **LSan on** | 3,091,841 (2 jobs x 15 min) | clean |
+| `fuzz_edit` (M4) | libFuzzer, MuPDF instrumented, **LSan on**, small seeds | 14,702 (2 jobs x 15 min) | **one leak, ours** → fixed (see below) |
+| `fuzz_edit` (M4) | same, resumed from that corpus after the fix | 15,674 (2 jobs x 15 min, 9,897 edges) | clean |
+
+`fuzz_edit` runs every M4 edit operation (redaction, watermark, crop, annotations, form
+filling and flattening) on a fresh copy of each input. Its first run found a real leak in
+Leht's own code. Resolving a page's `/Contents` can make MuPDF repair a damaged file
+mid-edit, and when the repair finds a later definition of the page object, the page the
+edit holds becomes null and the next write throws. The watermark had already taken a
+reference to `/Contents` with `pdf_keep_obj`, and on that path the reference was never
+dropped. It is fixed, and `watermark_survives_a_repair_mid_edit` rebuilds the situation by
+hand; that test fails under ASan without the fix. The fix does not change the general
+point: **an edit on a file that needs repair can fail part-way**. It fails cleanly, as a
+`leht::Error`, and the save it would have fed never happens.
 
 The three "LSan on" rows (2026-09-22) ran with `llvm-symbolizer` installed and
 `LSAN_OPTIONS=suppressions=tests/lsan.supp`, so every input was leak-checked with only the

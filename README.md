@@ -48,11 +48,25 @@ leht rotate    FILE -p RANGES -d DEG -o OUT.pdf   rotate in place
 leht compress  FILE -o OUT.pdf [--preset P] [-q N] [--linearize]
 leht encrypt   FILE -o OUT.pdf [--user-pw PW] [--owner-pw PW] [--method M]
 leht decrypt   FILE -o OUT.pdf [--password PW]
+leht redact    FILE -o OUT.pdf [--text TERM] [--rect P:X0,Y0,X1,Y1]... [-p RANGES]
+leht crop      FILE -o OUT.pdf (--box X0,Y0,X1,Y1 | --margins N[,T,R,B]) [-p RANGES]
+leht watermark FILE -o OUT.pdf --text TEXT [--opacity F] [--angle DEG] [--under]
+leht annots    FILE                               list annotations, with ids
+leht annotate  FILE -o OUT.pdf [--highlight TEXT] [--note P:X,Y:TEXT] [--stamp P:NAME]...
+leht form      FILE                               list form fields
+leht fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]
 ```
 
 `-o` output · `-p` pages · `-z` zoom (1.0 = 72 DPI) · `-n` pages per file · `-d` degrees ·
 `-q` JPEG quality · `--preset lossless|print|ebook|screen` (default `ebook`) ·
 `--method aes256|aes128|rc4` (default `aes256`) · `--linearize`
+
+**Redaction removes; it does not cover.** Text, image pixels and drawing under the box
+leave the file, along with everything else that repeats them: overlapping annotations and
+fields, thumbnails, marked-content `/ActualText`, the structure tree and earlier
+revisions. Anywhere the term still appears (metadata, bookmarks) is listed, and `redact`
+exits 3. **Cropping only hides.** `fill` never runs a document's JavaScript. Details and
+how each claim is tested: [docs/editing.md](docs/editing.md).
 
 **Page ranges are 1-based and inclusive:** `1-5,8,12-`. A **descending range reverses those
 pages** — `-p 5-1` flips them. That is deliberate, not a parsing accident.
@@ -86,8 +100,11 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   and reported. Design, threat model and measured cost:
   [docs/robustness.md](docs/robustness.md#process-isolation).
 
-**Next** — M4 editing (annotations, form filling, true redaction where content is removed
-rather than covered, watermarks, crop); M5 signatures (visible stamp, plus cryptographic
+**In progress — M4 editing.** The engine and CLI are done: true redaction, crop,
+watermarks, annotations and form filling ([docs/editing.md](docs/editing.md)). Next are
+the viewer's editing tools, which drive the same operations through the sandboxed worker.
+
+**Next** — M5 signatures (visible stamp, plus cryptographic
 PAdES signing and a verification panel); M6 packaging as Flatpak, RPM and DEB.
 
 **Explicitly out of scope for v1: in-place text editing.** It requires font matching
