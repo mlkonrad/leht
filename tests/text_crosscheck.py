@@ -8,6 +8,7 @@ whitespace and reading order -- so this checks that poppler's words are all
 present in leht's output. Skips (exit 77) without pdftotext.
 """
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,7 @@ def main():
     leht, pdf = sys.argv[1], sys.argv[2]
     page = sys.argv[3] if len(sys.argv) > 3 else "1"
 
-    if subprocess.run(["which", "pdftotext"], capture_output=True).returncode != 0:
+    if shutil.which("pdftotext") is None:
         print("SKIP: pdftotext not installed (dnf install poppler-utils)")
         return SKIP
 

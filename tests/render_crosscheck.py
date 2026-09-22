@@ -12,6 +12,7 @@ Skips (exit 77, CTest's "not run") when pdftoppm, PIL or numpy are missing,
 because these are test-time conveniences and not dependencies of leht.
 """
 
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,7 +44,7 @@ def main() -> int:
         print(f"SKIP: {exc}")
         return SKIP
 
-    if subprocess.run(["which", "pdftoppm"], capture_output=True).returncode != 0:
+    if shutil.which("pdftoppm") is None:
         print("SKIP: pdftoppm not installed (dnf install poppler-utils)")
         return SKIP
 
