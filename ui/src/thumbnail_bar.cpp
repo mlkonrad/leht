@@ -55,6 +55,17 @@ void ThumbnailBar::clearThumbnails() {
     requested_.clear();
 }
 
+void ThumbnailBar::invalidate(const QVector<int>& pages, bool allPages) {
+    if (allPages) {
+        requested_.clear();
+    } else {
+        for (const int p : pages) {
+            requested_.remove(p);
+        }
+    }
+    requestVisible();
+}
+
 void ThumbnailBar::onThumbnail(int page, const QImage& image) {
     if (page < 0 || page >= count() || image.isNull()) {
         return;

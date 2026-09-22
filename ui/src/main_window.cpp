@@ -109,7 +109,11 @@ MainWindow::MainWindow() {
 
     // Editing: the view's tools -> worker edits; worker changes -> view.
     connect(worker_, &RenderWorker::documentEdited, view_, &PageView::onDocumentEdited);
-    connect(worker_, &RenderWorker::documentEdited, this, [this] {
+    connect(worker_, &RenderWorker::documentEdited, this,
+            [this](const QVector<int>& pages, bool allPages, const QVector<QSize>&) {
+        if (thumbnails_ != nullptr) {
+            thumbnails_->invalidate(pages, allPages);
+        }
         onWorker([](RenderWorker* w) {
             w->listAnnotations();
             w->listFields();

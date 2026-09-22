@@ -2,6 +2,7 @@
 #pragma once
 
 #include <QListWidget>
+#include <QVector>
 #include <QSet>
 
 /// A vertical strip of page thumbnails.
@@ -22,6 +23,10 @@ public:
     /// Rebuilds the strip with `pageCount` placeholder items.
     void setPageCount(int pageCount);
     void clearThumbnails();
+    /// The document changed: fetch `pages` (every page, if `allPages`) again.
+    /// The old picture stays until the new one arrives. Worker requests run
+    /// in order, so the post-edit thumbnail always lands last.
+    void invalidate(const QVector<int>& pages, bool allPages);
 
     /// Highlights `page` and scrolls it into view without emitting a navigation.
     void setCurrentPageQuiet(int page);
