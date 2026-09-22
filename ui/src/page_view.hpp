@@ -129,6 +129,7 @@ signals:
     void toolRefused(QString reason);
 
 protected:
+    bool event(QEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -167,9 +168,14 @@ private:
     quint64 generation_ = 0;
     int lastReportedPage_ = -1;
 
-    /// Rendered pages, keyed by page index. Each entry remembers the zoom it was
-    /// rendered at so a stale-zoom image can be shown (scaled) until the sharp
-    /// one arrives, rather than flashing a placeholder.
+    /// The zoom pages are rendered at: the view's zoom times the screen's
+    /// device pixel ratio, so a scaled display (2x, or a fractional 1.33x) gets
+    /// one image pixel per device pixel instead of an upscaled, blurry page.
+    double renderZoom() const { return zoom_ * devicePixelRatioF(); }
+
+    /// Rendered pages, keyed by page index. Each entry remembers the render
+    /// zoom it was made at so a stale image can be shown (scaled) until the
+    /// sharp one arrives, rather than flashing a placeholder.
     struct Rendered {
         QImage image;
         double zoom = 0.0;

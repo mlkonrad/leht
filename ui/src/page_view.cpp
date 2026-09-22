@@ -239,10 +239,10 @@ void PageView::requestVisible() {
         }
         const auto it = rendered_.constFind(p);
         const bool sharp =
-            it != rendered_.constEnd() && std::abs(it->zoom - zoom_) < 1e-6;
+            it != rendered_.constEnd() && std::abs(it->zoom - renderZoom()) < 1e-6;
         if (!sharp && !requested_.contains(p)) {
             requested_.insert(p);
-            emit needRender(p, zoom_, rotation_, generation_);
+            emit needRender(p, renderZoom(), rotation_, generation_);
         }
     }
 }
@@ -681,6 +681,16 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
         lastReportedPage_ = page;
         emit currentPageChanged(page);
     }
+}
+
+bool PageView::event(QEvent* event) {
+    // Moved to a screen with a different scale: every image is now the wrong
+    // resolution. Asking again is enough -- none of them is "sharp" any more.
+    if (event->type() == QEvent::DevicePixelRatioChange) {
+        requestVisible();
+        viewport()->update();
+    }
+    return QAbstractScrollArea::event(event);
 }
 
 void PageView::resizeEvent(QResizeEvent* /*event*/) {

@@ -7,6 +7,8 @@
 #include <QScrollBar>
 #include <QShowEvent>
 
+#include <cmath>
+
 namespace {
 
 /// A neutral placeholder shown until a page's thumbnail arrives.
@@ -70,7 +72,9 @@ void ThumbnailBar::onThumbnail(int page, const QImage& image) {
     if (page < 0 || page >= count() || image.isNull()) {
         return;
     }
-    item(page)->setIcon(QIcon(QPixmap::fromImage(image)));
+    QPixmap pixmap = QPixmap::fromImage(image);
+    pixmap.setDevicePixelRatio(static_cast<qreal>(image.width()) / kThumbWidth);
+    item(page)->setIcon(QIcon(pixmap));
 }
 
 void ThumbnailBar::setCurrentPageQuiet(int page) {
@@ -106,6 +110,7 @@ void ThumbnailBar::requestVisible() {
             continue;
         }
         requested_.insert(p);
-        emit needThumbnail(p, kThumbWidth);
+        // In device pixels, so thumbnails are sharp on a scaled display too.
+        emit needThumbnail(p, static_cast<int>(std::lround(kThumbWidth * devicePixelRatioF())));
     }
 }
