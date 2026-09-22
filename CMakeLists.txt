@@ -42,6 +42,8 @@ add_subdirectory(core)
 # The viewer <-> leht-worker wire format (M3). Always built: it is small,
 # has no dependency beyond core/, and its tests guard the process boundary.
 add_subdirectory(ipc)
+# Signing and verification (M5): OpenSSL, kept out of core/.
+add_subdirectory(crypto)
 if(LEHT_BUILD_WORKER)
     add_subdirectory(worker)
 elseif(LEHT_BUILD_UI)
