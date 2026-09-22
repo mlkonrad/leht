@@ -121,7 +121,10 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   only a picture. The key stays out of the sandbox; the hostile DER stays inside it. See
   [docs/signing.md](docs/signing.md).
 
-**Next** — M6 packaging as Flatpak, RPM and DEB.
+**Now** — release readiness: `cmake --install` with desktop integration, CI on every push,
+and the whole suite, sanitizers and a fuzz pass run against the pinned MuPDF 1.28.4.
+
+**Later** — packaging as Flatpak, RPM and DEB, once Leht has been used day to day.
 
 **Explicitly out of scope for v1: in-place text editing.** It requires font matching
 against subsetted embedded fonts plus line reflow, works only on simple documents, and
@@ -160,12 +163,17 @@ Requires CMake 3.28+, Ninja, a C++20 compiler, MuPDF, OpenSSL 3.2+ and libseccom
 **MuPDF 1.28.4 or newer is strongly recommended.** Older versions — including the 1.28.2
 that Fedora 44 ships — abort the process on some malformed files. Leht still builds and
 works against them, and the build warns; don't open untrusted PDFs on one. See
-[docs/robustness.md](docs/robustness.md).
+[docs/robustness.md](docs/robustness.md). `tools/build-mupdf.sh` downloads, checks and
+builds the pinned 1.28.4 into `~/.cache/leht` and prints its path:
+
+```sh
+cmake -S . -B build -G Ninja -DLEHT_MUPDF_ROOT="$(tools/build-mupdf.sh)"
+```
 
 ```sh
 # Fedora
 sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel
-sudo dnf install qt6-qtbase-devel            # only for the viewer
+sudo dnf install qt6-qtbase-devel qt6-qtsvg  # only for the viewer
 
 # Debian / Ubuntu
 sudo apt install g++ cmake ninja-build libmupdf-dev libssl-dev libseccomp-dev
@@ -180,6 +188,25 @@ ctest --test-dir build
 
 Running the full test suite wants a few extra **command-line** tools that Leht itself never
 needs at runtime — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+CI (`.github/workflows/ci.yml`) builds and tests three ways on Fedora 44: against the
+system MuPDF, against the pinned 1.28.4, and against 1.28.4 under ASan and UBSan with a
+mutation-fuzz pass. `tools/ci-local.sh system|pinned|asan` runs the same job in a podman
+container, from a read-only copy of the tree.
+
+### Installing
+
+```sh
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLEHT_BUILD_UI=ON \
+      -DCMAKE_INSTALL_PREFIX="$HOME/.local" -DLEHT_MUPDF_ROOT="$(tools/build-mupdf.sh)"
+cmake --build build-release
+cmake --install build-release
+```
+
+That installs `leht` and `leht-viewer` into `bin/`, `leht-worker` into `libexec/leht/`, and
+a desktop entry and icon, so Leht appears in the application menu and in "Open with" for
+PDFs. The viewer finds its worker relative to its own binary, so the tree can be moved.
+To remove it: `xargs rm -v < build-release/install_manifest.txt`.
 
 Build options — all default as shown:
 
