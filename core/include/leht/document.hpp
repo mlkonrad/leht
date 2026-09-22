@@ -13,6 +13,7 @@ typedef struct fz_document fz_document;
 namespace leht {
 
 class Context;
+struct SaveOptions;
 
 /// One entry in a document's outline (its table of contents / bookmarks).
 struct OutlineItem {
@@ -82,6 +83,35 @@ public:
     /// absolute page indices.
     [[nodiscard]] std::vector<OutlineItem> outline() const;
 
+    /// True when the document is a PDF, the only format the edit operations
+    /// accept. XPS, EPUB and images open for viewing but not for editing.
+    [[nodiscard]] bool is_pdf() const;
+
+    /// Writes the document, with every edit applied so far, to `path`.
+    ///
+    /// Always a full rewrite, never an incremental update. The bytes go to a
+    /// temporary file beside `path` which is fsynced and then renamed over
+    /// it, so a failed save never leaves a half-written file behind -- and
+    /// saving over the very file the document was opened from is safe, since
+    /// the document keeps reading the old inode.
+    ///
+    /// Throws leht::Error if the document is not a PDF or cannot be written.
+    void save(const std::string& path, const SaveOptions& options) const;
+
+    /// As save(), but writes into `fd` from its current offset. Does NOT take
+    /// ownership: the caller owns the descriptor, and with it the job of
+    /// making the result durable (fsync) and atomic (rename). This is how the
+    /// sandboxed worker saves, since it cannot open paths.
+    void save_fd(int fd, const SaveOptions& options) const;
+
+    /// Records that content has been redacted from this document. Every later
+    /// save then garbage-collects fully, whatever SaveOptions asks for:
+    /// without collection, the unreferenced original content streams would
+    /// still be written out, and the redaction would be cosmetic. Called by
+    /// ops::redact(); it only ever makes a save stricter.
+    void mark_redacted() noexcept { redacted_ = true; }
+    [[nodiscard]] bool redacted() const noexcept { return redacted_; }
+
     [[nodiscard]] fz_document* raw() const noexcept { return doc_; }
 
 private:
@@ -89,6 +119,7 @@ private:
 
     fz_context* ctx_ = nullptr;  // borrowed, not owned
     fz_document* doc_ = nullptr;
+    bool redacted_ = false;
 };
 
 }  // namespace leht

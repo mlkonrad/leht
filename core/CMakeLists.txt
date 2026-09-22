@@ -12,6 +12,7 @@ add_library(lehtcore
     src/error.cpp
     src/context.cpp
     src/document.cpp
+    src/edit.cpp
     src/renderer.cpp
     src/text.cpp
     src/page_cache.cpp

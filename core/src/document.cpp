@@ -4,14 +4,18 @@
 #include "guards.hpp"
 #include "mupdf_c.hpp"
 #include "leht/context.hpp"
+#include "leht/edit.hpp"
 #include "leht/error.hpp"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <utility>
 #include <vector>
 
@@ -72,6 +76,77 @@ void fd_drop(fz_context* ctx, void* state) {
     auto* s = static_cast<FdStream*>(state);
     ::close(s->fd);
     fz_free(ctx, s);
+}
+
+// fz_output over a borrowed descriptor, for Document::save_fd(). The state is
+// the fd itself, stored in the pointer, so there is nothing to allocate or
+// free. Only write/lseek are used: the worker's sandbox allows exactly those.
+
+int output_fd(void* state) {
+    return static_cast<int>(reinterpret_cast<std::intptr_t>(state));
+}
+
+void out_write(fz_context* ctx, void* state, const void* data, std::size_t n) {
+    const int fd = output_fd(state);
+    const auto* p = static_cast<const unsigned char*>(data);
+    while (n > 0) {
+        const ssize_t w = ::write(fd, p, n);
+        if (w < 0 && errno == EINTR) {
+            continue;
+        }
+        if (w <= 0) {
+            fz_throw(ctx, FZ_ERROR_SYSTEM, "write error on output descriptor");
+        }
+        p += w;
+        n -= static_cast<std::size_t>(w);
+    }
+}
+
+void out_seek(fz_context* ctx, void* state, std::int64_t offset, int whence) {
+    if (::lseek(output_fd(state), offset, whence) < 0) {
+        fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot seek on output descriptor");
+    }
+}
+
+std::int64_t out_tell(fz_context* ctx, void* state) {
+    const off_t pos = ::lseek(output_fd(state), 0, SEEK_CUR);
+    if (pos < 0) {
+        fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot tell on output descriptor");
+    }
+    return pos;
+}
+
+/// The process umask, read without changing it: umask(2) can only be queried by
+/// setting it, which would race with any other thread creating files.
+mode_t current_umask() {
+    std::FILE* f = std::fopen("/proc/self/status", "re");
+    unsigned mask = 022;
+    if (f != nullptr) {
+        char line[256];
+        while (std::fgets(line, sizeof(line), f) != nullptr) {
+            if (std::sscanf(line, "Umask: %o", &mask) == 1) {
+                break;
+            }
+        }
+        std::fclose(f);
+    }
+    return static_cast<mode_t>(mask);
+}
+
+pdf_write_options write_options(const SaveOptions& options, bool redacted) {
+    pdf_write_options opts = pdf_default_write_options;
+    opts.do_garbage = options.garbage;
+    // A redaction removes content from the page's content stream, but the old
+    // stream object is still in the xref. Only collection drops it.
+    if (redacted && opts.do_garbage < 3) {
+        opts.do_garbage = 3;
+    }
+    opts.do_incremental = 0;
+    opts.do_compress = options.compress_streams ? 1 : 0;
+    opts.do_compress_images = 1;
+    opts.do_compress_fonts = options.compress_streams ? 1 : 0;
+    opts.do_linear = options.linearize ? 1 : 0;
+    return opts;
 }
 
 }  // namespace
@@ -190,7 +265,8 @@ Document Document::open_fd(const Context& ctx, int fd, const std::string& magic)
 
 Document::Document(Document&& other) noexcept
     : ctx_(std::exchange(other.ctx_, nullptr)),
-      doc_(std::exchange(other.doc_, nullptr)) {}
+      doc_(std::exchange(other.doc_, nullptr)),
+      redacted_(std::exchange(other.redacted_, false)) {}
 
 Document& Document::operator=(Document&& other) noexcept {
     if (this != &other) {
@@ -199,6 +275,7 @@ Document& Document::operator=(Document&& other) noexcept {
         }
         ctx_ = std::exchange(other.ctx_, nullptr);
         doc_ = std::exchange(other.doc_, nullptr);
+        redacted_ = std::exchange(other.redacted_, false);
     }
     return *this;
 }
@@ -264,6 +341,80 @@ std::optional<std::string> Document::metadata(const std::string& key) const {
         return std::nullopt;
     }
     return std::string(buffer.data());
+}
+
+bool Document::is_pdf() const {
+    fz_document* doc = doc_;
+    pdf_document* pdf = nullptr;
+    guarded(ctx_, [&](fz_context* g) { pdf = pdf_document_from_fz_document(g, doc); });
+    return pdf != nullptr;
+}
+
+void Document::save_fd(int fd, const SaveOptions& options) const {
+    if (doc_ == nullptr) {
+        throw Error(0, "cannot save a moved-from Document");
+    }
+    if (fd < 0) {
+        throw Error(0, "invalid output descriptor");
+    }
+    fz_document* doc = doc_;
+    pdf_document* pdf = nullptr;
+    guarded(ctx_, [&](fz_context* g) { pdf = pdf_document_from_fz_document(g, doc); });
+    if (pdf == nullptr) {
+        throw Error(0, "saving requires a PDF");
+    }
+
+    pdf_write_options opts = write_options(options, redacted_);
+    void* state = reinterpret_cast<void*>(static_cast<std::intptr_t>(fd));
+    detail::Owned<fz_output, fz_drop_output> out{ctx_};
+    guarded(ctx_, [&](fz_context* g) {
+        *out.slot() = fz_new_output(g, 8192, state, out_write, nullptr, nullptr);
+        out.get()->seek = out_seek;
+        out.get()->tell = out_tell;
+        pdf_write_document(g, pdf, out.get(), &opts);
+        fz_close_output(g, out.get());
+    });
+}
+
+void Document::save(const std::string& path, const SaveOptions& options) const {
+    namespace fs = std::filesystem;
+    const fs::path target{path};
+    const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path{"."};
+    std::string temp = (dir / ("." + target.filename().string() + ".leht-XXXXXX")).string();
+
+    const int fd = ::mkostemp(temp.data(), O_CLOEXEC);
+    if (fd < 0) {
+        throw Error(0, "cannot create a temporary file beside " + path + ": " +
+                           std::strerror(errno));
+    }
+    // mkstemp creates 0600. Overwriting keeps the file's mode; a new file gets
+    // what open(2) would have given it.
+    struct stat st {};
+    (void)::fchmod(fd, ::stat(path.c_str(), &st) == 0 ? (st.st_mode & 07777)
+                                                        : (0666 & ~current_umask()));
+
+    try {
+        save_fd(fd, options);
+        if (::fsync(fd) != 0) {
+            throw Error(0, "cannot flush " + temp + ": " + std::strerror(errno));
+        }
+    } catch (...) {
+        ::close(fd);
+        ::unlink(temp.c_str());
+        throw;
+    }
+    ::close(fd);
+    if (::rename(temp.c_str(), path.c_str()) != 0) {
+        const int err = errno;
+        ::unlink(temp.c_str());
+        throw Error(0, "cannot replace " + path + ": " + std::strerror(err));
+    }
+    // Make the rename itself durable. Best effort: the data is already safe.
+    const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd >= 0) {
+        (void)::fsync(dfd);
+        ::close(dfd);
+    }
 }
 
 namespace {
