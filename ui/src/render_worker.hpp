@@ -12,8 +12,14 @@
 
 #include <QSet>
 
+#include "edit_model.hpp"
 #include "outline_model.hpp"
 #include "leht/ipc/process.hpp"
+#include "leht/ipc/protocol.hpp"
+
+#include <QColor>
+#include <QPolygonF>
+#include <QStringList>
 
 #include <atomic>
 #include <memory>
@@ -103,6 +109,46 @@ public slots:
     /// page cache or the generation.
     Q_INVOKABLE QImage renderAt(int page, double zoom);
 
+    // --- Editing (M4b) -------------------------------------------------------
+    //
+    // Every edit goes to the worker as an ipc::Edit and, once applied, joins
+    // the edit log: the list of edits since the file was opened or last saved.
+    // The log is the source of truth. Undo reopens the file and replays all
+    // but the last edit; a worker that crashes is respawned and gets the
+    // whole log. So the worker's document is always (file + log), and nothing
+    // is lost to a crash.
+    //
+    // Geometry is in base coordinates. Each emits documentEdited() and
+    // editStateChanged() on success, or editFailed() with a reason.
+
+    /// Highlights the text under `boxes` (base-coordinate rects, one per line).
+    void addHighlight(int page, QVector<QRectF> boxes, QColor color);
+    /// A sticky note at `at` saying `text`.
+    void addNote(int page, QPointF at, QString text);
+    /// A freehand drawing: one polygon per stroke.
+    void addInk(int page, QVector<QPolygonF> strokes, QColor color);
+    /// Removes everything under `box` (see ops::redact).
+    void redactArea(int page, QRectF box);
+    /// Removes every occurrence of `needle`. May emit redactionIncomplete().
+    void redactText(QString needle);
+    void deleteAnnotation(int id);
+    void setFieldValue(QString name, QString value);
+    void addWatermark(QString text);
+    void cropMargins(double points);
+
+    void undo();
+    void redo();
+
+    /// Writes the edited document to `path`: into a temporary file beside it,
+    /// written by the worker through a passed descriptor, then fsynced and
+    /// renamed over `path`. The saved file becomes the document: the edit log
+    /// and undo history start afresh from it. Emits saved() or saveFailed().
+    void save(QString path);
+
+    /// Emit annotationsReady() / fieldsReady() with the current lists.
+    void listAnnotations();
+    void listFields();
+
 signals:
     void opened(int pageCount, QVector<QSize> baseSizes);
     void outlineReady(QVector<OutlineRow> rows);
@@ -120,9 +166,22 @@ signals:
     void selectionReady(int page, QVector<QRectF> boxes, QString text);
     void thumbnailReady(int page, QImage image);
 
+    /// The document changed. Rendered images of `pages` (of every page, if
+    /// `allPages`) are out of date, and `baseSizes` are the page sizes now.
+    void documentEdited(QVector<int> pages, bool allPages, QVector<QSize> baseSizes);
+    /// `modified`: there are edits since the file was opened or last saved.
+    void editStateChanged(bool canUndo, bool canRedo, bool modified);
+    void editFailed(QString message);
+    /// A text redaction was applied, but the text still appears in `where`.
+    void redactionIncomplete(QStringList where);
+    void saved(QString path);
+    void saveFailed(QString message);
+    void annotationsReady(QVector<AnnotRow> rows);
+    void fieldsReady(QVector<FieldRow> rows);
+
 private:
     /// What the viewer was doing when a worker died, which decides the response.
-    enum class Phase { Open, Page, Search };
+    enum class Phase { Open, Page, Search, Edit };
 
     /// Spawns and handshakes a fresh worker. Emits failed() and returns false
     /// if it cannot start.
@@ -174,6 +233,21 @@ private:
     QImage renderUncached(int page, double zoom);
 
     void closeDocument();
+
+    /// Sends `edit`; on success appends it to the log and publishes the
+    /// change. `fromRedo` keeps the redo stack; a fresh edit clears it.
+    void applyEdit(const leht::ipc::Edit& edit, bool fromRedo = false);
+    /// Replays the whole log into the current worker, which has just opened
+    /// the file. False if the worker was lost doing it (already handled).
+    bool replayLog();
+    /// Reopens the file in the current worker and replays the log, then
+    /// publishes every page as changed. Used by undo and after a failed edit.
+    void rebuild();
+    void publishEdited(const leht::ipc::Edited& edited);
+    void publishEditState();
+
+    std::vector<leht::ipc::Edit> log_;   ///< applied since open or last save
+    std::vector<leht::ipc::Edit> redo_;  ///< undone, newest last
 
     /// The live worker. Shared and atomic because setGeneration() reads it
     /// from the GUI thread while this thread may be replacing it.

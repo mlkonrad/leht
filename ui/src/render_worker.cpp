@@ -172,6 +172,8 @@ void RenderWorker::closeDocument() {
     crashes_ = 0;
     externalKills_ = 0;
     hostile_ = false;
+    log_.clear();
+    redo_.clear();
     if (cache_) {
         cache_->clear();
     }
@@ -376,8 +378,15 @@ bool RenderWorker::openInWorker(bool silent) {
             const ipc::Outline outline = ipc::decode_as<ipc::Outline>(*outlineFrame);
             if (!silent) {
                 publishOpened(result, outline);
+            } else {
+                baseSizes_.clear();
+                for (const leht::PageSize& s : result.base_sizes) {
+                    baseSizes_.push_back(QSize(s.width, s.height));
+                }
             }
-            return true;
+            // A reopened or respawned worker has the file; the edits since it
+            // was opened or saved are in the log.
+            return log_.empty() || replayLog();
         }
         default:
             throw ipc::ProtocolError("unexpected reply to Open");
@@ -611,4 +620,379 @@ void RenderWorker::renderThumbnail(int page, int targetWidth) {
 
 QImage RenderWorker::renderAt(int page, double zoom) {
     return renderUncached(page, zoom);
+}
+
+// --- Editing ---------------------------------------------------------------------
+
+namespace {
+
+std::vector<leht::TextQuad> toQuads(const QVector<QRectF>& boxes) {
+    std::vector<leht::TextQuad> quads;
+    for (const QRectF& b : boxes) {
+        leht::TextQuad q;
+        q.ul_x = q.ll_x = static_cast<float>(b.left());
+        q.ur_x = q.lr_x = static_cast<float>(b.right());
+        q.ul_y = q.ur_y = static_cast<float>(b.top());
+        q.ll_y = q.lr_y = static_cast<float>(b.bottom());
+        quads.push_back(q);
+    }
+    return quads;
+}
+
+void setColor(float out[3], const QColor& color) {
+    out[0] = static_cast<float>(color.redF());
+    out[1] = static_cast<float>(color.greenF());
+    out[2] = static_cast<float>(color.blueF());
+}
+
+/// The process umask, read without changing it (umask(2) can only be read by
+/// setting it, which would race with other threads creating files).
+mode_t currentUmask() {
+    QFile status(QStringLiteral("/proc/self/status"));
+    if (status.open(QIODevice::ReadOnly)) {
+        for (const QByteArray& line : status.readAll().split('\n')) {
+            if (line.startsWith("Umask:")) {
+                bool ok = false;
+                const uint mask = line.mid(6).trimmed().toUInt(&ok, 8);
+                if (ok) {
+                    return static_cast<mode_t>(mask);
+                }
+            }
+        }
+    }
+    return 022;
+}
+
+}  // namespace
+
+void RenderWorker::publishEdited(const ipc::Edited& edited) {
+    baseSizes_.clear();
+    for (const leht::PageSize& s : edited.base_sizes) {
+        baseSizes_.push_back(QSize(s.width, s.height));
+    }
+    if (cache_) {
+        cache_->clear();  // edits are rare; re-rendering the visible pages is cheap
+    }
+    QVector<int> pages;
+    for (const int p : edited.pages) {
+        pages.push_back(p);
+    }
+    emit documentEdited(pages, edited.all_pages, baseSizes_);
+}
+
+void RenderWorker::publishEditState() {
+    emit editStateChanged(!log_.empty(), !redo_.empty(), !log_.empty());
+}
+
+bool RenderWorker::replayLog() {
+    for (std::size_t i = 0; i < log_.size(); ++i) {
+        if (!sendRequest(log_[i])) {
+            (void)workerLost(Phase::Edit, -1);
+            return proc_.load() != nullptr;
+        }
+        auto reply = receive();
+        if (!reply) {
+            // workerLost restores the document (replaying the log again) when
+            // it can; if it cannot, the document is closed and reported.
+            (void)workerLost(Phase::Edit, -1);
+            return proc_.load() != nullptr;
+        }
+        try {
+            if (reply->type == ipc::MsgType::Failed) {
+                // Applied once, refused now: keep the edits that still apply.
+                log_.resize(i);
+                emit editFailed(QString::fromStdString(ipc::decode_as<ipc::Failed>(*reply).message));
+                return true;
+            }
+            const ipc::Edited edited = ipc::decode_as<ipc::Edited>(*reply);
+            baseSizes_.clear();
+            for (const leht::PageSize& s : edited.base_sizes) {
+                baseSizes_.push_back(QSize(s.width, s.height));
+            }
+        } catch (const ipc::ProtocolError&) {
+            distrust();
+            (void)workerLost(Phase::Edit, -1);
+            return proc_.load() != nullptr;
+        }
+    }
+    return true;
+}
+
+void RenderWorker::rebuild() {
+    if (!proc_.load()) {
+        return;
+    }
+    if (cache_) {
+        cache_->clear();
+    }
+    if (openInWorker(/*silent=*/true)) {
+        emit documentEdited({}, true, baseSizes_);
+    }
+}
+
+void RenderWorker::applyEdit(const ipc::Edit& edit, bool fromRedo) {
+    if (!proc_.load()) {
+        return;
+    }
+    auto reply = roundTrip(edit, Phase::Edit, -1);
+    if (!reply) {
+        emit editFailed(tr("The document worker stopped while applying the edit; "
+                           "the edit was not made."));
+        publishEditState();
+        return;
+    }
+    try {
+        if (reply->type == ipc::MsgType::Failed) {
+            emit editFailed(QString::fromStdString(ipc::decode_as<ipc::Failed>(*reply).message));
+            // A refused edit may have got part-way; bring the worker back to
+            // exactly (file + log).
+            rebuild();
+            publishEditState();
+            return;
+        }
+        const ipc::Edited edited = ipc::decode_as<ipc::Edited>(*reply);
+        log_.push_back(edit);
+        if (!fromRedo) {
+            redo_.clear();
+        }
+        publishEdited(edited);
+        publishEditState();
+        if (!edited.remaining.empty()) {
+            QStringList where;
+            for (const std::string& w : edited.remaining) {
+                where.push_back(QString::fromStdString(w));
+            }
+            emit redactionIncomplete(where);
+        }
+    } catch (const ipc::ProtocolError&) {
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+    }
+}
+
+void RenderWorker::addHighlight(int page, QVector<QRectF> boxes, QColor color) {
+    if (boxes.isEmpty()) {
+        return;
+    }
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::AddAnnot;
+    e.page = page;
+    e.annot.kind = leht::ops::AnnotKind::Highlight;
+    e.annot.quads = toQuads(boxes);
+    setColor(e.annot.color, color);
+    applyEdit(e);
+}
+
+void RenderWorker::addNote(int page, QPointF at, QString text) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::AddAnnot;
+    e.page = page;
+    e.annot.kind = leht::ops::AnnotKind::Note;
+    e.annot.rect = {static_cast<float>(at.x()), static_cast<float>(at.y()),
+                    static_cast<float>(at.x()), static_cast<float>(at.y())};
+    e.annot.contents = text.toStdString();
+    applyEdit(e);
+}
+
+void RenderWorker::addInk(int page, QVector<QPolygonF> strokes, QColor color) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::AddAnnot;
+    e.page = page;
+    e.annot.kind = leht::ops::AnnotKind::Ink;
+    setColor(e.annot.color, color);
+    for (const QPolygonF& stroke : strokes) {
+        std::vector<leht::Point> points;
+        for (const QPointF& p : stroke) {
+            points.push_back({static_cast<float>(p.x()), static_cast<float>(p.y())});
+        }
+        if (!points.empty()) {
+            e.annot.strokes.push_back(std::move(points));
+        }
+    }
+    if (!e.annot.strokes.empty()) {
+        applyEdit(e);
+    }
+}
+
+void RenderWorker::redactArea(int page, QRectF box) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::Redact;
+    e.page = page;
+    const QRectF b = box.normalized();
+    e.rects = {{static_cast<float>(b.left()), static_cast<float>(b.top()),
+                static_cast<float>(b.right()), static_cast<float>(b.bottom())}};
+    applyEdit(e);
+}
+
+void RenderWorker::redactText(QString needle) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::RedactText;
+    e.text = needle.toStdString();
+    applyEdit(e);
+}
+
+void RenderWorker::deleteAnnotation(int id) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::DeleteAnnot;
+    e.annot_id = id;
+    applyEdit(e);
+}
+
+void RenderWorker::setFieldValue(QString name, QString value) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::SetField;
+    e.name = name.toStdString();
+    e.text = value.toStdString();
+    applyEdit(e);
+}
+
+void RenderWorker::addWatermark(QString text) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::Watermark;
+    e.watermark.text = text.toStdString();
+    applyEdit(e);
+}
+
+void RenderWorker::cropMargins(double points) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::CropMargins;
+    const auto m = static_cast<float>(points);
+    e.margins = {m, m, m, m};
+    applyEdit(e);
+}
+
+void RenderWorker::undo() {
+    if (log_.empty() || !proc_.load()) {
+        return;
+    }
+    redo_.push_back(std::move(log_.back()));
+    log_.pop_back();
+    rebuild();
+    publishEditState();
+}
+
+void RenderWorker::redo() {
+    if (redo_.empty() || !proc_.load()) {
+        return;
+    }
+    const ipc::Edit edit = std::move(redo_.back());
+    redo_.pop_back();
+    applyEdit(edit, /*fromRedo=*/true);
+}
+
+void RenderWorker::save(QString path) {
+    if (!proc_.load()) {
+        emit saveFailed(tr("No document is open."));
+        return;
+    }
+    const QFileInfo info(path);
+    QByteArray temp = QFile::encodeName(info.absolutePath() + QStringLiteral("/.") +
+                                        info.fileName() + QStringLiteral(".leht-XXXXXX"));
+    const int fd = ::mkostemp(temp.data(), O_CLOEXEC);
+    if (fd < 0) {
+        emit saveFailed(tr("Cannot create a file in %1: %2")
+                            .arg(info.absolutePath(), QString::fromUtf8(std::strerror(errno))));
+        return;
+    }
+    const auto discard = [&](const QString& why) {
+        ::close(fd);
+        ::unlink(temp.constData());
+        emit saveFailed(why);
+    };
+
+    // The worker writes; this side makes the result durable and atomic.
+    auto reply = sendRequest(ipc::Save{}, fd) ? receive() : std::nullopt;
+    if (!reply) {
+        discard(tr("The document worker stopped while saving; nothing was written."));
+        (void)workerLost(Phase::Edit, -1);
+        return;
+    }
+    try {
+        if (reply->type == ipc::MsgType::Failed) {
+            discard(QString::fromStdString(ipc::decode_as<ipc::Failed>(*reply).message));
+            return;
+        }
+        (void)ipc::decode_as<ipc::Saved>(*reply);
+    } catch (const ipc::ProtocolError&) {
+        discard(tr("The document worker answered the save with garbage; nothing was written."));
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+        return;
+    }
+
+    struct stat st {};
+    const QByteArray target = QFile::encodeName(info.absoluteFilePath());
+    const mode_t mode = ::stat(target.constData(), &st) == 0 ? (st.st_mode & 07777)
+                                                             : (0666 & ~currentUmask());
+    if (::fchmod(fd, mode) != 0 || ::fsync(fd) != 0) {
+        discard(QString::fromUtf8(std::strerror(errno)));
+        return;
+    }
+    ::close(fd);
+    if (::rename(temp.constData(), target.constData()) != 0) {
+        const int err = errno;
+        ::unlink(temp.constData());
+        emit saveFailed(QString::fromUtf8(std::strerror(err)));
+        return;
+    }
+    const int dir = ::open(QFile::encodeName(info.absolutePath()).constData(),
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir >= 0) {
+        (void)::fsync(dir);
+        ::close(dir);
+    }
+
+    // The saved file is the document now: undo and crash recovery start
+    // from it, with an empty log.
+    path_ = info.absoluteFilePath();
+    log_.clear();
+    redo_.clear();
+    (void)openInWorker(/*silent=*/true);
+    emit saved(path_);
+    publishEditState();
+}
+
+void RenderWorker::listAnnotations() {
+    QVector<AnnotRow> rows;
+    auto reply = proc_.load() ? roundTrip(ipc::ListAnnots{}, Phase::Edit, -1) : std::nullopt;
+    try {
+        if (reply && reply->type == ipc::MsgType::AnnotList) {
+            for (const leht::ops::AnnotInfo& a : ipc::decode_as<ipc::AnnotList>(*reply).items) {
+                rows.push_back(AnnotRow{a.id, a.page, QString::fromStdString(a.type),
+                                        QRectF(QPointF(a.rect.x0, a.rect.y0),
+                                               QPointF(a.rect.x1, a.rect.y1)),
+                                        QString::fromStdString(a.contents)});
+            }
+        } else if (reply) {
+            (void)ipc::decode_as<ipc::Failed>(*reply);  // not a PDF: no annotations
+        }
+    } catch (const ipc::ProtocolError&) {
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+    }
+    emit annotationsReady(rows);
+}
+
+void RenderWorker::listFields() {
+    QVector<FieldRow> rows;
+    auto reply = proc_.load() ? roundTrip(ipc::ListFields{}, Phase::Edit, -1) : std::nullopt;
+    try {
+        if (reply && reply->type == ipc::MsgType::FieldList) {
+            for (const leht::ops::FieldInfo& f : ipc::decode_as<ipc::FieldList>(*reply).items) {
+                QStringList options;
+                for (const std::string& o : f.options) {
+                    options.push_back(QString::fromStdString(o));
+                }
+                rows.push_back(FieldRow{QString::fromStdString(f.name), static_cast<int>(f.type),
+                                        QString::fromStdString(f.value), options, f.page,
+                                        f.read_only});
+            }
+        } else if (reply) {
+            (void)ipc::decode_as<ipc::Failed>(*reply);  // not a PDF, or XFA: no fields
+        }
+    } catch (const ipc::ProtocolError&) {
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+    }
+    emit fieldsReady(rows);
 }
