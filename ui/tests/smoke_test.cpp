@@ -25,7 +25,9 @@
 
 #include <QThread>
 
+#include "page_dialogs.hpp"
 #include "render_worker.hpp"
+#include <QPlainTextEdit>
 
 #include "leht/context.hpp"
 #include "leht/document.hpp"
@@ -152,6 +154,16 @@ QString writeSlowPageTree(const QString& path, int pages) {
 }
 
 QImage grabView(MainWindow& w) { return w.centralWidget()->grab().toImage(); }
+
+/// With LEHT_SMOKE_SHOTS=DIR, saves what the test sees as DIR/NAME.png: a way
+/// to look at new UI without a display. Does nothing otherwise.
+void shot(QWidget* w, const char* name) {
+    const QString dir = qEnvironmentVariable("LEHT_SMOKE_SHOTS");
+    if (!dir.isEmpty()) {
+        w->grab().save(dir + QStringLiteral("/") + QString::fromLatin1(name) +
+                       QStringLiteral(".png"));
+    }
+}
 
 long inkSamples(const QImage& img) {
     long ink = 0;
@@ -659,6 +671,187 @@ int main(int argc, char** argv) {
             check(false, "printed PDF opens cleanly");
             std::printf("      open error: %s\n", e.what());
         }
+    }
+
+    // --- Moving, free text, watermark and crop options (M1) ------------------
+    {
+        QTemporaryDir tmp;
+        const QString copy = tmp.filePath(QStringLiteral("move me.pdf"));
+        QFile::copy(QString::fromStdString(doc), copy);
+        window.openPath(copy);
+        pump(1500);
+        view->setZoom(1.0);
+        view->verticalScrollBar()->setValue(0);
+        view->horizontalScrollBar()->setValue(0);
+        pump(500);
+
+        QVector<AnnotRow> rows;
+        const auto listed = QObject::connect(worker, &RenderWorker::annotationsReady, &window,
+                                             [&rows](const QVector<AnnotRow>& r) { rows = r; });
+        const auto freeText = [&rows]() -> AnnotRow {
+            for (const AnnotRow& r : rows) {
+                if (r.type == QStringLiteral("FreeText")) {
+                    return r;
+                }
+            }
+            return {};
+        };
+        QWidget* vp = view->viewport();
+        auto mouse = [&](QEvent::Type type, QPoint at, Qt::MouseButtons held) {
+            QMouseEvent e(type, QPointF(at), vp->mapToGlobal(QPointF(at)), Qt::LeftButton, held,
+                          Qt::NoModifier);
+            QApplication::sendEvent(vp, &e);
+        };
+        auto drag = [&](QPoint from, QPoint to) {
+            mouse(QEvent::MouseButtonPress, from, Qt::LeftButton);
+            for (int i = 1; i <= 8; ++i) {
+                mouse(QEvent::MouseMove, from + (to - from) * i / 8, Qt::LeftButton);
+            }
+            mouse(QEvent::MouseButtonRelease, to, Qt::NoButton);
+        };
+        auto ctrlEnter = [](QWidget* w) {
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::ControlModifier);
+            QApplication::sendEvent(w, &press);
+        };
+
+        // Text tool: a click opens an editor on the page; Ctrl+Enter writes it.
+        check(view->setTool(PageView::Tool::Text), "the text tool is available");
+        const QPoint at(160, 120);
+        mouse(QEvent::MouseButtonPress, at, Qt::LeftButton);
+        mouse(QEvent::MouseButtonRelease, at, Qt::NoButton);
+        QPlainTextEdit* editor = view->textEditor();
+        check(editor != nullptr, "a click with the text tool opens an editor");
+        if (editor != nullptr) {
+            editor->insertPlainText(QStringLiteral("Smoke text"));
+            shot(&window, "m1-text-editor");
+            ctrlEnter(editor);
+        }
+        pump(1500);
+        check(view->textEditor() == nullptr, "Ctrl+Enter closes the editor");
+        AnnotRow ft = freeText();
+        check(ft.id > 0 && ft.contents == QStringLiteral("Smoke text"),
+              "the typed text is a free-text annotation");
+        check(ft.movable && ft.resizable && ft.fontSize == 12, "and it can be moved and resized");
+
+        // Move tool: drag it by its body...
+        check(view->setTool(PageView::Tool::Move), "the move tool is available");
+        const QRectF before = ft.rect;
+        mouse(QEvent::MouseButtonPress, at + QPoint(20, 10), Qt::LeftButton);
+        for (int i = 1; i <= 8; ++i) {
+            mouse(QEvent::MouseMove, at + QPoint(20, 10) + QPoint(100, 150) * i / 8,
+                  Qt::LeftButton);
+        }
+        shot(&window, "m1-move-dragging");
+        mouse(QEvent::MouseButtonRelease, at + QPoint(120, 160), Qt::NoButton);
+        pump(1500);
+        shot(&window, "m1-move-selected");
+        ft = freeText();
+        check(view->selectedAnnotation() == ft.id, "a click selects it");
+        check(std::abs(ft.rect.left() - (before.left() + 100)) < 2 &&
+                  std::abs(ft.rect.top() - (before.top() + 150)) < 2,
+              "dragging it moves it by as much");
+        // ...and by its bottom-right handle.
+        const QPoint corner = at + QPoint(100, 150) +
+                              QPoint(static_cast<int>(before.width()),
+                                     static_cast<int>(before.height()));
+        drag(corner, corner + QPoint(80, 40));
+        pump(1500);
+        ft = freeText();
+        check(std::abs(ft.rect.width() - (before.width() + 80)) < 3 &&
+                  std::abs(ft.rect.height() - (before.height() + 40)) < 3,
+              "dragging a handle resizes it");
+
+        // Double-click (here: the API it uses) edits the words in place.
+        check(view->editFreeText(ft.id) && view->textEditor() != nullptr,
+              "free text opens for editing in place");
+        if (QPlainTextEdit* e = view->textEditor()) {
+            check(e->toPlainText() == QStringLiteral("Smoke text"), "with its current words");
+            e->setPlainText(QStringLiteral("Changed words"));
+            ctrlEnter(e);
+        }
+        pump(1500);
+        check(freeText().contents == QStringLiteral("Changed words"), "new words are saved");
+
+        // Delete removes the selection; undo brings it back.
+        vp->setFocus();
+        (void)view->setTool(PageView::Tool::Move);
+        const QPoint inside = at + QPoint(130, 170);
+        mouse(QEvent::MouseButtonPress, inside, Qt::LeftButton);
+        mouse(QEvent::MouseButtonRelease, inside, Qt::NoButton);
+        QKeyEvent del(QEvent::KeyPress, Qt::Key_Delete, Qt::NoModifier);
+        QApplication::sendEvent(view, &del);
+        pump(1500);
+        check(freeText().id == 0, "Delete removes the selected annotation");
+        QMetaObject::invokeMethod(worker, "undo", Qt::QueuedConnection);
+        pump(2000);
+        QMetaObject::invokeMethod(worker, "listAnnotations", Qt::QueuedConnection);
+        pump(800);
+        check(freeText().contents == QStringLiteral("Changed words"),
+              "undo brings it back, moved, resized and rewritten");
+        (void)view->setTool(PageView::Tool::Select);
+
+        // Watermark with options, one page; a crop box and per-edge margins.
+        leht::ops::WatermarkOptions mark;
+        mark.text = "SMOKEMARK";
+        mark.angle = 0;
+        mark.font_size = 30;
+        mark.opacity = 0.5F;
+        mark.color[0] = 0.8F;
+        QMetaObject::invokeMethod(worker, [=] { worker->addWatermark(QStringLiteral("2"), mark); },
+                                  Qt::QueuedConnection);
+        pump(1500);
+        const QSizeF page3 = view->pageSizePoints(2);
+        QMetaObject::invokeMethod(worker,
+                                  [=] { worker->cropBox(QStringLiteral("3"),
+                                                        QRectF(50, 60, 300, 400)); },
+                                  Qt::QueuedConnection);
+        pump(1500);
+        check(view->pageSizePoints(2) == QSizeF(300, 400) && page3 != QSizeF(300, 400),
+              "a crop box on page 3 makes it that size");
+        const QSizeF page4 = view->pageSizePoints(3);
+        QMetaObject::invokeMethod(worker,
+                                  [=] { worker->cropMargins(QStringLiteral("4"),
+                                                            leht::ops::Margins{10, 20, 30, 40}); },
+                                  Qt::QueuedConnection);
+        pump(1500);
+        check(view->pageSizePoints(3) == QSizeF(page4.width() - 40, page4.height() - 60),
+              "per-edge margins on page 4 trim each edge");
+        check(view->pageSizePoints(0) == view->pageSizePoints(4), "other pages are untouched");
+
+        check(window.save(), "the M1 edits save");
+        pump(2000);
+        try {
+            leht::Context ctx;
+            leht::Document saved = leht::Document::open(ctx, copy.toStdString());
+            check(leht::TextPage(ctx, saved, 1).search("SMOKEMARK").size() == 1 &&
+                      leht::TextPage(ctx, saved, 0).search("SMOKEMARK").empty(),
+                  "the watermark is on page 2 only");
+            bool rewritten = false;
+            for (const auto& a : leht::ops::list_annotations(ctx, saved)) {
+                rewritten = rewritten || (a.type == "FreeText" && a.contents == "Changed words");
+            }
+            check(rewritten, "the saved file has the moved, rewritten free text");
+        } catch (const leht::Error&) {
+            check(false, "the M1 file opens");
+        }
+
+        // The dialogs build, preview, and give back what they show.
+        {
+            WatermarkDialog wd(&window, view->pageImage(0), view->pageSizePoints(0),
+                               view->pageCount());
+            check(!wd.options().text.empty() && wd.options().opacity > 0,
+                  "the watermark dialog offers a watermark");
+            wd.show();
+            pump(200);
+            shot(&wd, "m1-watermark-dialog");
+            CropMarginsDialog cd(&window, view->pageCount());
+            cd.show();
+            pump(200);
+            shot(&cd, "m1-crop-dialog");
+            check(cd.margins().left == 36 && cd.margins().bottom == 36 && cd.pages().isEmpty(),
+                  "the crop dialog starts at half an inch on every page");
+        }
+        QObject::disconnect(listed);
     }
 
     // --- Editing (M4b) -----------------------------------------------------

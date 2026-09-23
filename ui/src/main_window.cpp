@@ -8,6 +8,7 @@
 #include <QTreeWidgetItem>
 
 #include "page_view.hpp"
+#include "page_dialogs.hpp"
 #include "render_worker.hpp"
 
 #include "leht/ops/forms.hpp"
@@ -170,6 +171,34 @@ MainWindow::MainWindow() {
         startSigning(page, box);
     });
     connect(worker_, &RenderWorker::signaturesReady, this, &MainWindow::onSignaturesReady);
+    connect(view_, &PageView::moveRequested, this, [this](int id, QRectF to) {
+        onWorker([=](RenderWorker* w) { w->moveAnnotation(id, to); });
+    });
+    connect(view_, &PageView::freeTextRequested, this,
+            [this](int page, QRectF box, QString text, double size, QColor color) {
+        onWorker([=](RenderWorker* w) { w->addFreeText(page, box, text, size, color); });
+    });
+    connect(view_, &PageView::annotationTextRequested, this, [this](int id, QString text) {
+        onWorker([=](RenderWorker* w) { w->setAnnotationText(id, text); });
+    });
+    connect(view_, &PageView::noteEditRequested, this, [this](int id, QString current) {
+        bool ok = false;
+        const QString text = QInputDialog::getMultiLineText(this, tr("Note"), tr("Note text:"),
+                                                            current, &ok);
+        if (ok && text != current) {
+            if (text.trimmed().isEmpty()) {
+                onWorker([=](RenderWorker* w) { w->deleteAnnotation(id); });
+            } else {
+                onWorker([=](RenderWorker* w) { w->setAnnotationText(id, text); });
+            }
+        }
+    });
+    connect(view_, &PageView::cropBoxRequested, this, [this](int page, QRectF box) {
+        const QString pages = askCropPages(this, page, view_->pageCount());
+        if (!pages.isNull()) {
+            onWorker([=](RenderWorker* w) { w->cropBox(pages, box); });
+        }
+    });
     connect(view_, &PageView::eraseRequested, this, [this](int id) {
         onWorker([=](RenderWorker* w) { w->deleteAnnotation(id); });
     });
@@ -385,13 +414,20 @@ void MainWindow::buildEditActions() {
         const char* tip;
         PageView::Tool tool;
     } kTools[] = {
-        {"Select", "Select and copy text", PageView::Tool::Select},
+        {"Select", "Select and copy text; double-click text you added to edit it",
+         PageView::Tool::Select},
+        {"Move", "Click an annotation to select it: drag it to move, drag a handle to "
+                 "resize, arrows to nudge, Delete to remove", PageView::Tool::Move},
         {"Highlight", "Drag across text to highlight it", PageView::Tool::Highlight},
         {"Note", "Click to add a sticky note", PageView::Tool::Note},
+        {"Text", "Drag a box (or click) and type; Ctrl+Enter or click away to finish, "
+                 "Esc to cancel", PageView::Tool::Text},
         {"Draw", "Draw freehand", PageView::Tool::Ink},
         {"Redact", "Drag a box: everything under it is removed from the file, "
                    "not just covered", PageView::Tool::Redact},
         {"Erase", "Click an annotation to delete it", PageView::Tool::Erase},
+        {"Crop", "Drag the box to keep: the rest of the page is hidden, not removed",
+         PageView::Tool::Crop},
         {"Sign", "Drag a box to place a signature there", PageView::Tool::Sign},
     };
     for (const auto& t : kTools) {
@@ -422,11 +458,13 @@ void MainWindow::buildEditActions() {
     });
     QAction* watermark = menu->addAction(tr("Watermark…"));
     connect(watermark, &QAction::triggered, this, [this] {
-        bool ok = false;
-        const QString text = QInputDialog::getText(this, tr("Watermark"), tr("Text to stamp on every page:"),
-                                                   QLineEdit::Normal, tr("DRAFT"), &ok);
-        if (ok && !text.isEmpty()) {
-            onWorker([=](RenderWorker* w) { w->addWatermark(text); });
+        const int page = std::max(0, view_->currentPage());
+        WatermarkDialog dialog(this, view_->pageImage(page), view_->pageSizePoints(page),
+                               view_->pageCount());
+        if (dialog.exec() == QDialog::Accepted) {
+            const QString pages = dialog.pages();
+            const leht::ops::WatermarkOptions options = dialog.options();
+            onWorker([=](RenderWorker* w) { w->addWatermark(pages, options); });
         }
     });
     menu->addSeparator();
@@ -445,14 +483,11 @@ void MainWindow::buildEditActions() {
     menu->addSeparator();
     QAction* crop = menu->addAction(tr("Crop Margins…"));
     connect(crop, &QAction::triggered, this, [this] {
-        bool ok = false;
-        const double points = QInputDialog::getDouble(
-            this, tr("Crop margins"),
-            tr("Points to trim from every edge of every page.\n"
-               "Cropping hides content; it stays in the file. Use Redact to remove it."),
-            36.0, 0.0, 1000.0, 1, &ok);
-        if (ok && points > 0) {
-            onWorker([=](RenderWorker* w) { w->cropMargins(points); });
+        CropMarginsDialog dialog(this, view_->pageCount());
+        if (dialog.exec() == QDialog::Accepted) {
+            const QString pages = dialog.pages();
+            const leht::ops::Margins margins = dialog.margins();
+            onWorker([=](RenderWorker* w) { w->cropMargins(pages, margins); });
         }
     });
     more->setMenu(menu);

@@ -133,8 +133,17 @@ public slots:
     void redactText(QString needle);
     void deleteAnnotation(int id);
     void setFieldValue(QString name, QString value);
-    void addWatermark(QString text);
-    void cropMargins(double points);
+    /// Moves annotation `id` so its bounds become `to` (see ops::move_annotation).
+    void moveAnnotation(int id, QRectF to);
+    /// Free text written in `box`, at `size` points in `color`.
+    void addFreeText(int page, QRectF box, QString text, double size, QColor color);
+    /// New words for a free-text annotation or a note.
+    void setAnnotationText(int id, QString text);
+    /// `pages` is a page-range spec; empty means every page.
+    void addWatermark(QString pages, leht::ops::WatermarkOptions options);
+    void cropMargins(QString pages, leht::ops::Margins margins);
+    /// Keeps only `box` of each page in `pages`: hides the rest (see ops::crop).
+    void cropBox(QString pages, QRectF box);
 
     void undo();
     void redo();

@@ -6,8 +6,10 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPaintEvent>
 #include <QPen>
+#include <QPlainTextEdit>
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QWheelEvent>
@@ -34,6 +36,9 @@ void PageView::setPages(const QVector<QSize>& baseSizes) {
 }
 
 void PageView::clear() {
+    cancelEditor();
+    selectedAnnot_ = 0;
+    grip_ = Grip::None;
     baseSizes_.clear();
     rendered_.clear();
     requested_.clear();
@@ -85,6 +90,7 @@ void PageView::relayout() {
     horizontalScrollBar()->setPageStep(vp.width());
     verticalScrollBar()->setRange(0, std::max(0, contentH - vp.height()));
     verticalScrollBar()->setPageStep(vp.height());
+    placeEditor();
 }
 
 void PageView::setZoom(double zoom) {
@@ -166,6 +172,42 @@ void PageView::firstPage() { goToPage(0); }
 void PageView::lastPage() { goToPage(pageCount() - 1); }
 
 void PageView::keyPressEvent(QKeyEvent* event) {
+    // The Move tool's selection: Delete removes it, arrows nudge it.
+    if (tool_ == Tool::Move && selectedAnnot_ != 0) {
+        const AnnotRow* a = annotById(selectedAnnot_);
+        const double step = (event->modifiers() & Qt::ShiftModifier) ? 10.0 : 1.0;
+        QPointF by;
+        switch (event->key()) {
+            case Qt::Key_Delete:
+            case Qt::Key_Backspace:
+                emit eraseRequested(std::exchange(selectedAnnot_, 0));
+                viewport()->update();
+                event->accept();
+                return;
+            case Qt::Key_Escape:
+                selectedAnnot_ = 0;
+                viewport()->update();
+                event->accept();
+                return;
+            case Qt::Key_Left:  by = {-step, 0}; break;
+            case Qt::Key_Right: by = {step, 0}; break;
+            case Qt::Key_Up:    by = {0, -step}; break;
+            case Qt::Key_Down:  by = {0, step}; break;
+            default: break;
+        }
+        if (a != nullptr && !by.isNull()) {
+            const QRectF to = a->rect.normalized().translated(by);
+            for (AnnotRow& row : annotations_) {
+                if (row.id == a->id) {
+                    row.rect = to;  // shown there at once; the worker confirms
+                }
+            }
+            emit moveRequested(selectedAnnot_, to);
+            viewport()->update();
+            event->accept();
+            return;
+        }
+    }
     switch (event->key()) {
         case Qt::Key_PageDown:
         case Qt::Key_Space:
@@ -395,12 +437,16 @@ bool PageView::setTool(Tool tool) {
         tool_ = Tool::Select;
         return false;
     }
+    commitEditor();
     tool_ = tool;
     highlightWhenSettled_ = false;
     dragPage_ = -1;
     stroke_.clear();
+    selectedAnnot_ = 0;
+    grip_ = Grip::None;
     viewport()->setCursor(tool == Tool::Select ? Qt::IBeamCursor
                           : tool == Tool::Erase ? Qt::PointingHandCursor
+                          : tool == Tool::Move  ? Qt::ArrowCursor
                                                 : Qt::CrossCursor);
     viewport()->update();
     return true;
@@ -408,7 +454,208 @@ bool PageView::setTool(Tool tool) {
 
 void PageView::setAnnotations(const QVector<AnnotRow>& rows) {
     annotations_ = rows;
+    if (annotById(selectedAnnot_) == nullptr) {
+        selectedAnnot_ = 0;  // deleted, or undone out of existence
+    }
     viewport()->update();
+}
+
+const AnnotRow* PageView::annotAt(int page, QPointF base) const {
+    // Topmost first: the last annotation drawn is the one on top.
+    for (auto it = annotations_.crbegin(); it != annotations_.crend(); ++it) {
+        if (it->page == page && it->rect.normalized().adjusted(-2, -2, 2, 2).contains(base)) {
+            return &*it;
+        }
+    }
+    return nullptr;
+}
+
+const AnnotRow* PageView::annotById(int id) const {
+    for (const AnnotRow& a : annotations_) {
+        if (id != 0 && a.id == id) {
+            return &a;
+        }
+    }
+    return nullptr;
+}
+
+QPointF PageView::toBase(int page, QPoint pos) const {
+    const QRect pr = pageRectInViewport(page);
+    return QPointF((pos.x() - pr.x()) / zoom_, (pos.y() - pr.y()) / zoom_);
+}
+
+PageView::Grip PageView::gripAt(QPoint pos) const {
+    const AnnotRow* a = annotById(selectedAnnot_);
+    if (a == nullptr) {
+        return Grip::None;
+    }
+    const QRectF r = baseRectToViewport(a->page, a->rect.normalized());
+    if (a->resizable) {
+        const struct {
+            QPointF at;
+            Grip grip;
+        } handles[] = {
+            {r.topLeft(), Grip::NW},     {r.topRight(), Grip::NE},
+            {r.bottomLeft(), Grip::SW},  {r.bottomRight(), Grip::SE},
+            {QPointF(r.center().x(), r.top()), Grip::N},
+            {QPointF(r.center().x(), r.bottom()), Grip::S},
+            {QPointF(r.left(), r.center().y()), Grip::W},
+            {QPointF(r.right(), r.center().y()), Grip::E},
+        };
+        for (const auto& h : handles) {
+            if (std::abs(h.at.x() - pos.x()) <= 6 && std::abs(h.at.y() - pos.y()) <= 6) {
+                return h.grip;
+            }
+        }
+    }
+    return r.adjusted(-2, -2, 2, 2).contains(pos) ? Grip::Body : Grip::None;
+}
+
+QRectF PageView::dragged(QPointF base, bool keepAspect) const {
+    const QPointF d = base - grabBase_;
+    if (grip_ == Grip::Body) {
+        return moveFrom_.translated(d);
+    }
+    QRectF r = moveFrom_;
+    const bool left = grip_ == Grip::W || grip_ == Grip::NW || grip_ == Grip::SW;
+    const bool right = grip_ == Grip::E || grip_ == Grip::NE || grip_ == Grip::SE;
+    const bool top = grip_ == Grip::N || grip_ == Grip::NW || grip_ == Grip::NE;
+    const bool bottom = grip_ == Grip::S || grip_ == Grip::SW || grip_ == Grip::SE;
+    constexpr double kMin = 4;  // points: never collapse to nothing
+    if (left) {
+        r.setLeft(std::min(r.left() + d.x(), r.right() - kMin));
+    }
+    if (right) {
+        r.setRight(std::max(r.right() + d.x(), r.left() + kMin));
+    }
+    if (top) {
+        r.setTop(std::min(r.top() + d.y(), r.bottom() - kMin));
+    }
+    if (bottom) {
+        r.setBottom(std::max(r.bottom() + d.y(), r.top() + kMin));
+    }
+    if (keepAspect && (left || right) && (top || bottom) && moveFrom_.height() > 0) {
+        // A corner of a picture: follow the wider change, keep the shape.
+        const double aspect = moveFrom_.width() / moveFrom_.height();
+        const double w = std::max(r.width(), r.height() * aspect);
+        const double h = w / aspect;
+        if (left) {
+            r.setLeft(r.right() - w);
+        } else {
+            r.setRight(r.left() + w);
+        }
+        if (top) {
+            r.setTop(r.bottom() - h);
+        } else {
+            r.setBottom(r.top() + h);
+        }
+    }
+    return r;
+}
+
+bool PageView::editFreeText(int id) {
+    const AnnotRow* a = annotById(id);
+    if (a == nullptr || a->type != QStringLiteral("FreeText")) {
+        return false;
+    }
+    openEditor(a->page, a->rect.normalized(), a->id, a->contents,
+               a->fontSize > 0 ? a->fontSize : 12, a->color.isValid() ? a->color : Qt::black);
+    return true;
+}
+
+QPlainTextEdit* PageView::textEditor() const {
+    return editor_ != nullptr && editor_->isVisible() ? editor_ : nullptr;
+}
+
+void PageView::openEditor(int page, QRectF box, int annotId, const QString& text, double size,
+                          QColor color) {
+    commitEditor();  // one at a time
+    if (editor_ == nullptr) {
+        editor_ = new QPlainTextEdit(viewport());
+        editor_->setObjectName(QStringLiteral("freeTextEditor"));
+        editor_->installEventFilter(this);
+        editor_->setFrameStyle(QFrame::Box | QFrame::Plain);
+        editor_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+        editor_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        editor_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    }
+    editorPage_ = page;
+    editorBox_ = box.normalized();
+    editorAnnot_ = annotId;
+    editorOriginal_ = text;
+    editorSize_ = size;
+    editorColor_ = color;
+    QPalette pal = editor_->palette();
+    pal.setColor(QPalette::Base, Qt::white);
+    pal.setColor(QPalette::Text, color);
+    editor_->setPalette(pal);
+    editor_->setPlainText(text);
+    editor_->moveCursor(QTextCursor::End);
+    placeEditor();
+    editor_->show();
+    editor_->setFocus();
+}
+
+void PageView::placeEditor() {
+    if (editor_ == nullptr || editorPage_ < 0 || editorPage_ >= baseSizes_.size()) {
+        return;
+    }
+    // Helvetica is what the annotation is drawn in; the editor shows the text
+    // at the size it will have on the page, at this zoom.
+    QFont font(QStringLiteral("Helvetica"));
+    font.setStyleHint(QFont::SansSerif);
+    font.setPixelSize(std::max(6, static_cast<int>(std::lround(editorSize_ * zoom_))));
+    editor_->setFont(font);
+    editor_->setGeometry(baseRectToViewport(editorPage_, editorBox_).toAlignedRect());
+}
+
+void PageView::commitEditor() {
+    if (editor_ == nullptr || !editor_->isVisible()) {
+        return;
+    }
+    const QString text = editor_->toPlainText();
+    editor_->hide();
+    setFocus();
+    if (editorAnnot_ == 0) {
+        if (!text.trimmed().isEmpty()) {
+            emit freeTextRequested(editorPage_, editorBox_, text, editorSize_, editorColor_);
+        }
+    } else if (text != editorOriginal_) {
+        if (text.trimmed().isEmpty()) {
+            emit eraseRequested(editorAnnot_);  // emptied: it goes
+        } else {
+            emit annotationTextRequested(editorAnnot_, text);
+        }
+    }
+    editorAnnot_ = 0;
+}
+
+void PageView::cancelEditor() {
+    if (editor_ != nullptr && editor_->isVisible()) {
+        editor_->hide();
+        setFocus();
+    }
+    editorAnnot_ = 0;
+}
+
+bool PageView::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == editor_) {
+        if (event->type() == QEvent::KeyPress) {
+            const auto* key = static_cast<QKeyEvent*>(event);
+            if (key->key() == Qt::Key_Escape) {
+                cancelEditor();
+                return true;
+            }
+            if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) &&
+                (key->modifiers() & Qt::ControlModifier)) {
+                commitEditor();
+                return true;
+            }
+        } else if (event->type() == QEvent::FocusOut) {
+            commitEditor();
+        }
+    }
+    return QAbstractScrollArea::eventFilter(watched, event);
 }
 
 void PageView::onDocumentEdited(QVector<int> pages, bool allPages, QVector<QSize> baseSizes) {
@@ -462,13 +709,54 @@ void PageView::mousePressEvent(QMouseEvent* event) {
         emit noteRequested(page, base);
         return;
     case Tool::Erase:
-        // Topmost first: the last annotation drawn is the one on top.
-        for (auto it = annotations_.crbegin(); it != annotations_.crend(); ++it) {
-            if (it->page == page && it->rect.normalized().adjusted(-2, -2, 2, 2).contains(base)) {
-                emit eraseRequested(it->id);
+        if (const AnnotRow* a = annotAt(page, base)) {
+            emit eraseRequested(a->id);
+        }
+        return;
+    case Tool::Move: {
+        Grip grip = gripAt(event->pos());
+        const AnnotRow* a = nullptr;
+        if (grip == Grip::None || grip == Grip::Body) {
+            a = annotAt(page, base);
+            if (a == nullptr) {
+                selectedAnnot_ = 0;
+                viewport()->update();
                 return;
             }
+            if (!a->movable) {
+                const bool markup = a->type == QStringLiteral("Highlight") ||
+                                    a->type == QStringLiteral("Underline") ||
+                                    a->type == QStringLiteral("StrikeOut") ||
+                                    a->type == QStringLiteral("Squiggly");
+                emit toolRefused(markup ? tr("Highlights follow their text: delete this one "
+                                             "and highlight the text again instead.")
+                                        : tr("This kind of annotation cannot be moved."));
+                selectedAnnot_ = 0;
+                viewport()->update();
+                return;
+            }
+            selectedAnnot_ = a->id;
+            grip = Grip::Body;
+        } else {
+            a = annotById(selectedAnnot_);
         }
+        grip_ = grip;
+        dragPage_ = a->page;
+        moveFrom_ = moveTo_ = a->rect.normalized();
+        grabBase_ = toBase(a->page, event->pos());
+        viewport()->update();
+        return;
+    }
+    case Tool::Text:
+        if (const AnnotRow* a = annotAt(page, base);
+            a != nullptr && a->type == QStringLiteral("FreeText")) {
+            (void)editFreeText(a->id);
+            return;
+        }
+        commitEditor();
+        dragPage_ = page;
+        dragStart_ = dragNow_ = base;
+        viewport()->update();
         return;
     case Tool::Ink:
         dragPage_ = page;
@@ -477,6 +765,7 @@ void PageView::mousePressEvent(QMouseEvent* event) {
         return;
     case Tool::Redact:
     case Tool::Sign:
+    case Tool::Crop:
         dragPage_ = page;
         dragStart_ = dragNow_ = base;
         viewport()->update();
@@ -498,6 +787,15 @@ void PageView::mouseMoveEvent(QMouseEvent* event) {
     int page = -1;
     QPointF base;
     viewportToPage(event->pos(), page, base);
+    if (dragPage_ >= 0 && tool_ == Tool::Move && grip_ != Grip::None) {
+        // A move may leave the page it is on; the worker keeps what it is given.
+        const AnnotRow* a = annotById(selectedAnnot_);
+        const bool keepAspect = a != nullptr && a->type == QStringLiteral("Stamp") &&
+                                !(event->modifiers() & Qt::ShiftModifier);
+        moveTo_ = dragged(toBase(dragPage_, event->pos()), keepAspect);
+        viewport()->update();
+        return;
+    }
     if (dragPage_ >= 0) {
         // Ink and redaction stay on the page they started on.
         if (page != dragPage_) {
@@ -525,15 +823,40 @@ void PageView::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) {
         return;
     }
+    if (dragPage_ >= 0 && tool_ == Tool::Move && grip_ != Grip::None) {
+        dragPage_ = -1;
+        grip_ = Grip::None;
+        const QRectF d(moveTo_.topLeft() - moveFrom_.topLeft(),
+                       moveTo_.bottomRight() - moveFrom_.bottomRight());
+        if (std::abs(d.left()) + std::abs(d.top()) + std::abs(d.width()) +
+                std::abs(d.height()) > 0.2) {
+            for (AnnotRow& row : annotations_) {
+                if (row.id == selectedAnnot_) {
+                    row.rect = moveTo_;  // shown there at once; the worker confirms
+                }
+            }
+            emit moveRequested(selectedAnnot_, moveTo_);
+        }
+        viewport()->update();
+        return;
+    }
     if (dragPage_ >= 0) {
         const int page = std::exchange(dragPage_, -1);
         if (tool_ == Tool::Ink && stroke_.size() >= 2) {
             emit inkRequested(page, {stroke_});
-        } else if (tool_ == Tool::Redact || tool_ == Tool::Sign) {
+        } else if (tool_ == Tool::Text) {
+            QRectF box = QRectF(dragStart_, dragNow_).normalized();
+            if (box.width() < 12 || box.height() < 12) {
+                box = QRectF(dragStart_, QSizeF(220, 12 * 2.4));  // a click: a line's worth
+            }
+            openEditor(page, box, 0, QString(), 12, Qt::black);
+        } else if (tool_ == Tool::Redact || tool_ == Tool::Sign || tool_ == Tool::Crop) {
             const QRectF box = QRectF(dragStart_, dragNow_).normalized();
             if (box.width() >= 2 && box.height() >= 2) {
                 if (tool_ == Tool::Redact) {
                     emit redactRequested(page, box);
+                } else if (tool_ == Tool::Crop) {
+                    emit cropBoxRequested(page, box);
                 } else {
                     emit signRequested(page, box);
                 }
@@ -558,6 +881,22 @@ void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
     viewportToPage(event->pos(), page, base);
     if (page < 0) {
         return;
+    }
+    // Double-clicking text on the page edits it: free text in place, a note
+    // in a dialog.
+    if (tool_ == Tool::Select || tool_ == Tool::Move || tool_ == Tool::Text) {
+        if (const AnnotRow* a = annotAt(page, base)) {
+            if (a->type == QStringLiteral("FreeText")) {
+                selecting_ = false;
+                (void)editFreeText(a->id);
+                return;
+            }
+            if (a->type == QStringLiteral("Text")) {
+                selecting_ = false;
+                emit noteEditRequested(a->id, a->contents);
+                return;
+            }
+        }
     }
     if (tool_ != Tool::Select && tool_ != Tool::Highlight) {
         return;
@@ -655,6 +994,48 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
             }
         }
 
+        // Move tool: what can move, faintly; the selection, with its handles;
+        // and during a drag, the annotation's own pixels where it is going.
+        if (tool_ == Tool::Move) {
+            for (const AnnotRow& a : annotations_) {
+                if (a.page == p && a.movable && a.id != selectedAnnot_) {
+                    painter.setPen(QPen(QColor(90, 90, 90, 120), 1, Qt::DotLine));
+                    painter.drawRect(baseRectToViewport(p, a.rect.normalized()));
+                }
+            }
+            const AnnotRow* sel = annotById(selectedAnnot_);
+            if (sel != nullptr && sel->page == p) {
+                const bool dragging = grip_ != Grip::None && dragPage_ == p;
+                const QRectF shown =
+                    baseRectToViewport(p, dragging ? moveTo_ : sel->rect.normalized());
+                if (dragging && it != rendered_.constEnd() && !it->image.isNull() &&
+                    it->zoom > 0) {
+                    const QRectF source(moveFrom_.x() * it->zoom, moveFrom_.y() * it->zoom,
+                                        moveFrom_.width() * it->zoom,
+                                        moveFrom_.height() * it->zoom);
+                    painter.setOpacity(0.85);
+                    painter.drawImage(shown, it->image, source);
+                    painter.setOpacity(1.0);
+                    painter.setPen(QPen(QColor(90, 90, 90), 1, Qt::DashLine));
+                    painter.drawRect(baseRectToViewport(p, moveFrom_));
+                }
+                painter.setPen(QPen(QColor(30, 90, 200), 1.5));
+                painter.drawRect(shown);
+                if (sel->resizable) {
+                    painter.setBrush(Qt::white);
+                    for (const QPointF& h :
+                         {shown.topLeft(), shown.topRight(), shown.bottomLeft(),
+                          shown.bottomRight(), QPointF(shown.center().x(), shown.top()),
+                          QPointF(shown.center().x(), shown.bottom()),
+                          QPointF(shown.left(), shown.center().y()),
+                          QPointF(shown.right(), shown.center().y())}) {
+                        painter.drawRect(QRectF(h - QPointF(3.5, 3.5), QSizeF(7, 7)));
+                    }
+                    painter.setBrush(Qt::NoBrush);
+                }
+            }
+        }
+
         // A stroke or redaction box being drawn.
         if (dragPage_ == p && tool_ == Tool::Ink && stroke_.size() >= 2) {
             QPolygonF shown;
@@ -664,6 +1045,19 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
             }
             painter.setPen(QPen(QColor(30, 60, 200), std::max(1.0, 1.5 * zoom_)));
             painter.drawPolyline(shown);
+        }
+        if (dragPage_ == p && (tool_ == Tool::Text || tool_ == Tool::Crop)) {
+            const QRectF box = baseRectToViewport(p, QRectF(dragStart_, dragNow_).normalized());
+            if (tool_ == Tool::Crop) {
+                // What will be hidden is dimmed; what is kept stays clear.
+                QPainterPath outside;
+                outside.addRect(pageRect);
+                QPainterPath kept;
+                kept.addRect(box);
+                painter.fillPath(outside.subtracted(kept), QColor(0, 0, 0, 70));
+            }
+            painter.setPen(QPen(QColor(40, 40, 40), 1, Qt::DashLine));
+            painter.drawRect(box);
         }
         if (dragPage_ == p && (tool_ == Tool::Redact || tool_ == Tool::Sign)) {
             const QRectF box = baseRectToViewport(p, QRectF(dragStart_, dragNow_).normalized());
@@ -699,6 +1093,7 @@ void PageView::resizeEvent(QResizeEvent* /*event*/) {
 }
 
 void PageView::scrollContentsBy(int /*dx*/, int /*dy*/) {
+    placeEditor();
     requestVisible();
     viewport()->update();
 }

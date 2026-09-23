@@ -2,6 +2,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QColor>
 #include <QMetaType>
 #include <QPolygonF>
 #include <QRectF>
@@ -20,6 +21,10 @@ struct AnnotRow {
     QString type;
     QRectF rect;
     QString contents;
+    bool movable = false;    ///< the Move tool may pick it up
+    bool resizable = false;  ///< ...and resize it (a note's icon cannot be)
+    double fontSize = 0;     ///< free text: its size in points
+    QColor color;            ///< free text: its colour
 };
 
 /// One form field, for the Form panel. `type` is a leht::ops::FieldType cast

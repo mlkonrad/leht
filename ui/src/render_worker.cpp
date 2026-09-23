@@ -855,18 +855,69 @@ void RenderWorker::setFieldValue(QString name, QString value) {
     applyEdit(e);
 }
 
-void RenderWorker::addWatermark(QString text) {
+namespace {
+
+leht::Rect toRect(const QRectF& box) {
+    const QRectF b = box.normalized();
+    return {static_cast<float>(b.left()), static_cast<float>(b.top()),
+            static_cast<float>(b.right()), static_cast<float>(b.bottom())};
+}
+
+}  // namespace
+
+void RenderWorker::moveAnnotation(int id, QRectF to) {
     ipc::Edit e;
-    e.kind = ipc::Edit::Kind::Watermark;
-    e.watermark.text = text.toStdString();
+    e.kind = ipc::Edit::Kind::MoveAnnot;
+    e.annot_id = id;
+    e.rects = {toRect(to)};
     applyEdit(e);
 }
 
-void RenderWorker::cropMargins(double points) {
+void RenderWorker::addFreeText(int page, QRectF box, QString text, double size, QColor color) {
+    if (text.trimmed().isEmpty()) {
+        return;
+    }
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::AddAnnot;
+    e.page = page;
+    e.annot.kind = leht::ops::AnnotKind::FreeText;
+    e.annot.rect = toRect(box);
+    e.annot.contents = text.toStdString();
+    e.annot.font_size = static_cast<float>(size);
+    e.annot.line_width = 0;  // text typed on a page, not a framed box
+    setColor(e.annot.color, color);
+    applyEdit(e);
+}
+
+void RenderWorker::setAnnotationText(int id, QString text) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::SetAnnotContents;
+    e.annot_id = id;
+    e.text = text.toStdString();
+    applyEdit(e);
+}
+
+void RenderWorker::addWatermark(QString pages, leht::ops::WatermarkOptions options) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::Watermark;
+    e.pages = pages.toStdString();
+    e.watermark = std::move(options);
+    applyEdit(e);
+}
+
+void RenderWorker::cropMargins(QString pages, leht::ops::Margins margins) {
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::CropMargins;
-    const auto m = static_cast<float>(points);
-    e.margins = {m, m, m, m};
+    e.pages = pages.toStdString();
+    e.margins = margins;
+    applyEdit(e);
+}
+
+void RenderWorker::cropBox(QString pages, QRectF box) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::CropBox;
+    e.pages = pages.toStdString();
+    e.rects = {toRect(box)};
     applyEdit(e);
 }
 
@@ -1205,10 +1256,15 @@ void RenderWorker::listAnnotations() {
     try {
         if (reply && reply->type == ipc::MsgType::AnnotList) {
             for (const leht::ops::AnnotInfo& a : ipc::decode_as<ipc::AnnotList>(*reply).items) {
-                rows.push_back(AnnotRow{a.id, a.page, QString::fromStdString(a.type),
-                                        QRectF(QPointF(a.rect.x0, a.rect.y0),
-                                               QPointF(a.rect.x1, a.rect.y1)),
-                                        QString::fromStdString(a.contents)});
+                AnnotRow row{a.id, a.page, QString::fromStdString(a.type),
+                             QRectF(QPointF(a.rect.x0, a.rect.y0),
+                                    QPointF(a.rect.x1, a.rect.y1)),
+                             QString::fromStdString(a.contents)};
+                row.movable = a.movable;
+                row.resizable = a.resizable;
+                row.fontSize = a.font_size;
+                row.color = QColor::fromRgbF(a.color[0], a.color[1], a.color[2]);
+                rows.push_back(row);
             }
         } else if (reply) {
             (void)ipc::decode_as<ipc::Failed>(*reply);  // not a PDF: no annotations

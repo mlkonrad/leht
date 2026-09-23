@@ -15,6 +15,8 @@
 
 #include "edit_model.hpp"
 
+class QPlainTextEdit;
+
 /// Continuous vertical page view.
 ///
 /// Lays every page out in a single scrolling column at the current zoom, paints
@@ -51,6 +53,10 @@ public:
     void lastPage();
 
     [[nodiscard]] int pageCount() const { return baseSizes_.size(); }
+    /// `page`'s size in points (base coordinates), and its latest rendered
+    /// image (null if none yet): for previews.
+    [[nodiscard]] QSizeF pageSizePoints(int page) const { return baseSizes_.value(page); }
+    [[nodiscard]] QImage pageImage(int page) const { return rendered_.value(page).image; }
     /// The page currently nearest the top of the viewport, 0-based.
     [[nodiscard]] int currentPage() const;
 
@@ -82,15 +88,22 @@ public:
     // --- Editing tools ------------------------------------------------------
     /// What a left-button drag or click does. Every tool but Select works in
     /// base coordinates, so needs the view unrotated (see setTool).
-    enum class Tool { Select, Highlight, Note, Ink, Redact, Erase, Sign };
+    enum class Tool { Select, Highlight, Note, Ink, Redact, Erase, Sign, Move, Text, Crop };
     /// Returns false (and keeps Select) if `tool` needs an unrotated view and
     /// the view is rotated.
     bool setTool(Tool tool);
     [[nodiscard]] Tool tool() const { return tool_; }
 
-    /// The annotations currently on the document, for the Erase tool's hit
-    /// test and outlines.
+    /// The annotations currently on the document, for the Erase and Move
+    /// tools' hit tests and outlines.
     void setAnnotations(const QVector<AnnotRow>& rows);
+    /// The annotation the Move tool has selected; 0 for none.
+    [[nodiscard]] int selectedAnnotation() const { return selectedAnnot_; }
+    /// Opens the in-place text editor on free-text annotation `id` (as a
+    /// double-click does). Returns false if there is no such free text.
+    bool editFreeText(int id);
+    /// The text editor, while it is open; for tests.
+    [[nodiscard]] QPlainTextEdit* textEditor() const;
 
 public slots:
     /// A finished render from the worker. Ignored if the zoom has since changed.
@@ -125,6 +138,16 @@ signals:
     /// A box was dragged with the Sign tool: where a visible signature goes.
     void signRequested(int page, QRectF box);
     void eraseRequested(int annotId);
+    /// The Move tool dropped annotation `annotId` with its bounds now `to`.
+    void moveRequested(int annotId, QRectF to);
+    /// New free text typed with the Text tool.
+    void freeTextRequested(int page, QRectF box, QString text, double size, QColor color);
+    /// Different words for an existing free-text annotation.
+    void annotationTextRequested(int annotId, QString text);
+    /// A sticky note was double-clicked: its text should be edited.
+    void noteEditRequested(int annotId, QString current);
+    /// A box was dragged with the Crop tool: the part of the page to keep.
+    void cropBoxRequested(int page, QRectF box);
     /// A tool could not be used, with the reason, for the status bar.
     void toolRefused(QString reason);
 
@@ -139,6 +162,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     static constexpr int kGap = 12;      // px between pages, at any zoom
@@ -212,6 +236,36 @@ private:
     /// Renders requested before the last edit show the old document; any that
     /// arrive late are dropped rather than shown as current.
     quint64 editFloor_ = 0;
+
+    // Move tool: the selected annotation, and what a drag is doing to it.
+    enum class Grip { None, Body, N, S, E, W, NE, NW, SE, SW };
+    int selectedAnnot_ = 0;
+    Grip grip_ = Grip::None;
+    QRectF moveFrom_;   ///< the annotation's bounds when the drag began, base coords
+    QRectF moveTo_;     ///< where it would go now
+    QPointF grabBase_;  ///< where the drag began
+    // Text tool: the in-place editor over a box on a page.
+    QPlainTextEdit* editor_ = nullptr;
+    int editorPage_ = -1;
+    QRectF editorBox_;
+    int editorAnnot_ = 0;  ///< 0 while typing new free text
+    QString editorOriginal_;
+    double editorSize_ = 12;
+    QColor editorColor_ = Qt::black;
+
+    [[nodiscard]] const AnnotRow* annotAt(int page, QPointF base) const;
+    [[nodiscard]] const AnnotRow* annotById(int id) const;
+    /// Which handle (or the body) of the selected annotation is under `pos`.
+    [[nodiscard]] Grip gripAt(QPoint pos) const;
+    /// `pos` in `page`'s base coordinates, even when it is off the page.
+    [[nodiscard]] QPointF toBase(int page, QPoint pos) const;
+    /// moveFrom_ changed by a drag to `base`.
+    [[nodiscard]] QRectF dragged(QPointF base, bool keepAspect) const;
+    void openEditor(int page, QRectF box, int annotId, const QString& text, double size,
+                    QColor color);
+    void placeEditor();
+    void commitEditor();
+    void cancelEditor();
 
     void emitSelect(int page, QPointF a, QPointF b, int mode);
     /// Turns the settled selection into a highlight request, then clears it.
