@@ -5,11 +5,14 @@
 
 #include "leht/error.hpp"
 
+#include <openssl/bn.h>
+#include <openssl/ec.h>
 #include <openssl/err.h>
 
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -139,6 +142,146 @@ const EVP_MD* digest_for(const Identity& id) {
     return EVP_sha256();
 }
 
+/// DER of the signed attributes as the SET OF they are signed as: each
+/// attribute encoded, then sorted, as DER orders a SET OF.
+Bytes signed_attributes_der(CMS_SignerInfo* si) {
+    std::vector<Bytes> items;
+    for (int i = 0; i < CMS_signed_get_attr_count(si); ++i) {
+        unsigned char* p = nullptr;
+        const int n = i2d_X509_ATTRIBUTE(CMS_signed_get_attr(si, i), &p);
+        if (n <= 0) {
+            fail("cannot encode a signed attribute");
+        }
+        items.emplace_back(p, p + n);
+        OPENSSL_free(p);
+    }
+    // DER compares SET OF members as octet strings, the shorter padded with zeros.
+    std::sort(items.begin(), items.end(), [](const Bytes& a, const Bytes& b) {
+        for (std::size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
+            const unsigned x = i < a.size() ? a[i] : 0;
+            const unsigned y = i < b.size() ? b[i] : 0;
+            if (x != y) {
+                return x < y;
+            }
+        }
+        return false;
+    });
+    std::size_t length = 0;
+    for (const Bytes& item : items) {
+        length += item.size();
+    }
+    Bytes out;
+    out.reserve(length + 6);
+    out.push_back(0x31);  // SET
+    if (length < 0x80) {
+        out.push_back(static_cast<std::uint8_t>(length));
+    } else {
+        int octets = 0;
+        for (std::size_t l = length; l > 0; l >>= 8) {
+            ++octets;
+        }
+        out.push_back(static_cast<std::uint8_t>(0x80 | octets));
+        for (int i = octets - 1; i >= 0; --i) {
+            out.push_back(static_cast<std::uint8_t>((length >> (8 * i)) & 0xFF));
+        }
+    }
+    for (const Bytes& item : items) {
+        out.insert(out.end(), item.begin(), item.end());
+    }
+    return out;
+}
+
+/// What CMS_final_digest does for a key in memory, with a PKCS#11 token
+/// computing the signature value: the signed attributes are completed here,
+/// hashed, and the token signs the hash.
+void sign_on_token(CMS_SignerInfo* si, detail::Token& token, const Identity& identity,
+                   const EVP_MD* md, const Bytes& digest) {
+    if (CMS_signed_add1_attr_by_NID(si, NID_pkcs9_contentType, V_ASN1_OBJECT,
+                                    OBJ_nid2obj(NID_pkcs7_data), -1) != 1 ||
+        CMS_signed_add1_attr_by_NID(si, NID_pkcs9_messageDigest, V_ASN1_OCTET_STRING,
+                                    digest.data(), static_cast<int>(digest.size())) != 1) {
+        fail("cannot add the signed attributes");
+    }
+    const Bytes tbs = signed_attributes_der(si);
+    Bytes hash(static_cast<std::size_t>(EVP_MD_get_size(md)));
+    unsigned int hash_len = 0;
+    if (EVP_Digest(tbs.data(), tbs.size(), hash.data(), &hash_len, md, nullptr) != 1) {
+        fail("digest failed");
+    }
+    hash.resize(hash_len);
+
+    Bytes input = hash;
+    if (identity.key_type() == KeyType::Rsa) {
+        // CKM_RSA_PKCS pads what it is given: hand it the DigestInfo.
+        detail::Ptr<X509_SIG, X509_SIG_free> info{X509_SIG_new()};
+        X509_ALGOR* alg = nullptr;
+        ASN1_OCTET_STRING* value = nullptr;
+        X509_SIG_getm(info.get(), &alg, &value);
+        if (!info || X509_ALGOR_set0(alg, OBJ_nid2obj(EVP_MD_get_type(md)), V_ASN1_NULL,
+                                     nullptr) != 1 ||
+            ASN1_OCTET_STRING_set(value, hash.data(), static_cast<int>(hash.size())) != 1) {
+            fail("cannot build the DigestInfo");
+        }
+        unsigned char* p = nullptr;
+        const int n = i2d_X509_SIG(info.get(), &p);
+        if (n <= 0) {
+            fail("cannot encode the DigestInfo");
+        }
+        input.assign(p, p + n);
+        OPENSSL_free(p);
+    }
+
+    Bytes value = detail::token_sign(token, input);
+    if (identity.key_type() == KeyType::Ec) {
+        // PKCS#11 returns r||s; CMS wants an ECDSA-Sig-Value.
+        if (value.empty() || value.size() % 2 != 0) {
+            throw Error(0, "the token returned a malformed ECDSA signature");
+        }
+        const std::size_t half = value.size() / 2;
+        detail::Ptr<ECDSA_SIG, ECDSA_SIG_free> sig{ECDSA_SIG_new()};
+        BIGNUM* r = BN_bin2bn(value.data(), static_cast<int>(half), nullptr);
+        BIGNUM* s = BN_bin2bn(value.data() + half, static_cast<int>(half), nullptr);
+        if (!sig || r == nullptr || s == nullptr || ECDSA_SIG_set0(sig.get(), r, s) != 1) {
+            BN_free(r);
+            BN_free(s);
+            fail("cannot encode the ECDSA signature");
+        }
+        unsigned char* p = nullptr;
+        const int n = i2d_ECDSA_SIG(sig.get(), &p);
+        if (n <= 0) {
+            fail("cannot encode the ECDSA signature");
+        }
+        value.assign(p, p + n);
+        OPENSSL_free(p);
+    }
+    if (ASN1_STRING_set(CMS_SignerInfo_get0_signature(si), value.data(),
+                        static_cast<int>(value.size())) != 1) {
+        fail("cannot store the signature value");
+    }
+}
+
+/// The finished blob, read back as a verifier will read it, must verify
+/// against the signer's certificate. For a token key this is the only proof
+/// that the attributes signed are the ones encoded and that the key on the
+/// card is the certificate's; for any key it costs a millisecond.
+void self_check(const Bytes& blob, X509* cert) {
+    const unsigned char* p = blob.data();
+    const detail::CmsPtr back{d2i_CMS_ContentInfo(nullptr, &p, static_cast<long>(blob.size()))};
+    STACK_OF(CMS_SignerInfo)* signers = back ? CMS_get0_SignerInfos(back.get()) : nullptr;
+    CMS_SignerInfo* si = signers != nullptr && sk_CMS_SignerInfo_num(signers) == 1
+                             ? sk_CMS_SignerInfo_value(signers, 0)
+                             : nullptr;
+    if (si == nullptr) {
+        fail("the signature just made cannot be read back");
+    }
+    CMS_SignerInfo_set1_signer_cert(si, cert);
+    if (CMS_SignerInfo_verify(si) != 1) {
+        ERR_clear_error();
+        throw Error(0, "the signature just made does not verify against the certificate; the "
+                       "key that signed is not the certificate's key");
+    }
+}
+
 }  // namespace
 
 std::size_t estimate_signature_size(const Identity& identity, const SignOptions& options) {
@@ -184,8 +327,10 @@ SignResult sign_prepared(int fd, const ops::ByteRange& range, const Identity& id
             fail("cannot add a chain certificate");
         }
     }
-    if (CMS_final_digest(cms.get(), digest.data(), static_cast<unsigned>(digest.size()),
-                         nullptr, kFlags) != 1) {
+    if (id.token) {
+        sign_on_token(si, *id.token, identity, md, digest);
+    } else if (CMS_final_digest(cms.get(), digest.data(), static_cast<unsigned>(digest.size()),
+                                nullptr, kFlags) != 1) {
         fail("signing failed");
     }
 
@@ -211,6 +356,7 @@ SignResult sign_prepared(int fd, const ops::ByteRange& range, const Identity& id
     }
     const Bytes blob(der, der + n);
     OPENSSL_free(der);
+    self_check(blob, id.cert.get());
     result.der_size = blob.size();
     if (blob.size() > result.hole_size) {
         throw Error(0, "the signature is " + std::to_string(blob.size()) +

@@ -44,7 +44,9 @@ void preload_algorithms();
 class Secret {
 public:
     Secret() = default;
-    explicit Secret(std::string value) : value_(std::move(value)) {}
+    /// Takes `value` and wipes what the move leaves behind in it. A caller's
+    /// own copy is the caller's to wipe.
+    explicit Secret(std::string value);
     Secret(const Secret&) = delete;
     Secret& operator=(const Secret&) = delete;
     Secret(Secret&& other) noexcept;
@@ -73,18 +75,59 @@ struct CertInfo {
 
 enum class KeyType { Rsa, Ec, Other };
 
+/// A signing key on a PKCS#11 token -- an ID-card through OpenSC, or any
+/// smartcard or HSM -- as list_token_keys() finds it, before any PIN.
+struct TokenKey {
+    std::string uri;          ///< RFC 7512 pkcs11: URI; pass it to Identity::from_pkcs11
+    std::string token_label;  ///< e.g. "ESTEID (PIN2)"
+    std::string key_label;
+    CertInfo cert;
+    /// keyUsage nonRepudiation: a key meant for signatures, not for logging in.
+    /// An Estonian ID card has one of each; this is the PIN2 one.
+    bool non_repudiation = false;
+    bool pinpad = false;         ///< the PIN is entered on the reader, not typed here
+    bool pin_count_low = false;  ///< a wrong PIN has been entered since the last good one
+    bool pin_final_try = false;  ///< one more wrong PIN blocks it
+    bool pin_locked = false;
+};
+
+/// The keys on every token present: each certificate that can sign, with the
+/// token it is on. Tokens come from the PKCS#11 modules p11-kit has registered
+/// (OpenSC registers itself), or from `module_path` alone when given. Signing
+/// keys (nonRepudiation) come first. Needs no PIN, and returns an empty list,
+/// not an error, when there is no reader or no card.
+[[nodiscard]] std::vector<TokenKey> list_token_keys(const std::string& module_path = {});
+
 /// A signing key and its certificate chain.
 ///
-/// PKCS#12 is the one source in M5. The type is not tied to it: OpenSSL 3
-/// providers present a PKCS#11 token key (an ID-card through OpenSC) as the
-/// same kind of key object, so a from_pkcs11() factory is the only thing a
-/// smartcard needs to add. Nothing that uses an Identity changes.
+/// The key is either in memory, read from a PKCS#12 file, or stays on a
+/// PKCS#11 token, which then computes the signature value itself. Nothing that
+/// uses an Identity needs to know which.
 class Identity {
 public:
     /// Reads a .p12/.pfx. Throws leht::Error on a wrong password, a file with
     /// no key or no certificate matching it, or one encrypted with algorithms
     /// only OpenSSL's legacy provider still reads (old RC2-40 exports).
     static Identity from_pkcs12(const Bytes& p12, const Secret& password);
+
+    /// Asked for the PIN once the token is found, with what is known about it:
+    /// whether the reader has a keypad (then the result is not used -- say
+    /// "enter the PIN on the reader" instead) and whether the PIN is close to
+    /// blocking. Throw from it to cancel.
+    using PinSource = std::function<Secret(const TokenKey& key)>;
+
+    /// Logs in to the token `uri` names (a TokenKey::uri) and finds the private
+    /// key there and the certificate with the same CKA_ID. The Identity keeps
+    /// the PIN until it is destroyed, because a signing key may demand it
+    /// again for each signature (CKA_ALWAYS_AUTHENTICATE, as ID-card PIN2 keys
+    /// do). Throws leht::Error with a message meant for the person holding the
+    /// card: a wrong PIN and how close it is to blocking, a blocked PIN, no
+    /// such key, a card that was removed.
+    static Identity from_pkcs11(const std::string& uri, const PinSource& pin,
+                                const std::string& module_path = {});
+
+    /// True when the key is on a token; false for a PKCS#12 key.
+    [[nodiscard]] bool on_token() const;
 
     Identity(Identity&&) noexcept;
     Identity& operator=(Identity&&) noexcept;

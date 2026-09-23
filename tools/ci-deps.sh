@@ -11,8 +11,8 @@ set -eu
 # satisfies the dependency; nothing here plays video.
 dnf -y install --setopt=install_weak_deps=False --disablerepo=fedora-cisco-openh264 \
     gcc-c++ make cmake ninja-build curl binutils \
-    mupdf-devel openssl-devel libseccomp-devel \
+    mupdf-devel openssl-devel libseccomp-devel p11-kit-devel \
     qt6-qtbase-devel qt6-qtsvg \
-    mupdf qpdf ghostscript poppler-utils openssl \
+    mupdf qpdf ghostscript poppler-utils openssl softhsm \
     python3 python3-pillow python3-numpy diffutils \
     desktop-file-utils libasan libubsan

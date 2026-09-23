@@ -78,10 +78,14 @@ constexpr const char* kUsage =
     "  form      FILE                         list form fields and their values\n"
     "  fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]\n"
     "            fill form fields; never runs the document's JavaScript\n"
-    "  sign      FILE -o OUT.pdf --p12 ID.p12 [--field NAME | --box P:X0,Y0,X1,Y1]\n"
-    "            [--image IMG] [--name N] [--reason R] [--location L] [--tsa URL]\n"
-    "            sign with a PKCS#12 key (PAdES); the original bytes are kept and\n"
-    "            the signature appended, so earlier signatures stay valid\n"
+    "  sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto)\n"
+    "            [--field NAME | --box P:X0,Y0,X1,Y1] [--image IMG] [--name N]\n"
+    "            [--reason R] [--location L] [--tsa URL]\n"
+    "            sign with a key in a PKCS#12 file or on an ID card (PAdES); the\n"
+    "            original bytes are kept and the signature appended, so earlier\n"
+    "            signatures stay valid\n"
+    "  keys      [--pkcs11-module LIB]        list the signing keys on ID cards and\n"
+    "            other PKCS#11 tokens, with the URI --pkcs11 takes\n"
     "  verify    FILE [--trust CA.pem]... [--json]\n"
     "            check every signature: exits 4 broken, 5 untrusted, 6 changed after\n"
     "\n"
@@ -115,8 +119,13 @@ constexpr const char* kUsage =
     "  --stamp-image P:IMG:BOX  a picture stamped on page P -- a scanned signature,\n"
     "                 say. It is a picture, not a digital signature; use sign for that\n"
     "  --p12 FILE     PKCS#12 (.p12/.pfx) holding the signing key and certificate\n"
-    "  --password-fd N  read its password from this descriptor, one line. Without\n"
-    "                 it, leht asks on the terminal. NEVER pass a password as an\n"
+    "  --pkcs11 URI   sign with this key on an ID card or other token (from leht\n"
+    "                 keys); auto takes the card's one signing key. For an Estonian\n"
+    "                 ID card that is the PIN2 key\n"
+    "  --pkcs11-module LIB  use this PKCS#11 library instead of the ones the system\n"
+    "                 has registered with p11-kit (OpenSC registers itself)\n"
+    "  --password-fd N  read the password or PIN from this descriptor, one line.\n"
+    "                 Without it, leht asks on the terminal. NEVER pass one as an\n"
     "                 argument: /proc shows it to every process on the machine\n"
     "  --field NAME   sign this existing, empty signature field\n"
     "  --box P:BOX    place a new visible signature here; otherwise it is invisible\n"
@@ -214,7 +223,7 @@ bool takes_value(const std::string& name) {
         "--angle", "--size", "--color", "--highlight", "--underline", "--strike",
         "--note", "--stamp", "--delete", "--author",
         "--p12", "--password-fd", "--field", "--image", "--name", "--reason",
-        "--location", "--tsa", "--trust", "--stamp-image"};
+        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -774,11 +783,11 @@ std::vector<std::uint8_t> read_bytes(const std::string& path, std::size_t limit)
     return out;
 }
 
-/// The PKCS#12 password. NEVER from the command line: an argument is visible
-/// in /proc to every process on the machine, and lands in shell history.
-/// From --password-fd when given (one line), else prompted on the terminal
-/// with echo off, else read from stdin when that is a pipe.
-leht::crypto::Secret read_password(const Args& args) {
+/// The PKCS#12 password or a card's PIN. NEVER from the command line: an
+/// argument is visible in /proc to every process on the machine, and lands in
+/// shell history. From --password-fd when given (one line), else prompted on
+/// the terminal with echo off, else read from stdin when that is a pipe.
+leht::crypto::Secret read_password(const Args& args, const char* prompt = "PKCS#12 password: ") {
     std::string line;
     const std::string fd_flag = args.flag("--password-fd");
     int fd = -1;
@@ -812,7 +821,7 @@ leht::crypto::Secret read_password(const Args& args) {
         quiet.c_lflag &= static_cast<tcflag_t>(~ECHO);
         (void)::tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet);
     }
-    std::fputs("PKCS#12 password: ", stderr);
+    std::fputs(prompt, stderr);
     std::getline(std::cin, line);
     if (tty) {
         (void)::tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
@@ -875,13 +884,111 @@ leht::ops::Appearance appearance_from(const Args& args) {
     return a;
 }
 
+std::string day(std::int64_t t) {
+    const auto tt = static_cast<std::time_t>(t);
+    std::tm tm{};
+    gmtime_r(&tt, &tm);
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
+    return buf;
+}
+
+std::string pin_state(const leht::crypto::TokenKey& k) {
+    if (k.pin_locked) {
+        return "blocked -- unblock it with the PUK";
+    }
+    if (k.pin_final_try) {
+        return "one more wrong PIN blocks it";
+    }
+    if (k.pin_count_low) {
+        return "entered wrongly before";
+    }
+    return k.pinpad ? "entered on the reader" : "typed here";
+}
+
+int cmd_keys(const Args& args) {
+    const auto keys = leht::crypto::list_token_keys(args.flag("--pkcs11-module"));
+    if (keys.empty()) {
+        std::fprintf(stderr, "leht: no signing keys found. Is a card reader connected, and the "
+                             "card in it?\n");
+        return 1;
+    }
+    for (const leht::crypto::TokenKey& k : keys) {
+        std::printf("%s\n", k.uri.c_str());
+        std::printf("  token:   %s\n", k.token_label.c_str());
+        std::printf("  signer:  %s\n", k.cert.subject.c_str());
+        std::printf("  use:     %s\n", k.non_repudiation ? "signing (nonRepudiation)"
+                                                         : "authentication, not signing");
+        std::printf("  valid:   %s to %s\n", day(k.cert.not_before).c_str(),
+                    day(k.cert.not_after).c_str());
+        std::printf("  PIN:     %s\n", pin_state(k).c_str());
+    }
+    return 0;
+}
+
+/// `--pkcs11 auto`: the card's signing key, when there is exactly one.
+std::string auto_key_uri(const std::string& module) {
+    const auto keys = leht::crypto::list_token_keys(module);
+    std::vector<const leht::crypto::TokenKey*> signing;
+    for (const auto& k : keys) {
+        if (k.non_repudiation) {
+            signing.push_back(&k);
+        }
+    }
+    if (signing.empty() && keys.size() == 1) {
+        signing.push_back(&keys.front());
+    }
+    if (signing.size() == 1) {
+        return signing.front()->uri;
+    }
+    if (keys.empty()) {
+        throw leht::Error(0, "no signing keys found. Is a card reader connected, and the card "
+                             "in it?");
+    }
+    throw leht::Error(0, "more than one key could sign; choose one with --pkcs11 URI (leht keys "
+                         "lists them)");
+}
+
+leht::crypto::Identity identity_from(const Args& args) {
+    const std::string p12_path = args.flag("--p12");
+    std::string uri = args.flag("--pkcs11");
+    if (p12_path.empty() == uri.empty()) {
+        throw leht::Error(0, "sign needs either --p12 ID.p12 (a key in a file) or --pkcs11 "
+                             "URI|auto (a key on an ID card or other token)");
+    }
+    // The key and its password never leave this process.
+    if (!p12_path.empty()) {
+        return leht::crypto::Identity::from_pkcs12(read_bytes(p12_path, std::size_t{16} << 20),
+                                                   read_password(args));
+    }
+    const std::string module = args.flag("--pkcs11-module");
+    if (uri == "auto") {
+        uri = auto_key_uri(module);
+    }
+    return leht::crypto::Identity::from_pkcs11(
+        uri,
+        [&](const leht::crypto::TokenKey& k) {
+            const std::string who =
+                k.cert.common_name.empty() ? k.token_label : k.cert.common_name;
+            if (k.pin_final_try) {
+                std::fprintf(stderr, "leht: careful: one more wrong PIN blocks it\n");
+            } else if (k.pin_count_low) {
+                std::fprintf(stderr, "leht: note: a wrong PIN was entered before\n");
+            }
+            if (k.pinpad) {
+                std::fprintf(stderr, "Enter the PIN for %s (%s) on the reader's keypad.\n",
+                             who.c_str(), k.token_label.c_str());
+                return leht::crypto::Secret{};
+            }
+            const std::string prompt = "PIN for " + who + " (" + k.token_label + "): ";
+            return read_password(args, prompt.c_str());
+        },
+        module);
+}
+
 int cmd_sign(const leht::Context& ctx, const Args& args) {
     const std::string input = require_input(args);
     const std::string output = require_output(args);
-    const std::string p12_path = args.flag("--p12");
-    if (p12_path.empty()) {
-        throw leht::Error(0, "sign needs --p12 ID.p12 (the signing key and certificate)");
-    }
     std::error_code ec;
     if (fs::exists(output, ec) && fs::equivalent(input, output, ec)) {
         throw leht::Error(0, "sign will not write over its input; give -o another path");
@@ -910,9 +1017,7 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
     leht::crypto::SignOptions options;
     options.tsa_url = args.flag("--tsa");
 
-    // The key and its password never leave this process.
-    const leht::crypto::Identity identity = leht::crypto::Identity::from_pkcs12(
-        read_bytes(p12_path, std::size_t{16} << 20), read_password(args));
+    const leht::crypto::Identity identity = identity_from(args);
     const leht::crypto::CertInfo cert = identity.certificate();
     if (request.name.empty()) {
         request.name = cert.common_name;
@@ -1382,6 +1487,7 @@ int main(int argc, char** argv) {
         if (cmd == "fill")     { return cmd_fill(ctx, args); }
         if (cmd == "sign")     { return cmd_sign(ctx, args); }
         if (cmd == "verify")   { return cmd_verify(ctx, args); }
+        if (cmd == "keys")     { return cmd_keys(args); }
 
         std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
         std::fputs(kUsage, stderr);

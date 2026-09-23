@@ -70,14 +70,27 @@ struct TimestampToken {
 TimestampToken request_timestamp(const std::string& url, const unsigned char* data,
                                  std::size_t size, int timeout_seconds);
 
+/// A logged-in session on a PKCS#11 token, holding one private key. Defined
+/// in pkcs11.cpp; the rest of leht::crypto only asks it to sign.
+struct Token;
+
+/// Signs `input` on the token: the hash itself for an EC key (CKM_ECDSA),
+/// a DER DigestInfo for an RSA key (CKM_RSA_PKCS). Returns what the card
+/// returns -- raw r||s for ECDSA. Logs in again first when the key demands it
+/// per signature. Throws leht::Error.
+Bytes token_sign(Token& token, const Bytes& input);
+
 }  // namespace leht::crypto::detail
 
 namespace leht::crypto {
 
 struct Identity::Impl {
+    /// The private key for PKCS#12. For a token key, only the certificate's
+    /// public key: the private one never leaves the card, and `token` signs.
     detail::PkeyPtr key;
     detail::X509Ptr cert;
     std::vector<detail::X509Ptr> extra;  ///< the rest of the chain, as the file had it
+    std::shared_ptr<detail::Token> token;  ///< set when the key is on a PKCS#11 token
 };
 
 struct TrustStore::Impl {

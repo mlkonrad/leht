@@ -105,7 +105,11 @@ bool pdfsig_says_valid(const std::string& path, int signatures) {
         std::fprintf(stderr, "  SKIP pdfsig (poppler-utils not installed)\n");
         return true;
     }
-    const std::string out = leht::test::capture("pdfsig '" + path + "' 2>&1");
+    // SoftHSM kept out, as in test_pkcs11.cpp: NSS loads it through p11-kit
+    // when it is installed, and where it can start (as root, in CI) pdfsig
+    // crashes before printing a word.
+    const std::string out = leht::test::capture(
+        "SOFTHSM2_CONF=/nonexistent/softhsm2.conf pdfsig '" + path + "' 2>&1");
     int valid = 0;
     for (std::size_t at = 0; (at = out.find("Signature is Valid", at)) != std::string::npos;
          ++at) {

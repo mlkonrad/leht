@@ -196,20 +196,36 @@ void preload_algorithms() {
 
 // --- Secret ----------------------------------------------------------------
 
+namespace {
+
+/// Wipes the whole buffer, not just size() bytes: a short string lives in the
+/// object itself (the small-string buffer), and moving it only copies those
+/// bytes out -- the original keeps them, with its size set to zero. PINs are
+/// always that short.
+void wipe(std::string& s) noexcept {
+    s.resize(s.capacity());  // within capacity: never reallocates
+    OPENSSL_cleanse(s.data(), s.size());
+    s.clear();
+}
+
+}  // namespace
+
+Secret::Secret(std::string value) : value_(std::move(value)) { wipe(value); }
+
 Secret::Secret(Secret&& other) noexcept : value_(std::move(other.value_)) {
-    other.value_.clear();
+    wipe(other.value_);
 }
 
 Secret& Secret::operator=(Secret&& other) noexcept {
     if (this != &other) {
-        OPENSSL_cleanse(value_.data(), value_.size());
+        wipe(value_);
         value_ = std::move(other.value_);
-        other.value_.clear();
+        wipe(other.value_);
     }
     return *this;
 }
 
-Secret::~Secret() { OPENSSL_cleanse(value_.data(), value_.size()); }
+Secret::~Secret() { wipe(value_); }
 
 // --- TrustStore ------------------------------------------------------------
 

@@ -35,7 +35,8 @@ exec podman run --rm --init -i \
         fi
         cmake -S /src -B /build -G Ninja -DLEHT_BUILD_UI=ON $ARGS $root
         cmake --build /build
-        LEHT_BIN=/build/cli/leht /src/tests/corpus/generate.sh
+        LSAN_OPTIONS=suppressions=/src/tests/lsan.supp ASAN_OPTIONS=fast_unwind_on_malloc=0 \
+            LEHT_BIN=/build/cli/leht /src/tests/corpus/generate.sh
         ctest --test-dir /build --output-on-failure -j "$(nproc)" --timeout 600
         if [ "$JOB" = asan ]; then /src/tools/fuzz-smoke.sh /build; fi
     '
