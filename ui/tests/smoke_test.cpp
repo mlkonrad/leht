@@ -35,6 +35,11 @@
 #include "leht/text.hpp"
 #include "leht/crypto/crypto.hpp"
 #include "test_pki.hpp"
+#include "softhsm.hpp"
+#include "sign_dialog.hpp"
+#include <QComboBox>
+#include <QMessageBox>
+#include <QRadioButton>
 
 #include <QSettings>
 #include <QToolBar>
@@ -843,6 +848,77 @@ int main(int argc, char** argv) {
                 check(signedDoc.signature_count() == 1, "the file on disk carries one signature");
             } catch (const leht::Error&) {
                 check(false, "the signed file opens");
+            }
+
+            // The same through a card: SoftHSM standing in for an ID card.
+            if (leht::test::SoftHsm::available()) {
+                leht::test::SoftHsm hsm;
+                hsm.add(pki.ec, pki.ec_cert, "\x03", "Signature", true);
+                qputenv("LEHT_PKCS11_MODULE", leht::test::SoftHsm::module().c_str());
+
+                // The dialog, in card mode, finds the key on its own.
+                {
+                    SignDialog dialog(&window, 0, QRectF(), QString());
+                    QRadioButton* card = nullptr;
+                    for (auto* b : dialog.findChildren<QRadioButton*>()) {
+                        if (b->text() == QStringLiteral("ID card or token")) {
+                            card = b;
+                        }
+                    }
+                    check(card != nullptr, "the sign dialog offers an ID card");
+                    if (card != nullptr) {
+                        card->setChecked(true);
+                    }
+                    const auto combos = dialog.findChildren<QComboBox*>();
+                    check(combos.size() == 1 && combos.first()->count() == 1 &&
+                              combos.first()->itemText(0).contains(QStringLiteral("Jaan Tamm")),
+                          "the dialog lists the card's signing key");
+                }
+
+                QString failure;
+                const auto failed = QObject::connect(
+                    worker, &RenderWorker::saveFailed, &window,
+                    [&failure](const QString& message) { failure = message; });
+                const auto keys = leht::crypto::list_token_keys(leht::test::SoftHsm::module());
+                check(keys.size() == 1, "the card holds one key");
+                SignSpec cardSpec;
+                cardSpec.pkcs11Uri = QString::fromStdString(keys.empty() ? "" : keys[0].uri);
+                cardSpec.password = QStringLiteral("9999");
+                // The window shows the failure in a modal box; close it, as
+                // the person would, or the test waits forever.
+                QTimer closer;
+                QObject::connect(&closer, &QTimer::timeout, [] {
+                    if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                        box->accept();
+                    }
+                });
+                closer.start(50);
+                QMetaObject::invokeMethod(worker, "signDocument", Qt::QueuedConnection,
+                                          Q_ARG(QString, toSign), Q_ARG(SignSpec, cardSpec));
+                pump(2000);
+                closer.stop();
+                check(failure.startsWith(QStringLiteral("The PIN is wrong.")),
+                      "a wrong card PIN is reported as such");
+
+                reported.clear();
+                cardSpec.password = QString::fromLatin1(leht::test::SoftHsm::kPin);
+                QMetaObject::invokeMethod(worker, "signDocument", Qt::QueuedConnection,
+                                          Q_ARG(QString, toSign), Q_ARG(SignSpec, cardSpec));
+                pump(3000);
+                check(reported.size() == 2, "the card's signature is added as the second");
+                if (reported.size() == 2) {
+                    check(reported[0].intact && reported[1].intact,
+                          "both signatures verify, the file one and the card one");
+                    check(reported[1].signerCommonName == QStringLiteral("Jaan Tamm"),
+                          "the panel names the card's signer");
+                    check(!reported[0].changedAfterSigning ||
+                              reported[0].laterSignatureCoversChanges,
+                          "the card signature covers what came after the first");
+                }
+                QObject::disconnect(failed);
+                qunsetenv("LEHT_PKCS11_MODULE");
+            } else {
+                std::printf("  skip  card signing (SoftHSM2 not installed)\n");
             }
             settings.remove(QStringLiteral("trustedCertificates"));
         } else {

@@ -49,9 +49,10 @@ if(LEHT_BUILD_TESTS)
     target_link_libraries(ui_smoke_test PRIVATE leht_viewer_lib)
     target_compile_definitions(ui_smoke_test PRIVATE
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
-    # The test PKI is generated at run time; no key is committed.
+    # The test PKI is generated at run time; no key is committed. p11-kit is
+    # for SoftHSM, which stands in for an ID card.
     find_package(OpenSSL 3.2 REQUIRED COMPONENTS Crypto)
-    target_link_libraries(ui_smoke_test PRIVATE OpenSSL::Crypto)
+    target_link_libraries(ui_smoke_test PRIVATE OpenSSL::Crypto PkgConfig::P11KIT)
     target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/tests)
     add_test(NAME ui_smoke COMMAND ui_smoke_test)
     # Offscreen so it runs headless in CI; skips (77) if even that is unavailable.

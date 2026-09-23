@@ -1003,22 +1003,35 @@ void RenderWorker::signDocument(QString path, SignSpec spec) {
     }
 
     // The key is read and used here, in the trusted process. It is never sent
-    // anywhere, and the password is wiped when this function returns.
+    // anywhere, and the password or PIN is wiped when this function returns.
+    // A card key never leaves the card at all; the card signs.
     std::unique_ptr<leht::crypto::Identity> identity;
     leht::crypto::SignOptions options;
     options.tsa_url = spec.tsaUrl.trimmed().toStdString();
     try {
-        QFile key(spec.p12Path);
-        if (!key.open(QIODevice::ReadOnly)) {
-            emit saveFailed(tr("Cannot read %1: %2").arg(spec.p12Path, key.errorString()));
-            return;
+        if (!spec.pkcs11Uri.isEmpty()) {
+            leht::crypto::Secret pin{spec.password.toStdString()};
+            spec.password.fill(QChar(0));
+            spec.password.clear();
+            identity = std::make_unique<leht::crypto::Identity>(
+                leht::crypto::Identity::from_pkcs11(
+                    spec.pkcs11Uri.toStdString(),
+                    [&pin](const leht::crypto::TokenKey&) { return std::move(pin); },
+                    pkcs11Module().toStdString()));
+        } else {
+            QFile key(spec.p12Path);
+            if (!key.open(QIODevice::ReadOnly)) {
+                emit saveFailed(tr("Cannot read %1: %2").arg(spec.p12Path, key.errorString()));
+                return;
+            }
+            const QByteArray bytes = key.readAll();
+            leht::crypto::Secret password{spec.password.toStdString()};
+            spec.password.fill(QChar(0));
+            spec.password.clear();
+            identity = std::make_unique<leht::crypto::Identity>(
+                leht::crypto::Identity::from_pkcs12(
+                    leht::crypto::Bytes(bytes.begin(), bytes.end()), password));
         }
-        const QByteArray bytes = key.readAll();
-        leht::crypto::Secret password{spec.password.toStdString()};
-        spec.password.fill(QChar(0));
-        spec.password.clear();
-        identity = std::make_unique<leht::crypto::Identity>(leht::crypto::Identity::from_pkcs12(
-            leht::crypto::Bytes(bytes.begin(), bytes.end()), password));
     } catch (const leht::Error& e) {
         emit saveFailed(QString::fromUtf8(e.what()));
         return;

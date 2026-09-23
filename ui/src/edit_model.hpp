@@ -9,6 +9,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <QtGlobal>
 
 /// One annotation, as the GUI sees it: for hit-testing (erasing) and listing.
 /// Built on the worker thread from ops::AnnotInfo. Geometry is in base
@@ -36,7 +37,8 @@ struct FieldRow {
 /// signing request: it is handed to leht::crypto and wiped there.
 struct SignSpec {
     QString p12Path;
-    QString password;
+    QString pkcs11Uri;  ///< a key on an ID card or token instead of p12Path
+    QString password;   ///< the .p12 password, or the card's PIN
     QString field;      ///< an existing empty signature field, or empty
     int page = 0;
     QRectF rect;        ///< empty means an invisible signature
@@ -47,6 +49,12 @@ struct SignSpec {
     QSizeF strokesCanvas;
     QStringList lines;                ///< text shown beside the graphic
 };
+
+/// The PKCS#11 library to find card keys in. Empty means every module the
+/// system has registered with p11-kit, which includes OpenSC; the environment
+/// variable LEHT_PKCS11_MODULE names one that did not register itself (and
+/// the tests' SoftHSM).
+inline QString pkcs11Module() { return qEnvironmentVariable("LEHT_PKCS11_MODULE"); }
 
 /// One signature, as the panel shows it: strings and flags only. The viewer
 /// never parses a certificate or a CMS blob -- the worker did that, inside its

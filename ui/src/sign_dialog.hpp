@@ -8,7 +8,13 @@
 
 #include "edit_model.hpp"
 
+#include "leht/crypto/crypto.hpp"
+
+#include <vector>
+
 class QCheckBox;
+class QComboBox;
+class QFormLayout;
 class QLabel;
 class QLineEdit;
 class QRadioButton;
@@ -59,14 +65,29 @@ public:
 private:
     void browseForKey();
     void browseForImage();
+    void showSource();
+    /// Asks the system's PKCS#11 modules which keys the cards in the readers
+    /// hold. Blocks for as long as the readers take, under a busy cursor.
+    void refreshCardKeys();
+    void showCardKey();
 
     int page_;
     QRectF rect_;
     QString field_;
     QByteArray image_;
 
+    QFormLayout* form_ = nullptr;
+    QRadioButton* fromFile_ = nullptr;
+    QRadioButton* fromCard_ = nullptr;
+    QWidget* keyFileRow_ = nullptr;
     QLineEdit* keyPath_ = nullptr;
     QLineEdit* password_ = nullptr;
+    QWidget* cardRow_ = nullptr;
+    QComboBox* cardKeys_ = nullptr;
+    QLineEdit* pin_ = nullptr;
+    QLabel* cardStatus_ = nullptr;
+    std::vector<leht::crypto::TokenKey> tokenKeys_;
+    bool cardKeysLoaded_ = false;
     QLineEdit* name_ = nullptr;
     QLineEdit* reason_ = nullptr;
     QLineEdit* location_ = nullptr;

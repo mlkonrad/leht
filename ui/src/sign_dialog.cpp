@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "sign_dialog.hpp"
 
+#include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QFile>
@@ -79,19 +81,55 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
 
     auto* layout = new QVBoxLayout(this);
     auto* form = new QFormLayout;
+    form_ = form;
+
+    // Where the key is: a .p12 file, or a card that keeps it.
+    fromFile_ = new QRadioButton(tr("Key file"), this);
+    fromCard_ = new QRadioButton(tr("ID card or token"), this);
+    auto* sourceRow = new QHBoxLayout;
+    sourceRow->addWidget(fromFile_);
+    sourceRow->addWidget(fromCard_);
+    sourceRow->addStretch();
+    form->addRow(tr("Sign with:"), sourceRow);
 
     keyPath_ = new QLineEdit(settings.value(QStringLiteral("signing/lastKey")).toString(), this);
     keyPath_->setPlaceholderText(tr("a .p12 or .pfx file"));
     auto* browse = new QPushButton(tr("Browse…"), this);
     connect(browse, &QPushButton::clicked, this, &SignDialog::browseForKey);
-    auto* keyRow = new QHBoxLayout;
+    keyFileRow_ = new QWidget(this);
+    auto* keyRow = new QHBoxLayout(keyFileRow_);
+    keyRow->setContentsMargins(0, 0, 0, 0);
     keyRow->addWidget(keyPath_);
     keyRow->addWidget(browse);
-    form->addRow(tr("Key file:"), keyRow);
+    form->addRow(tr("Key file:"), keyFileRow_);
 
     password_ = new QLineEdit(this);
     password_->setEchoMode(QLineEdit::Password);
     form->addRow(tr("Password:"), password_);
+
+    cardKeys_ = new QComboBox(this);
+    cardKeys_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    auto* refresh = new QPushButton(tr("Refresh"), this);
+    refresh->setToolTip(tr("Look for cards again, after inserting one"));
+    connect(refresh, &QPushButton::clicked, this, &SignDialog::refreshCardKeys);
+    cardRow_ = new QWidget(this);
+    auto* cardRow = new QHBoxLayout(cardRow_);
+    cardRow->setContentsMargins(0, 0, 0, 0);
+    cardRow->addWidget(cardKeys_, 1);
+    cardRow->addWidget(refresh);
+    form->addRow(tr("Key:"), cardRow_);
+    pin_ = new QLineEdit(this);
+    pin_->setEchoMode(QLineEdit::Password);
+    form->addRow(tr("PIN:"), pin_);
+    cardStatus_ = new QLabel(this);
+    cardStatus_->setWordWrap(true);
+    form->addRow(QString(), cardStatus_);
+    connect(cardKeys_, &QComboBox::currentIndexChanged, this, &SignDialog::showCardKey);
+
+    const bool card = settings.value(QStringLiteral("signing/source")).toString() ==
+                      QStringLiteral("card");
+    (card ? fromCard_ : fromFile_)->setChecked(true);
+    connect(fromCard_, &QRadioButton::toggled, this, &SignDialog::showSource);
 
     name_ = new QLineEdit(settings.value(QStringLiteral("signing/name")).toString(), this);
     name_->setPlaceholderText(tr("taken from the certificate when left empty"));
@@ -180,10 +218,29 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Ok)->setText(tr("Sign"));
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        if (keyPath_->text().trimmed().isEmpty()) {
+        const int at = cardKeys_->currentIndex();
+        const leht::crypto::TokenKey* key =
+            at >= 0 && at < static_cast<int>(tokenKeys_.size()) ? &tokenKeys_[at] : nullptr;
+        if (fromFile_->isChecked() && keyPath_->text().trimmed().isEmpty()) {
             QMessageBox::warning(this, tr("Sign document"),
                                  tr("Choose the .p12 file holding your signing key."));
             return;
+        }
+        if (fromCard_->isChecked()) {
+            if (key == nullptr) {
+                QMessageBox::warning(this, tr("Sign document"),
+                                     tr("No card key is chosen. Insert the card, press "
+                                        "Refresh, and choose its signing key."));
+                return;
+            }
+            if (key->pin_locked) {
+                QMessageBox::warning(this, tr("Sign document"), cardStatus_->text());
+                return;
+            }
+            if (!key->pinpad && pin_->text().isEmpty()) {
+                QMessageBox::warning(this, tr("Sign document"), tr("Enter the card's PIN."));
+                return;
+            }
         }
         if (useTsa_->isChecked() && tsa_->text().trimmed().isEmpty()) {
             QMessageBox::warning(this, tr("Sign document"),
@@ -192,6 +249,11 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
             return;
         }
         QSettings saved;
+        saved.setValue(QStringLiteral("signing/source"),
+                       fromCard_->isChecked() ? QStringLiteral("card") : QStringLiteral("file"));
+        if (key != nullptr) {
+            saved.setValue(QStringLiteral("signing/lastCardKey"), QString::fromStdString(key->uri));
+        }
         saved.setValue(QStringLiteral("signing/lastKey"), keyPath_->text());
         saved.setValue(QStringLiteral("signing/name"), name_->text());
         saved.setValue(QStringLiteral("signing/location"), location_->text());
@@ -201,6 +263,103 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
+    showSource();
+}
+
+void SignDialog::showSource() {
+    const bool card = fromCard_->isChecked();
+    form_->setRowVisible(keyFileRow_, !card);
+    form_->setRowVisible(password_, !card);
+    form_->setRowVisible(cardRow_, card);
+    form_->setRowVisible(cardStatus_, card);
+    if (card && !cardKeysLoaded_) {
+        refreshCardKeys();  // shows the PIN row as the chosen key needs
+    } else {
+        form_->setRowVisible(pin_, card);
+        if (card) {
+            showCardKey();
+        }
+    }
+}
+
+void SignDialog::refreshCardKeys() {
+    const QString previous = cardKeys_->currentIndex() >= 0 && !tokenKeys_.empty()
+                                 ? QString::fromStdString(
+                                       tokenKeys_[static_cast<std::size_t>(
+                                                      cardKeys_->currentIndex())]
+                                           .uri)
+                                 : QSettings().value(QStringLiteral("signing/lastCardKey"))
+                                       .toString();
+    QString problem;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    try {
+        tokenKeys_ = leht::crypto::list_token_keys(pkcs11Module().toStdString());
+    } catch (const std::exception& e) {
+        tokenKeys_.clear();
+        problem = QString::fromUtf8(e.what());
+    }
+    QApplication::restoreOverrideCursor();
+    cardKeysLoaded_ = true;
+
+    const QSignalBlocker quiet(cardKeys_);
+    cardKeys_->clear();
+    int select = 0;
+    for (std::size_t i = 0; i < tokenKeys_.size(); ++i) {
+        const leht::crypto::TokenKey& k = tokenKeys_[i];
+        const QString who = QString::fromStdString(
+            k.cert.common_name.empty() ? k.cert.subject : k.cert.common_name);
+        const QString use = k.non_repudiation ? tr("signing") : tr("authentication");
+        cardKeys_->addItem(tr("%1 — %2 (%3)")
+                               .arg(who, QString::fromStdString(k.token_label), use));
+        if (QString::fromStdString(k.uri) == previous) {
+            select = static_cast<int>(i);
+        }
+    }
+    cardKeys_->setEnabled(!tokenKeys_.empty());
+    if (tokenKeys_.empty()) {
+        cardKeys_->addItem(tr("No card found"));
+        cardKeys_->setCurrentIndex(-1);
+        cardStatus_->setText(problem.isEmpty()
+                                 ? tr("No card found. Is the reader connected and the card in "
+                                      "it? Then press Refresh.")
+                                 : problem);
+        form_->setRowVisible(pin_, false);
+        return;
+    }
+    cardKeys_->setCurrentIndex(select);
+    showCardKey();
+}
+
+void SignDialog::showCardKey() {
+    const int at = cardKeys_->currentIndex();
+    if (at < 0 || at >= static_cast<int>(tokenKeys_.size())) {
+        return;
+    }
+    const leht::crypto::TokenKey& k = tokenKeys_[static_cast<std::size_t>(at)];
+    // An Estonian card has two PINs; name the one this key wants.
+    const bool pin2 = k.token_label.find("PIN2") != std::string::npos;
+    if (auto* label = qobject_cast<QLabel*>(form_->labelForField(pin_))) {
+        label->setText(pin2 ? tr("PIN2:") : tr("PIN:"));
+    }
+    form_->setRowVisible(pin_, fromCard_->isChecked() && !k.pinpad);
+
+    QStringList notes;
+    if (k.pin_locked) {
+        notes << tr("This PIN is blocked after too many wrong tries. Unblock it with the PUK "
+                    "code (for an Estonian ID card, in DigiDoc4).");
+    } else if (k.pin_final_try) {
+        notes << tr("Careful: one more wrong PIN blocks it.");
+    } else if (k.pin_count_low) {
+        notes << tr("A wrong PIN was entered before.");
+    }
+    if (k.pinpad && !k.pin_locked) {
+        notes << tr("Enter the PIN on the reader's keypad when it asks.");
+    }
+    if (!k.non_repudiation) {
+        notes << tr("This key is for logging in, not for signing documents; the card's "
+                    "signing key is the better choice.");
+    }
+    cardStatus_->setText(notes.join(QLatin1Char(' ')));
 }
 
 void SignDialog::browseForKey() {
@@ -230,8 +389,14 @@ void SignDialog::browseForImage() {
 
 SignSpec SignDialog::spec() const {
     SignSpec spec;
-    spec.p12Path = keyPath_->text().trimmed();
-    spec.password = password_->text();
+    const int at = cardKeys_->currentIndex();
+    if (fromCard_->isChecked() && at >= 0 && at < static_cast<int>(tokenKeys_.size())) {
+        spec.pkcs11Uri = QString::fromStdString(tokenKeys_[static_cast<std::size_t>(at)].uri);
+        spec.password = pin_->text();
+    } else {
+        spec.p12Path = keyPath_->text().trimmed();
+        spec.password = password_->text();
+    }
     spec.field = field_;
     spec.page = page_;
     spec.rect = rect_;
