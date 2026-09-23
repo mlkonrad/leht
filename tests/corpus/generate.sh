@@ -199,6 +199,6 @@ fi
 # if one is present; the test skips when it is absent.
 LEHT_BIN="${LEHT_BIN:-$(command -v leht 2>/dev/null || echo ../../build/cli/leht)}"
 if [[ ! -f locked.pdf && -x "$LEHT_BIN" ]]; then
-    "$LEHT_BIN" encrypt text_10p.pdf --user-pw s3cret -o locked.pdf >/dev/null 2>&1 \
+    "$LEHT_BIN" encrypt text_10p.pdf --user-pw s3cret -o locked.pdf >/dev/null \
         && echo "  made  locked.pdf (encrypted, password s3cret)"
 fi
