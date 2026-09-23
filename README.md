@@ -32,9 +32,10 @@ Design commitments:
 - **Fast on real files.** The benchmark corpus is the 300-page scanned contract, not a
   three-page invoice.
 
-One honest limitation while this is pre-alpha: the parser is MuPDF, and **untrusted input
-is not yet process-isolated** — a parser crash takes the whole process. See
-[docs/robustness.md](docs/robustness.md).
+One honest limitation while this is pre-alpha: the parser is MuPDF. The viewer never runs
+it — a sandboxed `leht-worker` per document does, and a crash there is contained — but
+**the CLI parses in-process**, so a parser crash takes that one command with it. See
+[docs/robustness.md](docs/robustness.md#process-isolation).
 
 ## Using the CLI
 

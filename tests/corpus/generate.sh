@@ -2,6 +2,11 @@
 # Generates the leht test corpus. Idempotent: existing files are left alone.
 # Ghostscript is a build/test-time tool here, not a runtime dependency of leht.
 set -euo pipefail
+# A LEHT_BIN given relative to the caller's directory must survive the cd below.
+if [[ -n "${LEHT_BIN:-}" ]]; then
+    [[ -x "$LEHT_BIN" ]] || { echo "LEHT_BIN=$LEHT_BIN is not an executable" >&2; exit 1; }
+    LEHT_BIN="$(realpath "$LEHT_BIN")"
+fi
 cd "$(dirname "$0")"
 
 have_gs() { command -v gs >/dev/null 2>&1; }
