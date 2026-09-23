@@ -54,7 +54,8 @@ leht redact    FILE -o OUT.pdf [--text TERM] [--rect P:X0,Y0,X1,Y1]... [-p RANGE
 leht crop      FILE -o OUT.pdf (--box X0,Y0,X1,Y1 | --margins N[,T,R,B]) [-p RANGES]
 leht watermark FILE -o OUT.pdf --text TEXT [--opacity F] [--angle DEG] [--under]
 leht annots    FILE                               list annotations, with ids
-leht annotate  FILE -o OUT.pdf [--highlight TEXT] [--note P:X,Y:TEXT] [--stamp P:NAME]...
+leht annotate  FILE -o OUT.pdf [--highlight TEXT] [--note P:X,Y:TEXT] [--freetext P:BOX:TEXT]
+               [--stamp P:NAME]... [--move ID:BOX]... [--set-text ID:TEXT]...
 leht form      FILE                               list form fields
 leht fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]
 leht sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto) [--box P:BOX] [--tsa URL]
@@ -122,13 +123,11 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   incremental saving so signatures survive, and a visible signature mark that says it is
   only a picture. The key stays out of the sandbox; the hostile DER stays inside it. See
   [docs/signing.md](docs/signing.md).
-
-**Now** — signing with an ID card: a key that stays on an Estonian ID card, or any
-PKCS#11 smartcard or token, in the CLI (`--pkcs11`, `leht keys`) and the viewer's Sign
-dialog. Tested against SoftHSM2; a real card is the last check.
-
-Release readiness is in place: `cmake --install` with desktop integration, CI on every
-push, and the whole suite, sanitizers and a fuzz pass run against the pinned MuPDF 1.28.4.
+- **ID-card signing:** a key that stays on an Estonian ID card, or any PKCS#11 smartcard
+  or token, in the CLI (`--pkcs11`, `leht keys`) and the viewer's Sign dialog. Tested
+  against SoftHSM2 only; **not yet tried with a real card and reader.**
+- **Release readiness:** `cmake --install` with desktop integration, CI on every push,
+  and the whole suite, sanitizers and a fuzz pass run against the pinned MuPDF 1.28.4.
 
 **Later** — packaging as Flatpak, RPM and DEB, once Leht has been used day to day.
 
