@@ -68,6 +68,7 @@ PagesResult graft_selection(fz_context* ctx, pdf_document* src,
     }
 
     pdf_write_options opts = default_options();
+    detail::refuse_directory_output(output);
     const char* out = output.c_str();
     guarded(ctx, [&](fz_context* g) {
         pdf_save_document(g, target, out, &opts);
@@ -288,6 +289,7 @@ PagesResult rotate(const Context& ctx, const std::string& input,
     }
 
     pdf_write_options opts = default_options();
+    detail::refuse_directory_output(output);
     const char* out = output.c_str();
     guarded(c, [&](fz_context* g) { pdf_save_document(g, pdf, out, &opts); });
 

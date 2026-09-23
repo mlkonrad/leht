@@ -282,6 +282,7 @@ CompressResult compress(const Context& ctx, const std::string& input,
     opts.compression_effort = 100;  // slowest, smallest
 
     pdf_document* pdf = doc.get();
+    detail::refuse_directory_output(output);
     const char* out = output.c_str();
     guarded(c, [&](fz_context* g) { pdf_save_document(g, pdf, out, &opts); });
 

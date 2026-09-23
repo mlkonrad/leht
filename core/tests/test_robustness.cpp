@@ -79,6 +79,37 @@ void directory_as_output_fails_cleanly() {
     }));
 }
 
+/// An EMPTY directory is the dangerous case: MuPDF remove()s its output path
+/// before writing, and remove() deletes an empty directory. Every writer must
+/// refuse it and leave it standing.
+void empty_directory_as_output_survives() {
+    Context ctx;
+    const fs::path dir = fs::temp_directory_path() / "leht_test_empty_output_dir";
+    fs::remove_all(dir);
+    fs::create_directory(dir);
+    const std::string out = dir.string();
+    const std::string in = corpus("text_10p.pdf");
+    CHECK(throws_leht_error([&] { leht::ops::merge(ctx, {in}, out); }));
+    CHECK(throws_leht_error([&] { leht::ops::compress(ctx, in, out); }));
+    CHECK(throws_leht_error([&] { leht::ops::extract(ctx, in, out, "1"); }));
+    CHECK(throws_leht_error([&] { leht::ops::remove_pages(ctx, in, out, "1"); }));
+    CHECK(throws_leht_error([&] { leht::ops::rotate(ctx, in, out, "", 90); }));
+    CHECK(throws_leht_error([&] {
+        leht::ops::EncryptOptions options;
+        options.user_password = "x";
+        leht::ops::encrypt(ctx, in, out, options);
+    }));
+    CHECK(throws_leht_error([&] {
+        Document doc = Document::open(ctx, in);
+        leht::Renderer renderer(ctx, doc);
+        const auto bmp = renderer.render(0, 0.25F);
+        CHECK(bmp.has_value());
+        leht::write_png(ctx, *bmp, out);
+    }));
+    CHECK(fs::is_directory(dir));
+    fs::remove_all(dir);
+}
+
 void directory_as_input_fails_cleanly() {
     Context ctx;
     const std::string dir = fs::temp_directory_path().string();
@@ -244,6 +275,7 @@ void ops_refuse_to_overwrite_input() {
 int main() {
     RUN(unwritable_output_fails_cleanly);
     RUN(directory_as_output_fails_cleanly);
+    RUN(empty_directory_as_output_survives);
     RUN(directory_as_input_fails_cleanly);
     RUN(damaged_input_through_every_op);
     RUN(empty_file_is_rejected);

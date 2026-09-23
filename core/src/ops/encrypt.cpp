@@ -111,6 +111,7 @@ void encrypt(const Context& ctx, const std::string& input,
                   "owner");
 
     pdf_document* pdf = doc.get();
+    detail::refuse_directory_output(output);
     const char* out = output.c_str();
     guarded(c, [&](fz_context* g) { pdf_save_document(g, pdf, out, &opts); });
 }
@@ -131,6 +132,7 @@ void decrypt(const Context& ctx, const std::string& input,
     opts.do_encrypt = PDF_ENCRYPT_NONE;
 
     pdf_document* pdf = doc.get();
+    detail::refuse_directory_output(output);
     const char* out = output.c_str();
     guarded(c, [&](fz_context* g) { pdf_save_document(g, pdf, out, &opts); });
 }

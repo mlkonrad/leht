@@ -10,6 +10,10 @@
 
 #include "mupdf_c.hpp"
 
+#include "leht/error.hpp"
+
+#include <filesystem>
+#include <string>
 #include <utility>
 
 namespace leht::detail {
@@ -64,5 +68,16 @@ using OwnedImage = Owned<fz_image, fz_drop_image>;
 using OwnedPdfObj = Owned<pdf_obj, pdf_drop_obj>;
 using OwnedPdfDoc = Owned<pdf_document, pdf_drop_document>;
 using OwnedFzDoc = Owned<fz_document, fz_drop_document>;
+
+/// Call before any MuPDF save to a path (pdf_save_document,
+/// fz_save_pixmap_as_png): MuPDF opens its output by remove()-ing the path
+/// first, and remove() deletes an EMPTY DIRECTORY. `-o somedir` would replace
+/// the directory with the output file -- CI once lost /tmp this way.
+inline void refuse_directory_output(const std::string& path) {
+    std::error_code ec;
+    if (std::filesystem::is_directory(path, ec)) {
+        throw Error(0, path + " is a directory; give a file name to write to");
+    }
+}
 
 }  // namespace leht::detail

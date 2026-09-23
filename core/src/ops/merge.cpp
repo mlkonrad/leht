@@ -169,6 +169,7 @@ MergeResult merge(const Context& ctx, const std::vector<std::string>& inputs,
 
     pdf_write_options opts = write_options(options);
     pdf_document* doc = dst.get();
+    detail::refuse_directory_output(output);
     const char* out = output.c_str();
     guarded(c, [&](fz_context* g) { pdf_save_document(g, doc, out, &opts); });
 

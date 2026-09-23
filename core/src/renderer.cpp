@@ -327,6 +327,7 @@ void write_png(const Context& ctx, const Bitmap& bitmap,
                     row_bytes);
     }
 
+    detail::refuse_directory_output(path);
     const char* out = path.c_str();
     guarded(c, [&](fz_context* g) { fz_save_pixmap_as_png(g, pix, out); });
 }
