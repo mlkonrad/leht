@@ -73,8 +73,9 @@ constexpr const char* kUsage =
     "            [--size PT] [--color RRGGBB] [--under]\n"
     "  annots    FILE                         list annotations, with their ids\n"
     "  annotate  FILE -o OUT.pdf [--highlight|--underline|--strike TEXT]\n"
-    "            [--note P:X,Y:TEXT]... [--stamp P:NAME[:BOX]]... [--delete ID]...\n"
-    "            [--author NAME] [--color RRGGBB]\n"
+    "            [--note P:X,Y:TEXT]... [--freetext P:BOX:TEXT]... [--stamp P:NAME[:BOX]]...\n"
+    "            [--move ID:BOX]... [--set-text ID:TEXT]... [--delete ID]...\n"
+    "            [--author NAME] [--color RRGGBB] [--size PT]\n"
     "  form      FILE                         list form fields and their values\n"
     "  fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]\n"
     "            fill form fields; never runs the document's JavaScript\n"
@@ -113,6 +114,11 @@ constexpr const char* kUsage =
     "  --size PT      watermark font size; 0 fits the page (default 0)\n"
     "  --under        draw the watermark beneath the page content\n"
     "  --note P:X,Y:TEXT  a sticky note on page P at X,Y (points from top-left)\n"
+    "  --freetext P:BOX:TEXT  text written on page P inside BOX, at --size points\n"
+    "                 (default 12)\n"
+    "  --move ID:BOX  move annotation ID (see annots) so its bounds become BOX; the\n"
+    "                 appearance is kept, and highlights cannot move off their text\n"
+    "  --set-text ID:TEXT  new words for a free-text annotation or a note\n"
     "  --flatten      bake fields into the page so they can no longer be edited\n"
     "  --stamp P:NAME[:BOX]  a stamp: Approved, Draft, Confidential, Final,\n"
     "                 NotApproved, ForComment, TopSecret, ...; top-right by default\n"
@@ -221,7 +227,7 @@ bool takes_value(const std::string& name) {
         "--method", "--user-pw", "--owner-pw", "--password", "--search",
         "--text", "--rect", "--images", "--box", "--margins", "--opacity",
         "--angle", "--size", "--color", "--highlight", "--underline", "--strike",
-        "--note", "--stamp", "--delete", "--author",
+        "--note", "--stamp", "--delete", "--author", "--move", "--set-text", "--freetext",
         "--p12", "--password-fd", "--field", "--image", "--name", "--reason",
         "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module"};
     for (const std::string& v : kValued) {
@@ -1300,20 +1306,65 @@ int cmd_annotate(const leht::Context& ctx, const Args& args) {
         }
         image_stamps.push_back({page, rest.substr(0, colon), rect});
     }
-    std::vector<leht::ops::AnnotId> deletes;
-    for (const std::string& id : args.values("--delete")) {
+    const auto annot_id = [](const std::string& id, const char* flag) {
         char* end = nullptr;
         errno = 0;
         const long value = std::strtol(id.c_str(), &end, 10);
         if (id.empty() || *end != '\0' || errno == ERANGE || value < 1 || value > INT_MAX) {
-            throw leht::Error(0, "--delete expects an annotation id, got '" + id + "'");
+            throw leht::Error(0, std::string(flag) + " expects an annotation id, got '" + id +
+                                     "'");
         }
-        deletes.push_back(static_cast<int>(value));
+        return static_cast<int>(value);
+    };
+    std::vector<leht::ops::AnnotId> deletes;
+    for (const std::string& id : args.values("--delete")) {
+        deletes.push_back(annot_id(id, "--delete"));
+    }
+    // --move ID:X0,Y0,X1,Y1 -- the annotation's new bounds.
+    std::vector<std::pair<int, leht::Rect>> moves;
+    for (const std::string& spec : args.values("--move")) {
+        const std::size_t colon = spec.find(':');
+        float v[4];
+        if (colon == std::string::npos || !parse_floats(spec.c_str() + colon + 1, 4, v)) {
+            throw leht::Error(0, "--move expects ID:X0,Y0,X1,Y1, got '" + spec + "'");
+        }
+        moves.emplace_back(annot_id(spec.substr(0, colon), "--move"),
+                           leht::Rect{v[0], v[1], v[2], v[3]});
+    }
+    // --set-text ID:TEXT -- new words for free text or a note.
+    std::vector<std::pair<int, std::string>> retexts;
+    for (const std::string& spec : args.values("--set-text")) {
+        const std::size_t colon = spec.find(':');
+        if (colon == std::string::npos) {
+            throw leht::Error(0, "--set-text expects ID:TEXT, got '" + spec + "'");
+        }
+        retexts.emplace_back(annot_id(spec.substr(0, colon), "--set-text"),
+                             spec.substr(colon + 1));
+    }
+    // --freetext PAGE:X0,Y0,X1,Y1:TEXT -- text written on the page in a box.
+    for (const std::string& spec : args.values("--freetext")) {
+        const auto [page, rest] = page_prefix(spec, "--freetext");
+        const std::size_t colon = rest.find(':');
+        float v[4];
+        if (colon == std::string::npos || !parse_floats(rest.substr(0, colon).c_str(), 4, v)) {
+            throw leht::Error(0, "--freetext expects PAGE:X0,Y0,X1,Y1:TEXT, got '" + spec + "'");
+        }
+        leht::ops::AnnotSpec text = base;
+        text.kind = AnnotKind::FreeText;
+        text.rect = leht::Rect{v[0], v[1], v[2], v[3]};
+        text.contents = rest.substr(colon + 1);
+        if (!custom_color) {
+            text.color[0] = text.color[1] = text.color[2] = 0;  // text is black by default
+        }
+        text.font_size = args.flag("--size").empty() ? 12 : args.float_flag("--size", 12);
+        text.line_width = 0;  // text on the page, not a framed box
+        adds.emplace_back(page, text);
     }
     if (marks.empty() && adds.empty() && stamps.empty() && deletes.empty() &&
-        image_stamps.empty()) {
+        image_stamps.empty() && moves.empty() && retexts.empty()) {
         throw leht::Error(0, "annotate needs --highlight, --underline, --strike, --note, "
-                             "--stamp, --stamp-image or --delete");
+                             "--freetext, --stamp, --stamp-image, --move, --set-text or "
+                             "--delete");
     }
 
     leht::Document doc = leht::Document::open(ctx, input);
@@ -1351,6 +1402,21 @@ int cmd_annotate(const leht::Context& ctx, const Args& args) {
         }
         ++deleted;
     }
+    int changed = 0;
+    for (const auto& [id, rect] : moves) {
+        if (!leht::ops::move_annotation(ctx, doc, id, rect)) {
+            throw leht::Error(0, "no annotation with id " + std::to_string(id) +
+                                     " (see 'leht annots')");
+        }
+        ++changed;
+    }
+    for (const auto& [id, text] : retexts) {
+        if (!leht::ops::set_annotation_contents(ctx, doc, id, text)) {
+            throw leht::Error(0, "no annotation with id " + std::to_string(id) +
+                                     " (see 'leht annots')");
+        }
+        ++changed;
+    }
     int added = 0;
     for (const ImageStamp& stamp : image_stamps) {
         leht::ops::Appearance a;
@@ -1373,8 +1439,8 @@ int cmd_annotate(const leht::Context& ctx, const Args& args) {
     }
 
     doc.save(output, leht::SaveOptions{});
-    std::printf("added %d, deleted %d annotation%s -> %s\n", added, deleted,
-                added + deleted == 1 ? "" : "s", output.c_str());
+    std::printf("added %d, changed %d, deleted %d annotation%s -> %s\n", added, changed,
+                deleted, added + changed + deleted == 1 ? "" : "s", output.c_str());
     return 0;
 }
 

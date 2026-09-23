@@ -146,6 +146,67 @@ std::vector<pdf_annot*> page_annots(fz_context* ctx, pdf_page* page) {
     return out;
 }
 
+/// Kinds that can be picked up and put somewhere else. Text markup stays with
+/// its text; links, widgets, popups and redaction marks are structure.
+bool movable_type(enum pdf_annot_type t) {
+    switch (t) {
+        case PDF_ANNOT_TEXT:
+        case PDF_ANNOT_FREE_TEXT:
+        case PDF_ANNOT_LINE:
+        case PDF_ANNOT_SQUARE:
+        case PDF_ANNOT_CIRCLE:
+        case PDF_ANNOT_POLYGON:
+        case PDF_ANNOT_POLY_LINE:
+        case PDF_ANNOT_STAMP:
+        case PDF_ANNOT_CARET:
+        case PDF_ANNOT_INK:
+        case PDF_ANNOT_FILE_ATTACHMENT:
+        case PDF_ANNOT_SOUND:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// Of those, the ones that are an icon of a fixed size: movable, not resizable.
+bool icon_type(enum pdf_annot_type t) {
+    return t == PDF_ANNOT_TEXT || t == PDF_ANNOT_FILE_ATTACHMENT || t == PDF_ANNOT_SOUND;
+}
+
+/// Calls `f(page, annot)` for the annotation `id`; returns false when there is
+/// none. The page stays loaded for the duration of the call.
+template <typename F>
+bool with_annot(fz_context* c, Document& doc, AnnotId id, F&& f) {
+    if (id <= 0) {
+        return false;
+    }
+    const int count = doc.page_count();
+    for (int index = 0; index < count; ++index) {
+        detail::OwnedPage loaded = detail::load_pdf_page(c, doc, index);
+        pdf_page* p = detail::as_pdf_page(c, loaded);
+        for (pdf_annot* a : page_annots(c, p)) {
+            int num = 0;
+            guarded(c, [&](fz_context* g) { num = pdf_to_num(g, pdf_annot_obj(g, a)); });
+            if (num == id) {
+                f(p, a);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Applies `m` to a flat array of x, y pairs, in place.
+void transform_pairs(fz_context* g, pdf_obj* array, fz_matrix m) {
+    const int n = pdf_array_len(g, array);
+    for (int i = 0; i + 1 < n; i += 2) {
+        const fz_point p = fz_transform_point_xy(pdf_array_get_real(g, array, i),
+                                                 pdf_array_get_real(g, array, i + 1), m);
+        pdf_array_put_real(g, array, i, p.x);
+        pdf_array_put_real(g, array, i + 1, p.y);
+    }
+}
+
 }  // namespace
 
 AnnotId add_annotation(const Context& ctx, Document& doc, int page, const AnnotSpec& spec) {
@@ -275,20 +336,134 @@ std::vector<AnnotInfo> list_annotations(const Context& ctx, Document& doc) {
             const char* author = nullptr;
             fz_rect r{};
             int num = 0;
+            enum pdf_annot_type kind = PDF_ANNOT_UNKNOWN;
+            float size = 0;
+            int n = 0;
+            float color[4] = {0, 0, 0, 0};
             guarded(c, [&](fz_context* g) {
-                type = pdf_string_from_annot_type(g, pdf_annot_type(g, a));
+                kind = pdf_annot_type(g, a);
+                type = pdf_string_from_annot_type(g, kind);
                 contents = pdf_annot_contents(g, a);
                 if (pdf_annot_has_author(g, a)) {
                     author = pdf_annot_author(g, a);
                 }
                 r = pdf_bound_annot(g, a);
                 num = pdf_to_num(g, pdf_annot_obj(g, a));
+                if (kind == PDF_ANNOT_FREE_TEXT) {
+                    const char* font = nullptr;
+                    pdf_annot_default_appearance(g, a, &font, &size, &n, color);
+                }
             });
-            out.push_back(AnnotInfo{num, index, or_empty(type), Rect{r.x0, r.y0, r.x1, r.y1},
-                                    or_empty(contents), or_empty(author)});
+            AnnotInfo info{num, index, or_empty(type), Rect{r.x0, r.y0, r.x1, r.y1},
+                           or_empty(contents), or_empty(author)};
+            info.movable = movable_type(kind);
+            info.resizable = info.movable && !icon_type(kind);
+            if (kind == PDF_ANNOT_FREE_TEXT) {
+                info.font_size = size;
+                if (n == 1) {
+                    info.color[0] = info.color[1] = info.color[2] = color[0];
+                } else if (n == 3) {
+                    std::copy(color, color + 3, info.color);
+                }
+            }
+            out.push_back(std::move(info));
         }
     }
     return out;
+}
+
+bool move_annotation(const Context& ctx, Document& doc, AnnotId id, const Rect& to) {
+    fz_context* c = ctx.raw();
+    (void)detail::require_pdf(c, doc);
+    if (!finite(to.x0) || !finite(to.y0) || !finite(to.x1) || !finite(to.y1) || to.empty()) {
+        throw Error(0, "an annotation can only be moved to a non-empty, finite rectangle");
+    }
+    return with_annot(c, doc, id, [&](pdf_page* p, pdf_annot* a) {
+        enum pdf_annot_type kind = PDF_ANNOT_UNKNOWN;
+        fz_rect from{};
+        fz_matrix ctm = fz_identity;
+        guarded(c, [&](fz_context* g) {
+            kind = pdf_annot_type(g, a);
+            from = pdf_bound_annot(g, a);
+            pdf_page_transform(g, p, nullptr, &ctm);
+        });
+        if (!movable_type(kind)) {
+            throw Error(0, kind == PDF_ANNOT_HIGHLIGHT || kind == PDF_ANNOT_UNDERLINE ||
+                                   kind == PDF_ANNOT_STRIKE_OUT || kind == PDF_ANNOT_SQUIGGLY
+                               ? "text markup follows the text under it and cannot be moved; "
+                                 "delete it and mark the text again"
+                               : "this kind of annotation cannot be moved");
+        }
+        const float fw = from.x1 - from.x0;
+        const float fh = from.y1 - from.y0;
+        const float tw = to.x1 - to.x0;
+        const float th = to.y1 - to.y0;
+        const bool resized = std::fabs(fw - tw) > 0.01F || std::fabs(fh - th) > 0.01F;
+        if (resized && icon_type(kind)) {
+            throw Error(0, "a note or attachment icon has a fixed size; it can only be moved");
+        }
+        // The map from the old bounds to the new, in base (page) space, then
+        // carried into PDF user space, where the dictionary's numbers live.
+        const float sx = fw > 0 ? tw / fw : 1;
+        const float sy = fh > 0 ? th / fh : 1;
+        const fz_matrix in_page = fz_make_matrix(sx, 0, 0, sy, to.x0 - from.x0 * sx,
+                                                 to.y0 - from.y0 * sy);
+        const fz_matrix m = fz_concat(fz_concat(ctm, in_page), fz_invert_matrix(ctm));
+        const bool regenerate = resized && kind == PDF_ANNOT_FREE_TEXT;
+
+        guarded(c, [&](fz_context* g) {
+            pdf_obj* obj = pdf_annot_obj(g, a);
+            const fz_rect old_rect = pdf_dict_get_rect(g, obj, PDF_NAME(Rect));
+            pdf_dict_put_rect(g, obj, PDF_NAME(Rect), fz_transform_rect(old_rect, m));
+            pdf_obj* ink = pdf_dict_get(g, obj, PDF_NAME(InkList));
+            for (int i = 0; i < pdf_array_len(g, ink); ++i) {
+                transform_pairs(g, pdf_array_get(g, ink, i), m);
+            }
+            transform_pairs(g, pdf_dict_get(g, obj, PDF_NAME(Vertices)), m);
+            transform_pairs(g, pdf_dict_get(g, obj, PDF_NAME(L)), m);
+            transform_pairs(g, pdf_dict_get(g, obj, PDF_NAME(CL)), m);
+            // The popup window travels with its annotation but keeps its size.
+            pdf_obj* popup = pdf_dict_get(g, obj, PDF_NAME(Popup));
+            if (pdf_is_dict(g, popup)) {
+                const fz_point anchor = fz_transform_point_xy(old_rect.x0, old_rect.y1, m);
+                const fz_rect pr = pdf_dict_get_rect(g, popup, PDF_NAME(Rect));
+                const float dx = anchor.x - old_rect.x0;
+                const float dy = anchor.y - old_rect.y1;
+                pdf_dict_put_rect(g, popup, PDF_NAME(Rect),
+                                  fz_make_rect(pr.x0 + dx, pr.y0 + dy, pr.x1 + dx, pr.y1 + dy));
+            }
+            if (regenerate) {
+                // Free text reflows into its new box. Rich text (/RC) is kept
+                // only by the reader that wrote it; the plain /Contents is
+                // what is drawn again.
+                pdf_dirty_annot(g, a);
+                pdf_update_annot(g, a);
+            }
+        });
+    });
+}
+
+bool set_annotation_contents(const Context& ctx, Document& doc, AnnotId id,
+                             const std::string& text) {
+    fz_context* c = ctx.raw();
+    (void)detail::require_pdf(c, doc);
+    if (text.size() > kMaxText) {
+        throw Error(0, "annotation text is too long");
+    }
+    const char* value = text.c_str();
+    return with_annot(c, doc, id, [&](pdf_page*, pdf_annot* a) {
+        enum pdf_annot_type kind = PDF_ANNOT_UNKNOWN;
+        guarded(c, [&](fz_context* g) { kind = pdf_annot_type(g, a); });
+        if (kind != PDF_ANNOT_FREE_TEXT && kind != PDF_ANNOT_TEXT) {
+            throw Error(0, "only free text and notes have text to edit");
+        }
+        guarded(c, [&](fz_context* g) {
+            // Rich text would still say the old words to readers that prefer it.
+            pdf_dict_del(g, pdf_annot_obj(g, a), PDF_NAME(RC));
+            pdf_set_annot_contents(g, a, value);
+            pdf_update_annot(g, a);
+        });
+    });
 }
 
 bool delete_annotation(const Context& ctx, Document& doc, AnnotId id) {

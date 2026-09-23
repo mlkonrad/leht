@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -598,6 +599,63 @@ void replay_is_deterministic() {
     CHECK(ids[0][0] != ids[0][1]);
 }
 
+void moves_new_words_and_crop_boxes_replay() {
+    // The M1 edits go through the same log: two fresh workers given the same
+    // edits must end with the same annotations in the same places.
+    const std::string in = corpus("text_10p.pdf");
+    std::vector<leht::ops::AnnotInfo> seen[2];
+    for (auto& run : seen) {
+        auto w = start();
+        (void)open_ok(*w, in);
+        Edit add;
+        add.kind = Edit::Kind::AddAnnot;
+        add.page = 0;
+        add.annot.kind = leht::ops::AnnotKind::FreeText;
+        add.annot.rect = {100, 60, 220, 100};
+        add.annot.contents = "first";
+        const int id = edit_ok(*w, add).annot_id;
+
+        Edit move;
+        move.kind = Edit::Kind::MoveAnnot;
+        move.annot_id = id;
+        move.rects = {{300, 80, 460, 140}};
+        CHECK(edit_ok(*w, move).pages == std::vector<int>({0}));
+        Edit retext;
+        retext.kind = Edit::Kind::SetAnnotContents;
+        retext.annot_id = id;
+        retext.text = "second";
+        CHECK(edit_ok(*w, retext).pages == std::vector<int>({0}));
+        Edit box;
+        box.kind = Edit::Kind::CropBox;
+        box.pages = "2-3";
+        box.rects = {{50, 50, 400, 500}};
+        const Edited cropped = edit_ok(*w, box);
+        CHECK(cropped.pages == std::vector<int>({1, 2}));
+        CHECK(cropped.base_sizes[1].width == 350 && cropped.base_sizes[2].height == 450);
+
+        // Moving what cannot move is an ordinary failure, and the worker goes on.
+        const int hl = edit_ok(*w, highlight_edit(in, 0, "quick brown")).annot_id;
+        move.annot_id = hl;
+        w->channel().send(990, move);
+        CHECK(next(*w).type == MsgType::Failed);
+        move.annot_id = 999999;
+        w->channel().send(991, move);
+        CHECK(next(*w).type == MsgType::Failed);
+
+        w->channel().send(992, ListAnnots{});
+        run = decode_as<AnnotList>(next(*w)).items;
+    }
+    CHECK(seen[0].size() == 2 && seen[1].size() == 2);
+    for (std::size_t i = 0; i < seen[0].size() && i < seen[1].size(); ++i) {
+        CHECK(seen[0][i].id == seen[1][i].id);
+        CHECK(seen[0][i].rect.x0 == seen[1][i].rect.x0 && seen[0][i].rect.y1 == seen[1][i].rect.y1);
+        CHECK(seen[0][i].contents == seen[1][i].contents);
+    }
+    const auto& ft = seen[0][0];
+    CHECK(ft.type == "FreeText" && ft.contents == "second" && ft.movable && ft.resizable);
+    CHECK(std::abs(ft.rect.x0 - 300) < 1 && std::abs(ft.rect.y1 - 140) < 1);
+}
+
 void edits_on_a_non_pdf_fail_cleanly() {
     auto w = start();
     (void)open_ok(*w, corpus("page.png"));
@@ -790,6 +848,7 @@ int main() {
     RUN(redaction_through_the_worker);
     RUN(forms_through_the_worker);
     RUN(replay_is_deterministic);
+    RUN(moves_new_words_and_crop_boxes_replay);
     RUN(edits_on_a_non_pdf_fail_cleanly);
     RUN(signing_through_the_worker);
     RUN(verification_needs_the_preload_inside_the_sandbox);

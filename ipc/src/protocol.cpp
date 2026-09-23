@@ -464,13 +464,25 @@ void Edit::encode(Writer& w) const {
         w.str(pages);
         w.f32(margins.left); w.f32(margins.top); w.f32(margins.right); w.f32(margins.bottom);
         break;
+    case Kind::MoveAnnot:
+        w.i32(annot_id);
+        put_rect(w, rects.empty() ? Rect{} : rects.front());
+        break;
+    case Kind::SetAnnotContents:
+        w.i32(annot_id);
+        w.str(text);
+        break;
+    case Kind::CropBox:
+        w.str(pages);
+        put_rect(w, rects.empty() ? Rect{} : rects.front());
+        break;
     }
 }
 
 Edit Edit::decode(Reader& r) {
     Edit m;
     const std::uint8_t kind = r.u8();
-    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::CropMargins)) {
+    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::CropBox)) {
         throw ProtocolError("unknown edit kind");
     }
     m.kind = static_cast<Kind>(kind);
@@ -546,6 +558,18 @@ Edit Edit::decode(Reader& r) {
         m.margins.top = points(r);
         m.margins.right = points(r);
         m.margins.bottom = points(r);
+        break;
+    case Kind::MoveAnnot:
+        m.annot_id = r.i32();
+        m.rects.push_back(get_rect(r));
+        break;
+    case Kind::SetAnnotContents:
+        m.annot_id = r.i32();
+        m.text = r.str(kMaxString);
+        break;
+    case Kind::CropBox:
+        m.pages = r.str(kMaxName);
+        m.rects.push_back(get_rect(r));
         break;
     }
     return m;
@@ -781,10 +805,16 @@ void AnnotList::encode(Writer& w) const {
         put_rect(w, a.rect);
         w.str(a.contents);
         w.str(a.author);
+        w.u8(a.movable ? 1 : 0);
+        w.u8(a.resizable ? 1 : 0);
+        w.f32(a.font_size);
+        for (const float c : a.color) {
+            w.f32(c);
+        }
     }
 }
 AnnotList AnnotList::decode(Reader& r) {
-    const std::size_t n = r.count(36);
+    const std::size_t n = r.count(54);
     AnnotList m;
     m.items.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
@@ -798,6 +828,15 @@ AnnotList AnnotList::decode(Reader& r) {
         a.rect = get_rect(r);
         a.contents = r.str(kMaxString);
         a.author = r.str(kMaxString);
+        a.movable = r.boolean();
+        a.resizable = r.boolean();
+        a.font_size = r.f32();
+        if (!(a.font_size >= 0 && a.font_size <= 10000)) {
+            throw ProtocolError("annotation font size out of range");
+        }
+        for (float& c : a.color) {
+            c = unit(r);
+        }
         m.items.push_back(std::move(a));
     }
     return m;

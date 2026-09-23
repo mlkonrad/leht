@@ -59,6 +59,16 @@ struct AnnotInfo {
     Rect rect;
     std::string contents;
     std::string author;
+    /// move_annotation() accepts it. Text markup follows the text under it,
+    /// and links and form widgets belong to the document's structure, so
+    /// those are not movable.
+    bool movable = false;
+    /// It can also be resized. A note's icon has a fixed size: movable only.
+    bool resizable = false;
+    /// Free text: the font size in points and the text colour (RGB, 0 to 1),
+    /// so an editor can show it as it will look. 0 and black otherwise.
+    float font_size = 0;
+    float color[3] = {0, 0, 0};
 };
 
 /// Adds an annotation to `page` (0-based) and generates its appearance, so it
@@ -76,6 +86,23 @@ std::vector<AnnotId> mark_text(const Context& ctx, Document& doc, const std::str
 /// Every annotation in the document except form-field widgets (see forms)
 /// and the Popup windows that belong to other annotations.
 std::vector<AnnotInfo> list_annotations(const Context& ctx, Document& doc);
+
+/// Moves the annotation `id` so that its bounds (AnnotInfo::rect) become
+/// `to`, in base coordinates. A move keeps the appearance exactly as it is,
+/// and so does a resize, scaled to the new box -- a stamp's picture, or
+/// another application's drawing, survives. The one exception is free text
+/// that changes size: its appearance is generated again so the text reflows.
+/// The geometry other readers redraw from (ink strokes, vertices, callout
+/// line, popup) moves with it. Returns false if there is no such annotation;
+/// throws leht::Error for one that is not movable (see AnnotInfo::movable),
+/// a resize of one that is not resizable, or an empty or non-finite `to`.
+bool move_annotation(const Context& ctx, Document& doc, AnnotId id, const Rect& to);
+
+/// Replaces the text of a free-text annotation or a note, and draws free
+/// text again with it. Returns false if there is no such annotation; throws
+/// leht::Error for any other kind, or text over the length limit.
+bool set_annotation_contents(const Context& ctx, Document& doc, AnnotId id,
+                             const std::string& text);
 
 /// Deletes the annotation `id`, with its popup. Returns false if there is no
 /// such annotation (or it is a form field, which forms own).

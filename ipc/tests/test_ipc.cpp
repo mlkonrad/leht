@@ -198,6 +198,27 @@ void test_edit_messages_round_trip() {
     crop.margins = {1, 2, 3, 4};
     CHECK(round_trip(crop).margins.bottom == 4.0F);
 
+    Edit move;
+    move.kind = Edit::Kind::MoveAnnot;
+    move.annot_id = 9;
+    move.rects = {{10, 20, 30, 40}};
+    const Edit m2 = round_trip(move);
+    CHECK(m2.annot_id == 9 && m2.rects.size() == 1 && m2.rects[0].y1 == 40.0F);
+
+    Edit retext;
+    retext.kind = Edit::Kind::SetAnnotContents;
+    retext.annot_id = 11;
+    retext.text = "new words";
+    const Edit t2 = round_trip(retext);
+    CHECK(t2.annot_id == 11 && t2.text == "new words");
+
+    Edit box;
+    box.kind = Edit::Kind::CropBox;
+    box.pages = "2-";
+    box.rects = {{5, 6, 500, 700}};
+    const Edit b2 = round_trip(box);
+    CHECK(b2.pages == "2-" && b2.rects.size() == 1 && b2.rects[0].x1 == 500.0F);
+
     Edit del;
     del.kind = Edit::Kind::DeleteAnnot;
     del.annot_id = 17;
@@ -214,10 +235,16 @@ void test_edit_messages_round_trip() {
 
     CHECK(round_trip(Saved{123456}).bytes == 123456);
 
-    leht::ops::AnnotInfo info{7, 1, "Highlight", {1, 2, 3, 4}, "c", "a"};
+    leht::ops::AnnotInfo info{7, 1, "FreeText", {1, 2, 3, 4}, "c", "a"};
+    info.movable = true;
+    info.resizable = true;
+    info.font_size = 14;
+    info.color[0] = 0.5F;
     const AnnotList al = round_trip(AnnotList{{info}});
-    CHECK(al.items.size() == 1 && al.items[0].id == 7 && al.items[0].type == "Highlight" &&
-          al.items[0].rect.x1 == 3.0F && al.items[0].author == "a");
+    CHECK(al.items.size() == 1 && al.items[0].id == 7 && al.items[0].type == "FreeText" &&
+          al.items[0].rect.x1 == 3.0F && al.items[0].author == "a" && al.items[0].movable &&
+          al.items[0].resizable && al.items[0].font_size == 14.0F &&
+          al.items[0].color[0] == 0.5F);
 
     const FieldList fl = round_trip(sample_fields());
     CHECK(fl.items.size() == 1 && fl.items[0].name == "address.street" &&
@@ -358,6 +385,22 @@ void test_edit_messages_reject_hostile_input() {
     check_truncations(sample_edited());
     check_truncations(sample_fields());
     check_truncations(AnnotList{{leht::ops::AnnotInfo{7, 1, "Ink", {}, "", ""}}});
+    {
+        Edit move;
+        move.kind = Edit::Kind::MoveAnnot;
+        move.annot_id = 9;
+        move.rects = {{10, 20, 30, 40}};
+        check_truncations(move);
+        Edit retext;
+        retext.kind = Edit::Kind::SetAnnotContents;
+        retext.annot_id = 11;
+        retext.text = "new words";
+        check_truncations(retext);
+        Edit box;
+        box.kind = Edit::Kind::CropBox;
+        box.rects = {{5, 6, 500, 700}};
+        check_truncations(box);
+    }
     check_truncations(sample_annot_edit());
 
     Edited neg = sample_edited();

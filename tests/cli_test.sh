@@ -117,6 +117,19 @@ expect 0 "annots after delete"             annots "$OUT/n2.pdf"
 if grep -q "Check: this" "$OUT/stdout"; then
     echo "FAIL  deleted note is still listed"; failures=$((failures + 1))
 fi
+# Free text, moving and new words (M1).
+expect 1 "annotate --freetext without a box" annotate "$IN" --freetext "1:hello" -o "$OUT/ft.pdf"
+expect 1 "annotate --move junk"            annotate "$IN" --move "12:1,2,3" -o "$OUT/ft.pdf"
+expect 1 "annotate --move missing id"      annotate "$IN" --move "99999:1,2,30,40" -o "$OUT/ft.pdf"
+expect 1 "annotate --set-text no colon"    annotate "$IN" --set-text "12" -o "$OUT/ft.pdf"
+expect 0 "annotate --freetext"             annotate "$IN" --freetext "1:100,60,260,100:Hello: Leht" --size 14 -o "$OUT/ft.pdf"
+ft_id=$("$LEHT" annots "$OUT/ft.pdf" | awk '$3 == "FreeText" {print $1; exit}')
+expect 0 "annotate --move and --set-text"  annotate "$OUT/ft.pdf" --move "$ft_id:300,80,500,140" --set-text "$ft_id:Moved" -o "$OUT/ft2.pdf"
+"$LEHT" annots "$OUT/ft2.pdf" | grep -q "FreeText *Moved" || {
+    echo "FAIL  the free text was not rewritten"; failures=$((failures + 1)); }
+hl_id=$("$LEHT" annots "$OUT/n.pdf" | awk '$3 == "Highlight" {print $1; exit}')
+expect 1 "a highlight cannot move"         annotate "$OUT/n.pdf" --move "$hl_id:1,1,50,20" -o "$OUT/ft3.pdf"
+[[ -e "$OUT/ft3.pdf" ]] && { echo "FAIL  a refused move still wrote output"; failures=$((failures + 1)); }
 
 # Forms.
 FORM="$CORPUS/form.pdf"

@@ -90,6 +90,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         mark.text = "FUZZ";
         (void)leht::ops::watermark(ctx, doc, "1", mark);
         (void)leht::ops::crop_margins(ctx, doc, "1", {5, 5, 5, 5});
+        (void)leht::ops::crop(ctx, doc, "1", {20, 20, 300, 300});
     });
 
     // Annotations: add one of each appearance-generating kind, list, delete.
@@ -107,6 +108,25 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         leht::ops::AnnotSpec mark;
         mark.kind = AnnotKind::Highlight;
         (void)leht::ops::mark_text(ctx, doc, "a", "1", mark);
+        // Move, resize and retext everything, the fuzzed file's own
+        // annotations included: their /InkList, /Vertices, /CL and /Popup
+        // are whatever the input says they are.
+        for (const auto& a : leht::ops::list_annotations(ctx, doc)) {
+            try {
+                const leht::Rect& r = a.rect;
+                (void)leht::ops::move_annotation(ctx, doc, a.id,
+                                                 {r.x0 + 7, r.y0 + 3, r.x1 + 7, r.y1 + 3});
+                (void)leht::ops::move_annotation(ctx, doc, a.id,
+                                                 {r.x0, r.y0, r.x0 + 2 * (r.x1 - r.x0) + 1,
+                                                  r.y0 + (r.y1 - r.y0) / 2 + 1});
+            } catch (const leht::Error&) {
+                // Not movable, not resizable, or an empty box: refused, go on.
+            }
+            try {
+                (void)leht::ops::set_annotation_contents(ctx, doc, a.id, "fuzz again");
+            } catch (const leht::Error&) {
+            }
+        }
         for (const auto& a : leht::ops::list_annotations(ctx, doc)) {
             (void)leht::ops::delete_annotation(ctx, doc, a.id);
             break;

@@ -397,6 +397,34 @@ void Session::on_edit(std::uint64_t id, const Edit& m) {
         (void)ops::crop_margins(ctx_, *doc_, m.pages, m.margins);
         out.pages = page_set(m.pages, doc_->page_count());
         break;
+    case Edit::Kind::MoveAnnot:
+    case Edit::Kind::SetAnnotContents: {
+        int page = -1;
+        for (const ops::AnnotInfo& a : ops::list_annotations(ctx_, *doc_)) {
+            if (a.id == m.annot_id) {
+                page = a.page;
+            }
+        }
+        const bool done =
+            page >= 0 && (m.kind == Edit::Kind::MoveAnnot
+                              ? !m.rects.empty() &&
+                                    ops::move_annotation(ctx_, *doc_, m.annot_id, m.rects.front())
+                              : ops::set_annotation_contents(ctx_, *doc_, m.annot_id, m.text));
+        if (!done) {
+            channel_.send(id, Failed{"no annotation with that id"});
+            return;
+        }
+        out.pages = {page};
+        break;
+    }
+    case Edit::Kind::CropBox:
+        if (m.rects.empty()) {
+            channel_.send(id, Failed{"no box to crop to"});
+            return;
+        }
+        (void)ops::crop(ctx_, *doc_, m.pages, m.rects.front());
+        out.pages = page_set(m.pages, doc_->page_count());
+        break;
     }
     // Every cached display list and text layer may now be out of date.
     renderer_->clear_cache();

@@ -31,7 +31,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 4;  // 2: CancelSearch; 3: editing; 4: signatures
+inline constexpr std::uint32_t kProtocolVersion = 5;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -179,6 +179,9 @@ struct Edit {
         SetField = 5,     ///< name, text: the value
         Watermark = 6,    ///< pages, watermark
         CropMargins = 7,  ///< pages, margins
+        MoveAnnot = 8,    ///< annot_id, rects[0]: its new bounds
+        SetAnnotContents = 9,  ///< annot_id, text
+        CropBox = 10,     ///< pages, rects[0]: the box to keep
     };
     Kind kind = Kind::Redact;
     int page = 0;
