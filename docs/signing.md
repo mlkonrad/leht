@@ -201,8 +201,9 @@ Our own code agreeing with itself proves little about a format this old, so:
   token is made in a temporary directory, the test PKI's keys are put on it, and signing
   runs through PKCS#11 exactly as with a card — RSA and P-384, a key that wants its PIN
   for every signature (and a check that SoftHSM really refuses without it), a wrong PIN,
-  a certificate that belongs to another key, B-T. The last check, on a real ID card in a
-  real reader, is manual.
+  a certificate that belongs to another key, B-T. **It has not been tried with a real ID
+  card in a real reader yet**, so what is said above about Estonian cards comes from their
+  documentation, not from a test.
 - A **test PKI is generated at run time** — a root, RSA-2048 and ECDSA P-384 signers, an
   expired certificate, one whose key usage forbids signing — so no private key is ever
   committed. So is a **local RFC 3161 timestamp authority**, which makes B-T testable

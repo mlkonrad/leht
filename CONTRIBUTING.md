@@ -35,8 +35,8 @@ sudo dnf install mupdf qpdf ghostscript poppler-utils python3-pillow python3-num
   throwaway PKI, and a local timestamp authority, at run time.
 - `softhsm` — **SoftHSM2 stands in for an ID card.** The PKCS#11 tests make a token in a
   temporary directory, put test-PKI keys on it and sign through it, in the library, the CLI
-  and the viewer. They skip (77) without it, so a real card and reader are only needed for
-  the final manual check. One trap: once SoftHSM is installed, poppler's `pdfsig` crashes
+  and the viewer. They skip (77) without it. No real card or reader has been used yet.
+  One trap: once SoftHSM is installed, poppler's `pdfsig` crashes
   whenever SoftHSM can start inside it (NSS loads every p11-kit module) — with a test
   token, or as root with the default config, as in CI. The tests run it with
   `SOFTHSM2_CONF` pointing at a file that does not exist.
