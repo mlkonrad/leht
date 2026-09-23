@@ -57,7 +57,8 @@ leht annots    FILE                               list annotations, with ids
 leht annotate  FILE -o OUT.pdf [--highlight TEXT] [--note P:X,Y:TEXT] [--stamp P:NAME]...
 leht form      FILE                               list form fields
 leht fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]
-leht sign      FILE -o OUT.pdf --p12 ID.p12 [--box P:X0,Y0,X1,Y1] [--tsa URL]
+leht sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto) [--box P:BOX] [--tsa URL]
+leht keys      [--pkcs11-module LIB]              signing keys on ID cards and tokens
 leht verify    FILE [--trust CA.pem]... [--json]  check every signature
 ```
 
@@ -122,8 +123,12 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   only a picture. The key stays out of the sandbox; the hostile DER stays inside it. See
   [docs/signing.md](docs/signing.md).
 
-**Now** — release readiness: `cmake --install` with desktop integration, CI on every push,
-and the whole suite, sanitizers and a fuzz pass run against the pinned MuPDF 1.28.4.
+**Now** — signing with an ID card: a key that stays on an Estonian ID card, or any
+PKCS#11 smartcard or token, in the CLI (`--pkcs11`, `leht keys`) and the viewer's Sign
+dialog. Tested against SoftHSM2; a real card is the last check.
+
+Release readiness is in place: `cmake --install` with desktop integration, CI on every
+push, and the whole suite, sanitizers and a fuzz pass run against the pinned MuPDF 1.28.4.
 
 **Later** — packaging as Flatpak, RPM and DEB, once Leht has been used day to day.
 
@@ -173,11 +178,12 @@ cmake -S . -B build -G Ninja -DLEHT_MUPDF_ROOT="$(tools/build-mupdf.sh)"
 
 ```sh
 # Fedora
-sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel
+sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel \
+                 p11-kit-devel
 sudo dnf install qt6-qtbase-devel qt6-qtsvg  # only for the viewer
 
 # Debian / Ubuntu
-sudo apt install g++ cmake ninja-build libmupdf-dev libssl-dev libseccomp-dev
+sudo apt install g++ cmake ninja-build libmupdf-dev libssl-dev libseccomp-dev libp11-kit-dev
 sudo apt install qt6-base-dev                # only for the viewer
 ```
 

@@ -10,7 +10,8 @@ parses documents in. That is the whole list; `core/` links no second PDF library
 
 ```sh
 # Fedora
-sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel
+sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel \
+                 p11-kit-devel
 ```
 
 Building the viewer (`-DLEHT_BUILD_UI=ON`) additionally needs **`qt6-qtbase-devel`**. The
@@ -22,7 +23,7 @@ of Leht:**
 
 ```sh
 sudo dnf install mupdf qpdf ghostscript poppler-utils python3-pillow python3-numpy \
-                 libasan libubsan clang
+                 softhsm libasan libubsan clang
 ```
 
 - `mupdf` and `qpdf` — the `mutool` and `qpdf` **command-line** binaries, which the
@@ -32,6 +33,13 @@ sudo dnf install mupdf qpdf ghostscript poppler-utils python3-pillow python3-num
 - `poppler-utils` also provides **`pdfsig`**, the independent verifier the signing tests
   check every signed file with. No key or certificate is committed: the tests build a
   throwaway PKI, and a local timestamp authority, at run time.
+- `softhsm` — **SoftHSM2 stands in for an ID card.** The PKCS#11 tests make a token in a
+  temporary directory, put test-PKI keys on it and sign through it, in the library, the CLI
+  and the viewer. They skip (77) without it, so a real card and reader are only needed for
+  the final manual check. One trap: once SoftHSM is installed, poppler's `pdfsig` crashes
+  whenever SoftHSM can start inside it (NSS loads every p11-kit module) — with a test
+  token, or as root with the default config, as in CI. The tests run it with
+  `SOFTHSM2_CONF` pointing at a file that does not exist.
 - `poppler-utils`, Pillow, NumPy — for the render cross-check described under Testing.
 - `libasan`, `libubsan` — **required for `-DLEHT_SANITIZE=ON` to link.** Fedora ships the
   compiler-side `libasan.so` symlink without the runtime, so a sanitizer build configures

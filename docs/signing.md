@@ -1,9 +1,9 @@
 # Signing
 
-M5 adds digital signatures: signing a PDF with a PKCS#12 key, verifying the signatures a
-document already carries, and a visible signature mark that makes no cryptographic claim at
-all. Both frontends have all of it — `leht sign` / `leht verify` and the viewer's Sign tool
-and Signatures panel.
+M5 adds digital signatures: signing a PDF with a PKCS#12 key or with a key that stays on
+an ID card, verifying the signatures a document already carries, and a visible signature
+mark that makes no cryptographic claim at all. Both frontends have all of it — `leht sign`
+/ `leht verify` and the viewer's Sign tool and Signatures panel.
 
 The level is **PAdES baseline B-B**, and **B-T** when a timestamp authority is given. The
 CMS is CAdES-shaped: `/SubFilter /ETSI.CAdES.detached`, signed attributes carrying
@@ -97,6 +97,45 @@ noise. So saving learned to append:
   verified against the certificate it carries. Whether that authority is *trusted* is
   decided later, at verification, like any other signer.
 
+## Signing with an ID card
+
+`leht keys` lists the signing keys on every card in every reader, and `leht sign … --pkcs11
+auto` signs with the card's one signing key (or `--pkcs11 URI` with the one `keys`
+printed). The viewer's Sign dialog has the same choice: *Sign with: ID card or token*.
+
+The key never leaves the card. Leht hands the card a hash and gets a signature value back;
+everything else — the CMS, the timestamp, writing into the hole — is the same as for a
+PKCS#12 key, and the same split applies: the card is driven from the trusted process, never
+from the sandboxed worker.
+
+- **Which cards.** Anything with a PKCS#11 module, found through p11-kit: OpenSC registers
+  itself on Fedora, Debian and Ubuntu, so an Estonian ID card needs nothing configured —
+  `opensc` and a running `pcscd`. `--pkcs11-module LIB` (or `LEHT_PKCS11_MODULE` for the
+  viewer) names a module that did not register itself.
+- **PIN1 and PIN2.** An Estonian ID card carries two keys: one for logging in (PIN1) and
+  one for signing (PIN2), whose certificate says nonRepudiation. Leht lists the signing key
+  first, `auto` only ever picks such a key, and the viewer labels the field *PIN2* when the
+  token says so. A signing key that demands its PIN again for every signature
+  (`CKA_ALWAYS_AUTHENTICATE`) gets it from the same entry, so one dialog makes one
+  signature with one PIN.
+- **The PIN** is typed like the `.p12` password — `--password-fd N` or a prompt with echo
+  off, never an argument — and is wiped when the signing is done. A PIN inside the URI
+  (`pin-value=`) is refused. On a reader with its own keypad Leht asks for nothing and
+  says to enter it there.
+- **Before it blocks.** A wrong PIN is reported as such, and the card's own warnings are
+  passed on: "a few more wrong tries will block it", "one more wrong PIN will block it". A
+  blocked PIN is refused before anything is sent to the card; unblocking takes the PUK, in
+  DigiDoc4.
+- **Checked before it is written.** Leht assembles the CMS around the card's signature
+  value itself (OpenSSL signs only with keys it holds), so every signature is parsed back
+  and verified against the certificate before a byte goes into the file. A card whose key
+  does not match the certificate beside it produces an error, not a broken signature.
+- **Trust.** An ID-card signature verifies as *intact* at once, and as *trusted* only once
+  the CA that issued the card's certificate is trusted: the Signatures panel names the
+  issuer; add the Estonian state's root and that intermediate, as published by SK ID
+  Solutions, with `--trust` or *Trust a Certificate…*. Leht does not consult the EU Trusted
+  List, which is what would make it say *qualified*.
+
 ## Verifying
 
 `leht verify FILE [--trust CA.pem]... [--json]`, and in the viewer a Signatures panel plus a
@@ -158,6 +197,12 @@ Our own code agreeing with itself proves little about a format this old, so:
   Valid" for each one — an independent PDF signature verifier, not a library we link
   (`test_pdf_sign.cpp`).
 - **`qpdf --check`** reads every file we write.
+- **SoftHSM2 stands in for the card** (`test_pkcs11.cpp`, and the viewer's smoke test): a
+  token is made in a temporary directory, the test PKI's keys are put on it, and signing
+  runs through PKCS#11 exactly as with a card — RSA and P-384, a key that wants its PIN
+  for every signature (and a check that SoftHSM really refuses without it), a wrong PIN,
+  a certificate that belongs to another key, B-T. The last check, on a real ID card in a
+  real reader, is manual.
 - A **test PKI is generated at run time** — a root, RSA-2048 and ECDSA P-384 signers, an
   expired certificate, one whose key usage forbids signing — so no private key is ever
   committed. So is a **local RFC 3161 timestamp authority**, which makes B-T testable
@@ -168,7 +213,8 @@ Our own code agreeing with itself proves little about a format this old, so:
 ## In the viewer
 
 The **Sign** tool drags a box for a visible signature; *More → Sign Invisibly…* skips the
-box. The dialog takes the `.p12` and its password, what the signature should show — the
+box. The dialog takes the `.p12` and its password — or a key on an ID card and its PIN,
+listed from the cards in the readers — what the signature should show — the
 name and date, an image, or a signature **drawn** on a small canvas — the reason and
 location, and optionally a timestamp authority (remembered between sessions).
 
@@ -184,9 +230,9 @@ certificate's SHA-256 fingerprint.
 
 ## Not yet
 
-- **PKCS#11**: an Estonian ID-card, or any smartcard, through OpenSC. The `Identity` type
-  is the seam — OpenSSL 3 presents a token key as an ordinary `EVP_PKEY`, so a
-  `from_pkcs11()` factory is all the PDF side would need. Nothing else changes.
+- **Smart-ID and Mobile-ID**, the Estonian signing apps. The `Identity` behind a card key
+  is "a certificate plus something that signs a hash", which is what those services are
+  too.
 - **B-LT / LTV**: a DSS dictionary with OCSP and CRL data, and document timestamps, so a
   signature stays verifiable after its certificate expires or is revoked.
 - **The EU Trusted List**, which is what "qualified" means in practice.
