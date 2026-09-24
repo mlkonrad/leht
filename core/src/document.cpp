@@ -208,6 +208,15 @@ Document Document::open(const Context& ctx, const std::string& path) {
         throw Error(0, "cannot open a document from a moved-from Context");
     }
 
+    // MuPDF opens a directory as a document of the images in it: "leht info
+    // some-folder" would read a folder of photos as pages, and whether it
+    // works would depend on what happens to be in the folder. A document is
+    // a file.
+    std::error_code ec;
+    if (std::filesystem::is_directory(path, ec)) {
+        throw Error(0, path + " is a directory, not a document");
+    }
+
     // The lambda holds only a raw pointer and a const char*, both trivially
     // destructible, so a longjmp out of fz_open_document is safe here.
     fz_document* doc = nullptr;

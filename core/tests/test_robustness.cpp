@@ -114,6 +114,13 @@ void directory_as_input_fails_cleanly() {
     Context ctx;
     const std::string dir = fs::temp_directory_path().string();
     CHECK(throws_leht_error([&] { Document::open(ctx, dir); }));
+    // Also with a picture in it, which MuPDF itself would open as a page.
+    const fs::path pictures = fs::temp_directory_path() / "leht_test_picture_dir";
+    fs::remove_all(pictures);
+    fs::create_directory(pictures);
+    fs::copy_file(corpus("page.png"), pictures / "page.png");
+    CHECK(throws_leht_error([&] { Document::open(ctx, pictures.string()); }));
+    fs::remove_all(pictures);
 }
 
 // -- malformed and degenerate inputs ----------------------------------------
