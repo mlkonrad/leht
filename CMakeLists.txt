@@ -21,6 +21,7 @@ option(LEHT_BUILD_TESTS  "Build the test suite"              ON)
 option(LEHT_BUILD_BENCH  "Build the benchmark harness"       ON)
 option(LEHT_SANITIZE     "Enable AddressSanitizer + UBSan"   OFF)
 option(LEHT_BUILD_FUZZ   "Build the fuzz target"              ON)
+option(LEHT_WITH_OCR     "OCR with Tesseract: leht ocr, and Recognize Text in the viewer" ON)
 
 include(CompilerWarnings)
 include(GNUInstallDirs)
@@ -49,6 +50,11 @@ add_subdirectory(core)
 add_subdirectory(ipc)
 # Signing and verification (M5): OpenSSL, kept out of core/.
 add_subdirectory(crypto)
+# Reading text off scanned pages: Tesseract, kept out of core/ the same way.
+# Off, leht builds without it and says OCR is not available.
+if(LEHT_WITH_OCR)
+    add_subdirectory(ocr)
+endif()
 if(LEHT_BUILD_WORKER)
     add_subdirectory(worker)
 elseif(LEHT_BUILD_UI)
@@ -76,5 +82,5 @@ endif()
 
 message(STATUS "")
 message(STATUS "leht ${PROJECT_VERSION}  (${CMAKE_BUILD_TYPE})")
-message(STATUS "  cli=${LEHT_BUILD_CLI}  ui=${LEHT_BUILD_UI}  worker=${LEHT_BUILD_WORKER}  tests=${LEHT_BUILD_TESTS}  bench=${LEHT_BUILD_BENCH}  fuzz=${LEHT_BUILD_FUZZ}  sanitize=${LEHT_SANITIZE}")
+message(STATUS "  cli=${LEHT_BUILD_CLI}  ui=${LEHT_BUILD_UI}  worker=${LEHT_BUILD_WORKER}  tests=${LEHT_BUILD_TESTS}  bench=${LEHT_BUILD_BENCH}  fuzz=${LEHT_BUILD_FUZZ}  sanitize=${LEHT_SANITIZE}  ocr=${LEHT_WITH_OCR}")
 message(STATUS "")

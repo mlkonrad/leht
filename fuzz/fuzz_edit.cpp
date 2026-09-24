@@ -20,6 +20,7 @@
 #include "leht/ops/annotate.hpp"
 #include "leht/ops/crop.hpp"
 #include "leht/ops/forms.hpp"
+#include "leht/ops/ocr_layer.hpp"
 #include "leht/ops/redact.hpp"
 #include "leht/ops/watermark.hpp"
 
@@ -131,6 +132,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
             (void)leht::ops::delete_annotation(ctx, doc, a.id);
             break;
         }
+    });
+
+    // An OCR text layer, twice (the second reuses the first one's font), with
+    // words that are awkward on purpose: empty, astral, huge, zero-width.
+    attempt(data, size, [&](leht::Document& doc) {
+        const std::vector<leht::ops::OcrWord> words = {
+            {"Tere", {10, 10, 60, 24}},
+            {"õhtust", {70, 10, 130, 24}},
+            {"", {1, 1, 5, 5}},
+            {"\xF0\x9F\x93\x84", {140, 10, 160, 24}},
+            {"big", {0, 0, 1e6F, 1e6F}},
+            {"thin", {5, 5, 5.0001F, 30}},
+        };
+        (void)leht::ops::add_text_layer(ctx, doc, 0, words);
+        (void)leht::ops::add_text_layer(ctx, doc, doc.page_count() - 1, words);
+        (void)leht::ops::page_has_text(ctx, doc, 0);
     });
 
     // Forms: set every field to something plausible for its type, flatten.

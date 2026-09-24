@@ -219,6 +219,28 @@ void test_edit_messages_round_trip() {
     const Edit b2 = round_trip(box);
     CHECK(b2.pages == "2-" && b2.rects.size() == 1 && b2.rects[0].x1 == 500.0F);
 
+    Edit layer;
+    layer.kind = Edit::Kind::AddTextLayer;
+    layer.page = 3;
+    layer.words = {{"Tere", {1, 2, 30, 14}}, {"õhtust", {34, 2, 80, 14}}};
+    const Edit l2 = round_trip(layer);
+    CHECK(l2.page == 3 && l2.words.size() == 2 && l2.words[1].text == "õhtust" &&
+          l2.words[1].box.x1 == 80.0F);
+
+    Recognize rec;
+    rec.zoom = 300.0F / 72.0F;
+    rec.bitmap.width = 4;
+    rec.bitmap.height = 2;
+    rec.bitmap.stride = 12;
+    rec.bitmap.channels = 3;
+    rec.bitmap.pixels.assign(24, 200);
+    const Recognize rec2 = round_trip(rec);
+    CHECK(rec2.bitmap.width == 4 && rec2.bitmap.pixels.size() == 24 && rec2.zoom > 4.1F);
+    const TextPageList tp = round_trip(TextPageList{{0, 4, 7}});
+    CHECK(tp.pages == std::vector<int>({0, 4, 7}));
+    const Words words = round_trip(Words{layer.words});
+    CHECK(words.words.size() == 2 && words.words[0].text == "Tere");
+
     Edit del;
     del.kind = Edit::Kind::DeleteAnnot;
     del.annot_id = 17;
@@ -400,6 +422,18 @@ void test_edit_messages_reject_hostile_input() {
         box.kind = Edit::Kind::CropBox;
         box.rects = {{5, 6, 500, 700}};
         check_truncations(box);
+        Edit layer;
+        layer.kind = Edit::Kind::AddTextLayer;
+        layer.words = {{"Tere", {1, 2, 30, 14}}};
+        check_truncations(layer);
+        check_truncations(Words{layer.words});
+        Recognize rec;
+        rec.bitmap.width = 2;
+        rec.bitmap.height = 1;
+        rec.bitmap.stride = 6;
+        rec.bitmap.channels = 3;
+        rec.bitmap.pixels.assign(6, 1);
+        check_truncations(rec);
     }
     check_truncations(sample_annot_edit());
 

@@ -206,6 +206,8 @@ bool is_known(std::uint16_t type) noexcept {
     case MsgType::AnnotList: case MsgType::FieldList:
     case MsgType::PrepareSignature: case MsgType::ListSignatures:
     case MsgType::SignaturePrepared: case MsgType::SignatureList:
+    case MsgType::Recognize: case MsgType::Words:
+    case MsgType::ListTextPages: case MsgType::TextPageList:
         return true;
     }
     return false;
@@ -315,25 +317,19 @@ Outline Outline::decode(Reader& r) {
     return m;
 }
 
-void Rendered::encode(Writer& w) const {
-    w.i32(page);
-    w.f32(zoom);
-    w.i32(rotation);
-    w.u64(generation);
-    w.i32(bitmap.width);
-    w.i32(bitmap.height);
-    w.i32(bitmap.stride);
-    w.i32(bitmap.channels);
-    w.bytes(bitmap.pixels);
-}
-Rendered Rendered::decode(Reader& r) {
-    Rendered m;
-    m.page = page_index(r);
-    m.zoom = ipc::zoom(r);
-    m.rotation = ipc::rotation(r);
-    m.generation = r.u64();
+namespace {
 
-    Bitmap& b = m.bitmap;
+void put_bitmap(Writer& w, const Bitmap& b) {
+    w.i32(b.width);
+    w.i32(b.height);
+    w.i32(b.stride);
+    w.i32(b.channels);
+    w.bytes(b.pixels);
+}
+
+/// An RGB bitmap whose dimensions, stride and pixel count agree.
+Bitmap get_bitmap(Reader& r) {
+    Bitmap b;
     b.width = r.i32();
     b.height = r.i32();
     b.stride = r.i32();
@@ -356,6 +352,85 @@ Rendered Rendered::decode(Reader& r) {
     if (b.pixels.size() != stride * height) {
         throw ProtocolError("bitmap pixel data does not match its dimensions");
     }
+    return b;
+}
+
+constexpr std::size_t kMaxWords = 200000;  ///< more than any page has
+
+void put_words(Writer& w, const std::vector<ops::OcrWord>& words) {
+    w.u32(static_cast<std::uint32_t>(words.size()));
+    for (const ops::OcrWord& word : words) {
+        w.str(word.text);
+        put_rect(w, word.box);
+    }
+}
+
+std::vector<ops::OcrWord> get_words(Reader& r) {
+    const std::size_t n = r.count(20);
+    if (n > kMaxWords) {
+        throw ProtocolError("too many words");
+    }
+    std::vector<ops::OcrWord> out;
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        ops::OcrWord word;
+        word.text = r.str(kMaxName);
+        word.box = get_rect(r);
+        out.push_back(std::move(word));
+    }
+    return out;
+}
+
+}  // namespace
+
+void Rendered::encode(Writer& w) const {
+    w.i32(page);
+    w.f32(zoom);
+    w.i32(rotation);
+    w.u64(generation);
+    put_bitmap(w, bitmap);
+}
+Rendered Rendered::decode(Reader& r) {
+    Rendered m;
+    m.page = page_index(r);
+    m.zoom = ipc::zoom(r);
+    m.rotation = ipc::rotation(r);
+    m.generation = r.u64();
+    m.bitmap = get_bitmap(r);
+    return m;
+}
+
+void Recognize::encode(Writer& w) const {
+    w.f32(zoom);
+    put_bitmap(w, bitmap);
+}
+Recognize Recognize::decode(Reader& r) {
+    Recognize m;
+    m.zoom = ipc::zoom(r);
+    m.bitmap = get_bitmap(r);
+    return m;
+}
+
+void TextPageList::encode(Writer& w) const {
+    w.u32(static_cast<std::uint32_t>(pages.size()));
+    for (const int p : pages) {
+        w.i32(p);
+    }
+}
+TextPageList TextPageList::decode(Reader& r) {
+    TextPageList m;
+    const std::size_t n = r.count(4);
+    m.pages.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        m.pages.push_back(page_index(r));
+    }
+    return m;
+}
+
+void Words::encode(Writer& w) const { put_words(w, words); }
+Words Words::decode(Reader& r) {
+    Words m;
+    m.words = get_words(r);
     return m;
 }
 
@@ -476,13 +551,17 @@ void Edit::encode(Writer& w) const {
         w.str(pages);
         put_rect(w, rects.empty() ? Rect{} : rects.front());
         break;
+    case Kind::AddTextLayer:
+        w.i32(page);
+        put_words(w, words);
+        break;
     }
 }
 
 Edit Edit::decode(Reader& r) {
     Edit m;
     const std::uint8_t kind = r.u8();
-    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::CropBox)) {
+    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::AddTextLayer)) {
         throw ProtocolError("unknown edit kind");
     }
     m.kind = static_cast<Kind>(kind);
@@ -570,6 +649,10 @@ Edit Edit::decode(Reader& r) {
     case Kind::CropBox:
         m.pages = r.str(kMaxName);
         m.rects.push_back(get_rect(r));
+        break;
+    case Kind::AddTextLayer:
+        m.page = page_index(r);
+        m.words = get_words(r);
         break;
     }
     return m;

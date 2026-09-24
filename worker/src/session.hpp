@@ -54,6 +54,7 @@ private:
     void on_save(std::uint64_t id, ipc::Frame& frame);
     void on_list_annots(std::uint64_t id);
     void on_list_fields(std::uint64_t id);
+    void on_list_text_pages(std::uint64_t id);
     void on_prepare_signature(std::uint64_t id, ipc::Frame& frame);
     void on_list_signatures(std::uint64_t id, const ipc::ListSignatures& msg);
 

@@ -60,6 +60,10 @@ void decode_frame(const Frame& f) {
     case MsgType::ListSignatures: (void)decode_as<ListSignatures>(f); break;
     case MsgType::SignaturePrepared: (void)decode_as<SignaturePrepared>(f); break;
     case MsgType::SignatureList: (void)decode_as<SignatureList>(f); break;
+    case MsgType::Recognize: (void)decode_as<Recognize>(f); break;
+    case MsgType::Words: (void)decode_as<Words>(f); break;
+    case MsgType::ListTextPages: (void)decode_as<ListTextPages>(f); break;
+    case MsgType::TextPageList: (void)decode_as<TextPageList>(f); break;
     }
 }
 

@@ -7,6 +7,7 @@
 #include "leht/error.hpp"
 #include "leht/ops/annotate.hpp"
 #include "leht/ops/crop.hpp"
+#include "leht/ops/ocr_layer.hpp"
 #include "leht/crypto/crypto.hpp"
 #include "leht/ops/forms.hpp"
 #include "leht/ops/sign.hpp"
@@ -167,6 +168,10 @@ void Session::dispatch(Frame& frame) {
         case MsgType::ListFields:
             (void)decode_as<ListFields>(frame);
             on_list_fields(id);
+            return;
+        case MsgType::ListTextPages:
+            (void)decode_as<ListTextPages>(frame);
+            on_list_text_pages(id);
             return;
         case MsgType::PrepareSignature:
             on_prepare_signature(id, frame);
@@ -417,6 +422,12 @@ void Session::on_edit(std::uint64_t id, const Edit& m) {
         out.pages = {page};
         break;
     }
+    case Edit::Kind::AddTextLayer:
+        // The words were read elsewhere (the OCR worker); writing them is
+        // an ordinary edit, and replaying it never runs OCR again.
+        (void)ops::add_text_layer(ctx_, *doc_, m.page, m.words);
+        out.pages = {m.page};
+        break;
     case Edit::Kind::CropBox:
         if (m.rects.empty()) {
             channel_.send(id, Failed{"no box to crop to"});
@@ -548,6 +559,19 @@ void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& ms
             }
         }
         out.rows.push_back(std::move(row));
+    }
+    channel_.send(id, out);
+}
+
+void Session::on_list_text_pages(std::uint64_t id) {
+    if (!require_document(id)) {
+        return;
+    }
+    TextPageList out;
+    for (int p = 0; p < doc_->page_count(); ++p) {
+        if (ops::page_has_text(ctx_, *doc_, p)) {
+            out.pages.push_back(p);
+        }
     }
     channel_.send(id, out);
 }

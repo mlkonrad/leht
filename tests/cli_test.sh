@@ -131,6 +131,30 @@ hl_id=$("$LEHT" annots "$OUT/n.pdf" | awk '$3 == "Highlight" {print $1; exit}')
 expect 1 "a highlight cannot move"         annotate "$OUT/n.pdf" --move "$hl_id:1,1,50,20" -o "$OUT/ft3.pdf"
 [[ -e "$OUT/ft3.pdf" ]] && { echo "FAIL  a refused move still wrote output"; failures=$((failures + 1)); }
 
+# OCR (M2): a picture of a page becomes searchable.
+if "$LEHT" ocr --languages 2>/dev/null | grep -qx eng; then
+    expect 0 "render a page as a picture"      render "$IN" -p 1 -z 2 -o "$OUT/scan.png"
+    expect 0 "the picture as a PDF"            merge "$OUT/scan.png" -o "$OUT/scan.pdf"
+    # Through a file, not a pipe: grep -q stops reading at the first match,
+    # and under pipefail leht's SIGPIPE would then fail the whole line.
+    "$LEHT" text "$OUT/scan.pdf" > "$OUT/scan.txt"
+    grep -q "quick" "$OUT/scan.txt" && {
+        echo "FAIL  the scan already had text"; failures=$((failures + 1)); }
+    expect 1 "ocr with a language not installed" ocr "$OUT/scan.pdf" --lang klingon -o "$OUT/nope.pdf"
+    expect 1 "ocr --dpi out of range"          ocr "$OUT/scan.pdf" --dpi 5000 -o "$OUT/nope.pdf"
+    expect 1 "ocr will not overwrite its input" ocr "$OUT/scan.pdf" -o "$OUT/scan.pdf"
+    [[ -e "$OUT/nope.pdf" ]] && { echo "FAIL  a refused ocr still wrote output"; failures=$((failures + 1)); }
+    expect 0 "ocr the scan"                    ocr "$OUT/scan.pdf" --lang eng --dpi 150 -o "$OUT/scan-ocr.pdf"
+    "$LEHT" text "$OUT/scan-ocr.pdf" > "$OUT/scan-ocr.txt"
+    grep -q "quick brown" "$OUT/scan-ocr.txt" || {
+        echo "FAIL  the OCR'd scan does not say 'quick brown'"; failures=$((failures + 1)); }
+    expect 0 "ocr leaves a page that has text"  ocr "$IN" -p 1 --lang eng -o "$OUT/digital.pdf"
+    grep -q "already had text" "$OUT/stdout" || {
+        echo "FAIL  ocr did not say it skipped a page with text"; failures=$((failures + 1)); }
+else
+    echo "  skip  ocr (no Tesseract English data, or built without OCR)"
+fi
+
 # Forms.
 FORM="$CORPUS/form.pdf"
 if [[ -f "$FORM" ]]; then

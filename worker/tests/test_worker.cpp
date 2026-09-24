@@ -11,6 +11,9 @@
 #include "leht/ipc/protocol.hpp"
 #include "leht/ops/annotate.hpp"
 #include "leht/renderer.hpp"
+#ifdef LEHT_HAVE_OCR
+#include "leht/ocr/ocr.hpp"
+#endif
 #include "leht/text.hpp"
 #include "leht/crypto/crypto.hpp"
 #include "leht/error.hpp"
@@ -803,6 +806,110 @@ void verification_needs_the_preload_inside_the_sandbox() {
 #endif
 }
 
+// --- OCR (M2) -------------------------------------------------------------------
+
+#ifdef LEHT_HAVE_OCR
+bool english_installed() {
+    const auto langs = leht::ocr::installed_languages(leht::ocr::default_datadir());
+    return std::find(langs.begin(), langs.end(), "eng") != langs.end();
+}
+
+void the_ocr_worker_reads_pixels_in_its_sandbox() {
+    if (!english_installed()) {
+        std::printf("      SKIP no Tesseract English data\n");
+        return;
+    }
+    const float zoom = 300.0F / 72.0F;
+    leht::Context ctx;
+    leht::Document doc = leht::Document::open(ctx, corpus("text_10p.pdf"));
+    const auto bmp = leht::Renderer(ctx, doc).render(0, zoom);
+    CHECK(bmp.has_value());
+
+    auto w = WorkerProcess::spawn(LEHT_WORKER_EXE, {"--ocr=eng"});
+    w->handshake();
+    Recognize r;
+    r.zoom = zoom;
+    r.bitmap = *bmp;
+    w->channel().send(7, r);
+    const Frame f = next(*w);
+    CHECK(f.id == 7 && f.type == MsgType::Words);
+    const auto words = decode_as<Words>(f).words;
+    CHECK(words.size() > 300);
+    CHECK(std::any_of(words.begin(), words.end(),
+                      [](const leht::ops::OcrWord& x) { return x.text == "quick"; }));
+
+    // Anything but pixels is refused, and the worker goes on reading.
+    w->channel().send(8, ListAnnots{});
+    CHECK(next(*w).type == MsgType::Failed);
+    w->channel().send(9, r);
+    CHECK(next(*w).type == MsgType::Words);
+
+    // A language that is not installed: it cannot start at all.
+    auto missing = WorkerProcess::spawn(LEHT_WORKER_EXE, {"--ocr=klingon"});
+    bool handshook = true;
+    try {
+        missing->handshake();
+    } catch (const std::exception&) {
+        handshook = false;
+    }
+    CHECK(!handshook);
+}
+
+void the_ocr_worker_must_load_before_its_sandbox() {
+#if defined(__SANITIZE_ADDRESS__)
+    std::printf("      SKIP sanitizer build runs the worker unsandboxed\n");
+    return;
+#else
+    if (::getenv("LEHT_WORKER_NO_SANDBOX") != nullptr || !english_installed()) {
+        std::printf("      SKIP the sandbox is off, or no English data\n");
+        return;
+    }
+    // Loading the language data after the sandbox is up opens a file under
+    // seccomp: the worker is killed before it can even answer the Hello.
+    ::setenv("LEHT_WORKER_NO_PRELOAD", "1", 1);
+    auto w = WorkerProcess::spawn(LEHT_WORKER_EXE, {"--ocr=eng"});
+    ::unsetenv("LEHT_WORKER_NO_PRELOAD");
+    bool handshook = true;
+    try {
+        w->handshake();
+    } catch (const std::exception&) {
+        handshook = false;
+    }
+    CHECK(!handshook);
+    const auto status = w->wait_for(std::chrono::seconds(5));
+    CHECK(status.has_value() && status->signaled);
+#endif
+}
+#endif
+
+void a_text_layer_replays_and_is_found() {
+    // The words ride in the edit log: replaying them needs no OCR at all.
+    const std::string in = corpus("text_10p.pdf");
+    for (int run = 0; run < 2; ++run) {
+        auto w = start();
+        (void)open_ok(*w, in);
+        w->channel().send(1, ListTextPages{});
+        CHECK(decode_as<TextPageList>(next(*w)).pages.size() == 10);  // born-digital
+        Edit layer;
+        layer.kind = Edit::Kind::AddTextLayer;
+        layer.page = 2;
+        layer.words = {{"Tere", {72, 30, 120, 48}}, {"õhtust", {126, 30, 190, 48}}};
+        CHECK(edit_ok(*w, layer).pages == std::vector<int>({2}));
+        w->channel().send(2, Search{"õhtust", 5});
+        bool found = false;
+        for (;;) {
+            const Frame f = next(*w);
+            if (f.type == MsgType::PageMatches) {
+                found = found || decode_as<PageMatches>(f).page == 2;
+            } else {
+                CHECK(f.type == MsgType::SearchDone);
+                break;
+            }
+        }
+        CHECK(found);
+    }
+}
+
 /// A document whose signature is nonsense must come back as a report, not as a
 /// dead worker: this is hostile DER reaching OpenSSL inside the sandbox.
 void a_broken_signature_is_reported_not_fatal() {
@@ -849,6 +956,11 @@ int main() {
     RUN(forms_through_the_worker);
     RUN(replay_is_deterministic);
     RUN(moves_new_words_and_crop_boxes_replay);
+    RUN(a_text_layer_replays_and_is_found);
+#ifdef LEHT_HAVE_OCR
+    RUN(the_ocr_worker_reads_pixels_in_its_sandbox);
+    RUN(the_ocr_worker_must_load_before_its_sandbox);
+#endif
     RUN(edits_on_a_non_pdf_fail_cleanly);
     RUN(signing_through_the_worker);
     RUN(verification_needs_the_preload_inside_the_sandbox);

@@ -18,6 +18,7 @@
 #include "leht/ops/annotate.hpp"
 #include "leht/ops/crop.hpp"
 #include "leht/ops/forms.hpp"
+#include "leht/ops/ocr_layer.hpp"
 #include "leht/ops/sign.hpp"
 #include "leht/ops/watermark.hpp"
 #include "leht/renderer.hpp"
@@ -31,7 +32,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 5;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box
+inline constexpr std::uint32_t kProtocolVersion = 6;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -58,6 +59,8 @@ enum class MsgType : std::uint16_t {
     ListFields = 13,
     PrepareSignature = 14,  ///< carries the output file's fd via SCM_RIGHTS
     ListSignatures = 15,
+    Recognize = 16,    ///< to the OCR worker: pixels to read
+    ListTextPages = 17,
 
     // worker -> viewer
     HelloAck = 100,
@@ -76,6 +79,8 @@ enum class MsgType : std::uint16_t {
     FieldList = 113,
     SignaturePrepared = 114,
     SignatureList = 115,
+    Words = 116,       ///< from the OCR worker: what it read
+    TextPageList = 117,
 };
 
 /// Whether a frame of `type` may carry a file descriptor: only those that hand
@@ -182,6 +187,7 @@ struct Edit {
         MoveAnnot = 8,    ///< annot_id, rects[0]: its new bounds
         SetAnnotContents = 9,  ///< annot_id, text
         CropBox = 10,     ///< pages, rects[0]: the box to keep
+        AddTextLayer = 11,  ///< page, words: an OCR'd page's invisible text
     };
     Kind kind = Kind::Redact;
     int page = 0;
@@ -193,6 +199,7 @@ struct Edit {
     int annot_id = 0;
     ops::WatermarkOptions watermark;
     ops::Margins margins;
+    std::vector<ops::OcrWord> words;
     void encode(Writer& w) const;
     static Edit decode(Reader& r);
 };
@@ -204,6 +211,23 @@ struct Save {
     static constexpr MsgType kType = MsgType::Save;
     void encode(Writer&) const {}
     static Save decode(Reader&) { return {}; }
+};
+
+/// To the OCR worker: read the text in `bitmap`, a page rendered at `zoom`
+/// (pixels per point), and give the words back in base coordinates.
+struct Recognize {
+    static constexpr MsgType kType = MsgType::Recognize;
+    float zoom = 1.0F;
+    Bitmap bitmap;  ///< RGB (3 channels)
+    void encode(Writer& w) const;
+    static Recognize decode(Reader& r);
+};
+
+/// Which pages already carry text (see ops::page_has_text): OCR leaves them.
+struct ListTextPages {
+    static constexpr MsgType kType = MsgType::ListTextPages;
+    void encode(Writer&) const {}
+    static ListTextPages decode(Reader&) { return {}; }
 };
 
 struct ListAnnots {
@@ -364,6 +388,21 @@ struct Saved {
     std::uint64_t bytes = 0;
     void encode(Writer& w) const;
     static Saved decode(Reader& r);
+};
+
+/// From the OCR worker: the words it read, in base coordinates.
+struct Words {
+    static constexpr MsgType kType = MsgType::Words;
+    std::vector<ops::OcrWord> words;
+    void encode(Writer& w) const;
+    static Words decode(Reader& r);
+};
+
+struct TextPageList {
+    static constexpr MsgType kType = MsgType::TextPageList;
+    std::vector<int> pages;  ///< 0-based, ascending
+    void encode(Writer& w) const;
+    static TextPageList decode(Reader& r);
 };
 
 struct AnnotList {

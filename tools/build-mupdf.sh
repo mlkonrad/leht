@@ -18,7 +18,8 @@ URL="https://mupdf.com/downloads/archive/mupdf-${VERSION}-source.tar.gz"
 
 dest="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/leht}"
 tree="${dest}/mupdf-${VERSION}-source"
-stamp="${tree}/.leht-built"
+# The stamp names the build's options: a change of options rebuilds.
+stamp="${tree}/.leht-built-no-tesseract"
 
 mkdir -p "$dest"
 if [[ -f "$stamp" ]]; then
@@ -41,10 +42,12 @@ rm -rf "$tree"
 tar -xzf "$tarball" -C "$dest"
 
 # HAVE_CURL=no: Leht never lets MuPDF fetch anything. X11/GLUT: viewer apps
-# we do not build. -fPIC so the static archives link into PIE executables.
+# we do not build. HAVE_TESSERACT/HAVE_LEPTONICA=no: Leht's OCR (ocr/) links the
+# system Tesseract, and MuPDF's bundled static copy would clash with it symbol
+# for symbol. -fPIC so the static archives link into PIE executables.
 echo "building MuPDF ${VERSION} (a few minutes)" >&2
 make -C "$tree" -j"$(nproc)" build=release \
-     HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no \
+     HAVE_X11=no HAVE_GLUT=no HAVE_CURL=no HAVE_TESSERACT=no HAVE_LEPTONICA=no \
      XCFLAGS=-fPIC libs >&2
 
 touch "$stamp"

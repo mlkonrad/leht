@@ -12,6 +12,12 @@ pkg_check_modules(SECCOMP REQUIRED IMPORTED_TARGET libseccomp)
 # signing key never comes near this process.
 target_link_libraries(leht_worker PRIVATE leht::core leht::crypto leht::ipc leht::warnings
                       PkgConfig::SECCOMP)
+# --ocr=LANGS: the same binary, reading page images for the viewer's OCR.
+if(LEHT_WITH_OCR)
+    target_sources(leht_worker PRIVATE src/ocr_worker.cpp)
+    target_link_libraries(leht_worker PRIVATE leht::ocr)
+    target_compile_definitions(leht_worker PRIVATE LEHT_HAVE_OCR)
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS leht_worker RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/leht)
@@ -27,6 +33,10 @@ if(LEHT_BUILD_TESTS)
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus"
         LEHT_WORKER_EXE="$<TARGET_FILE:leht_worker>")
     add_dependencies(test_worker leht_worker)
+    if(LEHT_WITH_OCR)
+        target_link_libraries(test_worker PRIVATE leht::ocr)
+        target_compile_definitions(test_worker PRIVATE LEHT_HAVE_OCR)
+    endif()
     add_test(NAME test_worker COMMAND test_worker)
     if(LEHT_SANITIZE)
         set_tests_properties(test_worker PROPERTIES ENVIRONMENT "${LEHT_SANITIZER_ENV}")

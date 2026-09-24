@@ -22,6 +22,10 @@
 #include "leht/text.hpp"
 #include "leht/renderer.hpp"
 #include "leht/crypto/crypto.hpp"
+#include "leht/ops/ocr_layer.hpp"
+#ifdef LEHT_HAVE_OCR
+#include "leht/ocr/ocr.hpp"
+#endif
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -85,6 +89,10 @@ constexpr const char* kUsage =
     "            sign with a key in a PKCS#12 file or on an ID card (PAdES); the\n"
     "            original bytes are kept and the signature appended, so earlier\n"
     "            signatures stay valid\n"
+    "  ocr       FILE -o OUT.pdf [-p RANGES] [--lang est+eng] [--dpi N] [--force]\n"
+    "            make scanned pages searchable: an invisible text layer over the\n"
+    "            picture, which is left as it was. Pages that already have text are\n"
+    "            skipped unless --force. 'leht ocr --languages' lists what is installed\n"
     "  keys      [--pkcs11-module LIB]        list the signing keys on ID cards and\n"
     "            other PKCS#11 tokens, with the URI --pkcs11 takes\n"
     "  verify    FILE [--trust CA.pem]... [--json]\n"
@@ -229,7 +237,7 @@ bool takes_value(const std::string& name) {
         "--angle", "--size", "--color", "--highlight", "--underline", "--strike",
         "--note", "--stamp", "--delete", "--author", "--move", "--set-text", "--freetext",
         "--p12", "--password-fd", "--field", "--image", "--name", "--reason",
-        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module"};
+        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module", "--lang", "--dpi"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -1102,6 +1110,75 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
     return 0;
 }
 
+int cmd_ocr(const leht::Context& ctx, const Args& args) {
+#ifndef LEHT_HAVE_OCR
+    (void)ctx;
+    (void)args;
+    throw leht::Error(0, "this leht was built without OCR (-DLEHT_WITH_OCR=OFF)");
+#else
+    const std::string datadir = leht::ocr::default_datadir();
+    const auto installed = leht::ocr::installed_languages(datadir);
+    if (args.has_switch("--languages")) {
+        for (const std::string& lang : installed) {
+            std::printf("%s\n", lang.c_str());
+        }
+        return installed.empty() ? 1 : 0;
+    }
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+    std::error_code ec;
+    if (fs::exists(output, ec) && fs::equivalent(input, output, ec)) {
+        throw leht::Error(0, "ocr will not write over its input; give -o another path");
+    }
+    // Estonian and English when Estonian is there: the languages Leht is for.
+    std::string langs = args.flag("--lang");
+    if (langs.empty()) {
+        const bool est = std::find(installed.begin(), installed.end(), "est") != installed.end();
+        langs = est ? "est+eng" : "eng";
+    }
+    const int dpi = args.int_flag("--dpi", 300);
+    if (dpi < 72 || dpi > 600) {
+        throw leht::Error(0, "--dpi must be 72 to 600");
+    }
+    const bool force = args.has_switch("--force");
+    // All of the language data loads here, before any page is read.
+    leht::ocr::Recognizer recognizer(langs, datadir);
+
+    leht::Document doc = leht::Document::open(ctx, input);
+    if (doc.needs_password()) {
+        throw leht::Error(0, "document is encrypted; decrypt it first");
+    }
+    leht::Renderer renderer(ctx, doc);
+    const float zoom = static_cast<float>(dpi) / 72.0F;
+    int words = 0;
+    int read = 0;
+    int skipped = 0;
+    for (const int page : leht::page_set(args.flag("-p"), doc.page_count())) {
+        if (!force && leht::ops::page_has_text(ctx, doc, page)) {
+            ++skipped;
+            continue;
+        }
+        const auto bitmap = renderer.render(page, zoom);
+        if (!bitmap) {
+            std::fprintf(stderr, "leht: page %d could not be rendered; skipped\n", page + 1);
+            continue;
+        }
+        const int n = leht::ops::add_text_layer(ctx, doc, page, recognizer.recognize(*bitmap, zoom));
+        std::printf("  page %d: %d word%s\n", page + 1, n, n == 1 ? "" : "s");
+        words += n;
+        ++read;
+    }
+    doc.save(output, leht::SaveOptions{});
+    std::printf("read %d word%s on %d page%s (%s) -> %s\n", words, words == 1 ? "" : "s", read,
+                read == 1 ? "" : "s", langs.c_str(), output.c_str());
+    if (skipped > 0) {
+        std::printf("  %d page%s already had text and %s left alone (--force reads them too)\n",
+                    skipped, skipped == 1 ? "" : "s", skipped == 1 ? "was" : "were");
+    }
+    return 0;
+#endif
+}
+
 int cmd_verify(const leht::Context& ctx, const Args& args) {
     const std::string input = require_input(args);
     const bool json = args.has_switch("--json");
@@ -1554,6 +1631,7 @@ int main(int argc, char** argv) {
         if (cmd == "sign")     { return cmd_sign(ctx, args); }
         if (cmd == "verify")   { return cmd_verify(ctx, args); }
         if (cmd == "keys")     { return cmd_keys(args); }
+        if (cmd == "ocr")      { return cmd_ocr(ctx, args); }
 
         std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
         std::fputs(kUsage, stderr);
