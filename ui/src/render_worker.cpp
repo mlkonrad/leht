@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "render_worker.hpp"
 
+#include "leht/edit.hpp"
+
 #include <QSettings>
 
 #include "leht/crypto/crypto.hpp"
@@ -181,8 +183,7 @@ void RenderWorker::closeDocument() {
     crashes_ = 0;
     externalKills_ = 0;
     hostile_ = false;
-    log_.clear();
-    redo_.clear();
+    clearLog();
     if (cache_) {
         cache_->clear();
     }
@@ -710,6 +711,7 @@ bool RenderWorker::replayLog() {
             if (reply->type == ipc::MsgType::Failed) {
                 // Applied once, refused now: keep the edits that still apply.
                 log_.resize(i);
+                logGroups_.resize(i);
                 emit editFailed(QString::fromStdString(ipc::decode_as<ipc::Failed>(*reply).message));
                 return true;
             }
@@ -761,8 +763,10 @@ void RenderWorker::applyEdit(const ipc::Edit& edit, bool fromRedo) {
         }
         const ipc::Edited edited = ipc::decode_as<ipc::Edited>(*reply);
         log_.push_back(edit);
+        logGroups_.push_back(redoing_ != 0 ? redoing_ : openGroup_ != 0 ? openGroup_ : nextGroup_++);
         if (!fromRedo) {
             redo_.clear();
+            redoGroups_.clear();
         }
         publishEdited(edited);
         publishEditState();
@@ -925,8 +929,13 @@ void RenderWorker::undo() {
     if (log_.empty() || !proc_.load()) {
         return;
     }
-    redo_.push_back(std::move(log_.back()));
-    log_.pop_back();
+    const std::uint64_t group = logGroups_.back();
+    while (!log_.empty() && logGroups_.back() == group) {
+        redo_.push_back(std::move(log_.back()));
+        redoGroups_.push_back(group);
+        log_.pop_back();
+        logGroups_.pop_back();
+    }
     rebuild();
     publishEditState();
 }
@@ -935,9 +944,133 @@ void RenderWorker::redo() {
     if (redo_.empty() || !proc_.load()) {
         return;
     }
-    const ipc::Edit edit = std::move(redo_.back());
-    redo_.pop_back();
-    applyEdit(edit, /*fromRedo=*/true);
+    redoing_ = redoGroups_.back();
+    while (!redo_.empty() && redoGroups_.back() == redoing_) {
+        const ipc::Edit edit = std::move(redo_.back());
+        redo_.pop_back();
+        redoGroups_.pop_back();
+        applyEdit(edit, /*fromRedo=*/true);
+    }
+    redoing_ = 0;
+}
+
+void RenderWorker::recognizeText(QString pages, QString languages, int dpi,
+                                 bool skipPagesWithText) {
+    ocrCancel_ = false;
+    if (!proc_.load()) {
+        emit ocrFinished(0, 0, false, tr("No document is open."));
+        return;
+    }
+    std::vector<int> todo;
+    try {
+        todo = leht::page_set(pages.trimmed().toStdString(), static_cast<int>(baseSizes_.size()));
+    } catch (const leht::Error& e) {
+        emit ocrFinished(0, 0, false, QString::fromUtf8(e.what()));
+        return;
+    }
+    if (skipPagesWithText) {
+        auto reply = roundTrip(ipc::ListTextPages{}, Phase::Edit, -1);
+        try {
+            if (reply && reply->type == ipc::MsgType::TextPageList) {
+                const std::vector<int> withText =
+                    ipc::decode_as<ipc::TextPageList>(*reply).pages;
+                std::erase_if(todo, [&](int p) {
+                    return std::binary_search(withText.begin(), withText.end(), p);
+                });
+            }
+        } catch (const ipc::ProtocolError&) {
+            distrust();
+            (void)workerLost(Phase::Edit, -1);
+            emit ocrFinished(0, 0, false, tr("The document worker stopped."));
+            return;
+        }
+    }
+    if (todo.empty()) {
+        emit ocrFinished(0, 0, false, tr("Every chosen page already has text."));
+        return;
+    }
+
+    // Its own worker, for this run only: Tesseract and the language data
+    // load there, then its sandbox goes up, then it sees pixels only.
+    std::unique_ptr<ipc::WorkerProcess> ocr;
+    try {
+        ocr = ipc::WorkerProcess::spawn(workerPath().toStdString(),
+                                        {"--ocr=" + languages.toStdString()});
+        ocr->handshake();
+    } catch (const std::exception&) {
+        emit ocrFinished(0, 0, false,
+                         tr("OCR could not start for the languages “%1”.").arg(languages));
+        return;
+    }
+
+    const float zoom = static_cast<float>(dpi) / 72.0F;
+    const int total = static_cast<int>(todo.size());
+    int done = 0;
+    int words = 0;
+    QString error;
+    std::uint64_t id = 1;
+    beginEditGroup();
+    for (const int page : todo) {
+        if (ocrCancel_) {
+            break;
+        }
+        emit ocrProgress(done, total, page);
+        auto reply = roundTrip(ipc::Render{page, zoom, 0, kNoGeneration}, Phase::Page, page);
+        if (!proc_.load()) {
+            error = tr("The document worker stopped.");
+            break;
+        }
+        try {
+            if (!reply || reply->type != ipc::MsgType::Rendered) {
+                ++done;  // this page cannot be rendered; the others still can
+                continue;
+            }
+            ipc::Recognize request;
+            request.zoom = zoom;
+            request.bitmap = std::move(ipc::decode_as<ipc::Rendered>(*reply).bitmap);
+            ocr->channel().send(id, request);
+            // A page takes seconds; minutes means the worker is stuck.
+            const auto answer = ocr->channel().recv(std::chrono::minutes(3));
+            if (!answer) {
+                error = tr("The OCR worker stopped on page %1.").arg(page + 1);
+                break;
+            }
+            if (answer->type == ipc::MsgType::Failed) {
+                error = QString::fromStdString(ipc::decode_as<ipc::Failed>(*answer).message);
+                break;
+            }
+            ipc::Edit edit;
+            edit.kind = ipc::Edit::Kind::AddTextLayer;
+            edit.page = page;
+            edit.words = ipc::decode_as<ipc::Words>(*answer).words;
+            ++id;
+            if (!edit.words.empty()) {
+                words += static_cast<int>(edit.words.size());
+                applyEdit(edit);
+            }
+            ++done;
+        } catch (const ipc::Timeout&) {
+            error = tr("The OCR worker stopped answering on page %1.").arg(page + 1);
+            break;
+        } catch (const std::exception& e) {
+            error = QString::fromUtf8(e.what());
+            break;
+        }
+    }
+    endEditGroup();
+    emit ocrProgress(done, total, -1);
+    emit ocrFinished(words, done, ocrCancel_.load(), error);
+}
+
+void RenderWorker::beginEditGroup() { openGroup_ = nextGroup_++; }
+
+void RenderWorker::endEditGroup() { openGroup_ = 0; }
+
+void RenderWorker::clearLog() {
+    log_.clear();
+    redo_.clear();
+    logGroups_.clear();
+    redoGroups_.clear();
 }
 
 void RenderWorker::save(QString path) {
@@ -1005,8 +1138,7 @@ void RenderWorker::save(QString path) {
     // The saved file is the document now: undo and crash recovery start
     // from it, with an empty log.
     path_ = info.absoluteFilePath();
-    log_.clear();
-    redo_.clear();
+    clearLog();
     (void)openInWorker(/*silent=*/true);
     emit saved(path_);
     publishEditState();
@@ -1186,8 +1318,7 @@ void RenderWorker::signDocument(QString path, SignSpec spec) {
     // starts again from it. Undo does not reach back past a signature, which is
     // just as well -- undoing into it would only break it.
     path_ = info.absoluteFilePath();
-    log_.clear();
-    redo_.clear();
+    clearLog();
     (void)openInWorker(/*silent=*/true);
     emit saved(path_);
     publishEditState();

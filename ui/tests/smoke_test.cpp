@@ -26,6 +26,10 @@
 #include <QThread>
 
 #include "page_dialogs.hpp"
+#ifdef LEHT_HAVE_OCR
+#include "leht/ocr/ocr.hpp"
+#endif
+#include "leht/ops/merge.hpp"
 #include "render_worker.hpp"
 #include <QPlainTextEdit>
 
@@ -853,6 +857,83 @@ int main(int argc, char** argv) {
         }
         QObject::disconnect(listed);
     }
+
+    // --- OCR (M2) -----------------------------------------------------------
+#ifdef LEHT_HAVE_OCR
+    {
+        const auto langs = leht::ocr::installed_languages(leht::ocr::default_datadir());
+        if (std::find(langs.begin(), langs.end(), "eng") == langs.end()) {
+            std::printf("  skip  OCR (no Tesseract English data)\n");
+        } else {
+            QTemporaryDir tmp;
+            const QString scan = tmp.filePath(QStringLiteral("scan.pdf"));
+            {
+                // A picture of page 1: no text at all until OCR reads it.
+                leht::Context ctx;
+                leht::Document d = leht::Document::open(ctx, doc);
+                const auto bmp = leht::Renderer(ctx, d).render(0, 2.0F);
+                const std::string png = tmp.filePath(QStringLiteral("scan.png")).toStdString();
+                leht::write_png(ctx, *bmp, png);
+                (void)leht::ops::merge(ctx, {png, png}, scan.toStdString());  // two pages
+            }
+            window.openPath(scan);
+            pump(1500);
+            {
+                OcrDialog dialog(&window, view->pageCount(),
+                                 {QStringLiteral("eng"), QStringLiteral("est")});
+                check(dialog.pages().isEmpty() && dialog.skipPagesWithText() &&
+                          dialog.dpi() >= 150,
+                      "the OCR dialog starts at every page without text");
+                dialog.show();
+                pump(200);
+                shot(&dialog, "m2-ocr-dialog");
+            }
+            int progressCalls = 0;
+            int readWords = -1;
+            QString ocrError;
+            const auto p1 = QObject::connect(worker, &RenderWorker::ocrProgress, &window,
+                                             [&](int, int, int) { ++progressCalls; });
+            const auto p2 = QObject::connect(
+                worker, &RenderWorker::ocrFinished, &window,
+                [&](int words, int, bool, const QString& error) {
+                    readWords = words;
+                    ocrError = error;
+                });
+            QMetaObject::invokeMethod(
+                worker, [=] { worker->recognizeText(QString(), QStringLiteral("eng"), 150, true); },
+                Qt::QueuedConnection);
+            for (int i = 0; i < 120 && readWords < 0; ++i) {
+                pump(500);
+            }
+            if (!ocrError.isEmpty()) {
+                std::printf("      ocr error: %s\n", qPrintable(ocrError));
+            }
+            check(readWords > 600, "OCR through the viewer reads both scanned pages");
+            check(progressCalls >= 3, "and reports its progress");
+            check(window.isModified(), "the text layer is an edit");
+            // One run, one undo step, however many pages it read.
+            QMetaObject::invokeMethod(worker, "undo", Qt::QueuedConnection);
+            pump(2000);
+            check(!window.isModified(), "one Undo takes the whole OCR run back");
+            QMetaObject::invokeMethod(worker, "redo", Qt::QueuedConnection);
+            pump(2500);
+            check(window.isModified(), "and one Redo puts it all back");
+            check(window.save(), "the OCR'd scan saves");
+            pump(2000);
+            try {
+                leht::Context ctx;
+                leht::Document saved = leht::Document::open(ctx, scan.toStdString());
+                check(!leht::TextPage(ctx, saved, 0).search("quick brown").empty() &&
+                          !leht::TextPage(ctx, saved, 1).search("quick brown").empty(),
+                      "the saved scan is searchable on both pages");
+            } catch (const leht::Error&) {
+                check(false, "the OCR'd scan opens");
+            }
+            QObject::disconnect(p1);
+            QObject::disconnect(p2);
+        }
+    }
+#endif
 
     // --- Editing (M4b) -----------------------------------------------------
     {

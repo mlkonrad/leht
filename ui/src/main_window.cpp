@@ -9,6 +9,11 @@
 
 #include "page_view.hpp"
 #include "page_dialogs.hpp"
+#ifdef LEHT_HAVE_OCR
+#include "leht/ocr/ocr.hpp"
+#endif
+#include <QProgressDialog>
+#include <memory>
 #include "render_worker.hpp"
 
 #include "leht/ops/forms.hpp"
@@ -304,6 +309,68 @@ MainWindow::MainWindow() {
     });
 }
 
+void MainWindow::recognizeText() {
+#ifndef LEHT_HAVE_OCR
+    QMessageBox::information(this, tr("Recognize text"),
+                             tr("This build of Leht was made without OCR."));
+#else
+    QStringList installed;
+    for (const std::string& code :
+         leht::ocr::installed_languages(leht::ocr::default_datadir())) {
+        installed << QString::fromStdString(code);
+    }
+    if (installed.isEmpty()) {
+        QMessageBox::information(
+            this, tr("Recognize text"),
+            tr("No OCR languages are installed. Install Tesseract's language data -- on "
+               "Fedora, tesseract-langpack-est and tesseract-langpack-eng."));
+        return;
+    }
+    OcrDialog dialog(this, view_->pageCount(), installed);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    // Progress per page, with Cancel: the run is on the worker thread, and the
+    // cancel reaches it directly, not through its (busy) event queue.
+    auto* progress = new QProgressDialog(tr("Starting OCR…"), tr("Cancel"), 0, 0, this);
+    progress->setWindowTitle(tr("Recognize text"));
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(0);
+    progress->setAttribute(Qt::WA_DeleteOnClose);
+    RenderWorker* worker = worker_;
+    connect(progress, &QProgressDialog::canceled, this, [worker] { worker->cancelRecognition(); });
+    const auto step = connect(worker_, &RenderWorker::ocrProgress, progress,
+                              [progress](int done, int total, int page) {
+        progress->setMaximum(total);
+        progress->setValue(done);
+        if (page >= 0) {
+            progress->setLabelText(tr("Reading page %1 (%2 of %3)…")
+                                       .arg(page + 1).arg(done + 1).arg(total));
+        }
+    });
+    auto finished = std::make_shared<QMetaObject::Connection>();
+    *finished = connect(worker_, &RenderWorker::ocrFinished, this,
+                        [this, progress, step, finished](int words, int pages, bool cancelled,
+                                                         const QString& error) {
+        disconnect(step);
+        disconnect(*finished);
+        progress->close();
+        if (!error.isEmpty()) {
+            QMessageBox::warning(this, tr("Recognize text"), error);
+        }
+        statusBar()->showMessage(
+            cancelled ? tr("OCR cancelled: %n word(s) read", nullptr, words) + tr(" on %n page(s).", nullptr, pages)
+                      : tr("OCR read %n word(s)", nullptr, words) + tr(" on %n page(s).", nullptr, pages),
+            8000);
+    });
+    const QString pages = dialog.pages();
+    const QString languages = dialog.languages();
+    const int dpi = dialog.dpi();
+    const bool skip = dialog.skipPagesWithText();
+    onWorker([=](RenderWorker* w) { w->recognizeText(pages, languages, dpi, skip); });
+#endif
+}
+
 void MainWindow::onWorker(std::function<void(RenderWorker*)> fn) {
     RenderWorker* w = worker_;
     QMetaObject::invokeMethod(w, [w, fn = std::move(fn)] { fn(w); }, Qt::QueuedConnection);
@@ -467,6 +534,9 @@ void MainWindow::buildEditActions() {
             onWorker([=](RenderWorker* w) { w->addWatermark(pages, options); });
         }
     });
+    QAction* ocr = menu->addAction(tr("Recognize Text (OCR)…"));
+    ocr->setToolTip(tr("Make scanned pages searchable"));
+    connect(ocr, &QAction::triggered, this, &MainWindow::recognizeText);
     menu->addSeparator();
     QAction* signInvisibly = menu->addAction(tr("Sign Invisibly…"));
     signInvisibly->setToolTip(tr("Sign the document without marking a page"));

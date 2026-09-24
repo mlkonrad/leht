@@ -18,7 +18,9 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSettings>
+#include <QHash>
 #include <QSlider>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -277,6 +279,111 @@ leht::ops::Margins CropMarginsDialog::margins() const {
 }
 
 QString CropMarginsDialog::pages() const { return pages_->text().trimmed(); }
+
+// --- OCR -----------------------------------------------------------------------------
+
+namespace {
+
+/// A language code as a person would read it; the code itself when unknown.
+QString languageName(const QString& code) {
+    static const QHash<QString, const char*> names = {
+        {QStringLiteral("est"), QT_TR_NOOP("Estonian")},
+        {QStringLiteral("eng"), QT_TR_NOOP("English")},
+        {QStringLiteral("fin"), QT_TR_NOOP("Finnish")},
+        {QStringLiteral("rus"), QT_TR_NOOP("Russian")},
+        {QStringLiteral("lav"), QT_TR_NOOP("Latvian")},
+        {QStringLiteral("lit"), QT_TR_NOOP("Lithuanian")},
+        {QStringLiteral("deu"), QT_TR_NOOP("German")},
+        {QStringLiteral("swe"), QT_TR_NOOP("Swedish")},
+        {QStringLiteral("fra"), QT_TR_NOOP("French")},
+    };
+    const auto it = names.constFind(code);
+    return it == names.constEnd() ? code
+                                  : QStringLiteral("%1 (%2)").arg(QObject::tr(*it), code);
+}
+
+}  // namespace
+
+OcrDialog::OcrDialog(QWidget* parent, int pageCount, const QStringList& installed)
+    : QDialog(parent), pageCount_(pageCount) {
+    setWindowTitle(tr("Recognize text"));
+    QSettings settings;
+    QStringList wanted = settings.value(QStringLiteral("ocr/languages")).toStringList();
+    if (wanted.isEmpty()) {
+        for (const char* preferred : {"est", "eng"}) {
+            if (installed.contains(QString::fromLatin1(preferred))) {
+                wanted << QString::fromLatin1(preferred);
+            }
+        }
+    }
+
+    auto* layout = new QVBoxLayout(this);
+    auto* note = new QLabel(tr("Makes scanned pages searchable. The pictures are not changed: "
+                               "an invisible layer of text is laid over them, so the words "
+                               "can be found, selected and copied."), this);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+
+    auto* form = new QFormLayout;
+    auto* langBox = new QWidget(this);
+    auto* langLayout = new QVBoxLayout(langBox);
+    langLayout->setContentsMargins(0, 0, 0, 0);
+    for (const QString& code : installed) {
+        auto* box = new QCheckBox(languageName(code), langBox);
+        box->setProperty("code", code);
+        box->setChecked(wanted.contains(code));
+        langLayout->addWidget(box);
+        languages_.push_back(box);
+    }
+    form->addRow(tr("Languages:"), langBox);
+    pages_ = pagesField(this, QString());
+    form->addRow(tr("Pages:"), pages_);
+    skip_ = new QCheckBox(tr("Skip pages that already have text"), this);
+    skip_->setChecked(true);
+    skip_->setToolTip(tr("A page made on a computer already has its text; reading it again "
+                         "would only add a second, worse copy."));
+    form->addRow(QString(), skip_);
+    dpi_ = new QSpinBox(this);
+    dpi_->setRange(150, 600);
+    dpi_->setSingleStep(50);
+    dpi_->setSuffix(tr(" dpi"));
+    dpi_->setValue(settings.value(QStringLiteral("ocr/dpi"), 300).toInt());
+    dpi_->setToolTip(tr("300 suits most scans; small print reads better at 400."));
+    form->addRow(tr("Resolution:"), dpi_);
+    layout->addLayout(form);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Recognize"));
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        if (languages().isEmpty()) {
+            QMessageBox::warning(this, windowTitle(), tr("Choose at least one language."));
+            return;
+        }
+        if (!checkPages(this, pages_->text(), pageCount_)) {
+            return;
+        }
+        QSettings saved;
+        saved.setValue(QStringLiteral("ocr/languages"), languages().split(QLatin1Char('+')));
+        saved.setValue(QStringLiteral("ocr/dpi"), dpi_->value());
+        accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    layout->addWidget(buttons);
+}
+
+QString OcrDialog::languages() const {
+    QStringList codes;
+    for (const QCheckBox* box : languages_) {
+        if (box->isChecked()) {
+            codes << box->property("code").toString();
+        }
+    }
+    return codes.join(QLatin1Char('+'));
+}
+
+QString OcrDialog::pages() const { return pages_->text().trimmed(); }
+bool OcrDialog::skipPagesWithText() const { return skip_->isChecked(); }
+int OcrDialog::dpi() const { return dpi_->value(); }
 
 // --- Crop to a box ----------------------------------------------------------------
 

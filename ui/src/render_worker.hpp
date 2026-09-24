@@ -147,6 +147,25 @@ public slots:
 
     void undo();
     void redo();
+    /// Edits made between these two calls undo and redo as one step: an OCR
+    /// run is an edit per page, and one Undo takes the whole run back.
+    void beginEditGroup();
+    void endEditGroup();
+
+    /// OCR: renders each page of `pages` (a range spec; empty is all) at
+    /// `dpi`, has a sandboxed OCR worker read it in `languages` ("est+eng"),
+    /// and writes the words as an invisible text layer. Pages that already
+    /// have text are left out when `skipPagesWithText`. One undo step for the
+    /// whole run; pages finished before a cancel are kept. Emits ocrProgress
+    /// per page and ocrFinished at the end.
+    void recognizeText(QString pages, QString languages, int dpi, bool skipPagesWithText);
+
+public:
+    /// Stops a recognizeText() run after the page it is on. Safe to call
+    /// from any thread -- the GUI calls it while this one is busy.
+    void cancelRecognition() { ocrCancel_ = true; }
+
+public slots:
 
     /// Writes the edited document to `path`: into a temporary file beside it,
     /// written by the worker through a passed descriptor, then fsynced and
@@ -180,6 +199,11 @@ public slots:
     void addTrustedCertificate(QString pemPath);
 
 signals:
+    /// `done` of `total` pages read; `page` is the one being read now, -1 at the end.
+    void ocrProgress(int done, int total, int page);
+    /// A recognizeText() run ended: `words` read on `pages` pages. `error` is
+    /// empty unless it stopped for a reason other than a cancel.
+    void ocrFinished(int words, int pages, bool cancelled, QString error);
     void opened(int pageCount, QVector<QSize> baseSizes);
     void outlineReady(QVector<OutlineRow> rows);
     void passwordRequired(bool retry);
@@ -279,6 +303,15 @@ private:
 
     std::vector<leht::ipc::Edit> log_;   ///< applied since open or last save
     std::vector<leht::ipc::Edit> redo_;  ///< undone, newest last
+    // Undo groups, one per entry of log_ and redo_: entries sharing a group
+    // go back and forth together.
+    std::vector<std::uint64_t> logGroups_;
+    std::vector<std::uint64_t> redoGroups_;
+    std::uint64_t nextGroup_ = 1;
+    std::uint64_t openGroup_ = 0;  ///< nonzero between begin/endEditGroup
+    std::uint64_t redoing_ = 0;    ///< the group a redo is putting back
+    std::atomic<bool> ocrCancel_{false};
+    void clearLog();
 
     /// The live worker. Shared and atomic because setGeneration() reads it
     /// from the GUI thread while this thread may be replacing it.

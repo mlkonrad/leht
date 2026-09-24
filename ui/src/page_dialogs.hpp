@@ -8,6 +8,8 @@
 #include <QImage>
 #include <QSizeF>
 #include <QString>
+#include <QStringList>
+#include <QVector>
 
 class QCheckBox;
 class QComboBox;
@@ -17,6 +19,7 @@ class QLineEdit;
 class QPushButton;
 class QRadioButton;
 class QSlider;
+class QSpinBox;
 
 /// Everything `leht watermark` can do: text, pages, size, opacity, angle,
 /// colour, under or over -- with a preview on the current page.
@@ -65,6 +68,28 @@ private:
     QDoubleSpinBox* all_ = nullptr;
     QDoubleSpinBox* edge_[4] = {};  ///< left, top, right, bottom
     QLineEdit* pages_ = nullptr;
+};
+
+/// Recognize Text (OCR): which languages, which pages, how finely.
+class OcrDialog : public QDialog {
+    Q_OBJECT
+
+public:
+    /// `installed` are the language codes Tesseract has data for.
+    OcrDialog(QWidget* parent, int pageCount, const QStringList& installed);
+
+    /// Tesseract's syntax: "est+eng".
+    [[nodiscard]] QString languages() const;
+    [[nodiscard]] QString pages() const;
+    [[nodiscard]] bool skipPagesWithText() const;
+    [[nodiscard]] int dpi() const;
+
+private:
+    int pageCount_;
+    QVector<QCheckBox*> languages_;
+    QLineEdit* pages_ = nullptr;
+    QCheckBox* skip_ = nullptr;
+    QSpinBox* dpi_ = nullptr;
 };
 
 /// After a box is dragged with the Crop tool: which pages to crop to it.

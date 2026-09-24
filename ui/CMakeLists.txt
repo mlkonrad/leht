@@ -19,6 +19,12 @@ target_include_directories(leht_viewer_lib PUBLIC src)
 # and leht-worker never does -- see docs/signing.md.
 target_link_libraries(leht_viewer_lib PUBLIC leht::core leht::crypto leht::ipc
                       Qt6::Widgets Qt6::PrintSupport)
+# leht::ocr only lists the installed languages here; Tesseract itself runs in
+# the sandboxed OCR worker (leht-worker --ocr).
+if(LEHT_WITH_OCR)
+    target_link_libraries(leht_viewer_lib PUBLIC leht::ocr)
+    target_compile_definitions(leht_viewer_lib PUBLIC LEHT_HAVE_OCR)
+endif()
 
 # The viewer parses nothing itself: every document goes to leht-worker (M3).
 # The locations are baked in; render_worker.cpp tries the install tree first

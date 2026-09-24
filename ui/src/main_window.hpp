@@ -80,6 +80,10 @@ signals:
 protected:
     void closeEvent(QCloseEvent* event) override;
 
+public slots:
+    /// More -> Recognize Text (OCR)...
+    void recognizeText();
+
 private:
     void buildActions();
     void buildEditActions();
