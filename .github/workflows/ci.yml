@@ -21,7 +21,9 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     container: registry.fedoraproject.org/fedora:44
-    timeout-minutes: 45
+    # Build ~5 min, tests ~3, mutation fuzz at most 5 x 6 min, and a MuPDF
+    # rebuild when its cache key changes.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

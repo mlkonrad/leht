@@ -18,6 +18,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
 // Standalone driver: corpus replay plus deterministic mutation.
 // --------------------------------------------------------------------------
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -74,11 +75,12 @@ void mutate(std::vector<std::uint8_t>& bytes, std::mt19937& rng) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "usage: %s <corpus-dir> [iterations] [seed]\n"
+                     "usage: %s <corpus-dir> [iterations] [seed] [seconds]\n"
                      "\n"
                      "Replays every file in the corpus, then runs mutated\n"
-                     "variants. Build with LEHT_SANITIZE=ON or this proves\n"
-                     "very little.\n",
+                     "variants: `iterations` of them, or fewer if `seconds`\n"
+                     "(0: no limit) run out first. Build with LEHT_SANITIZE=ON\n"
+                     "or this proves very little.\n",
                      argv[0]);
         return 2;
     }
@@ -87,6 +89,10 @@ int main(int argc, char** argv) {
     const int iterations = argc > 2 ? std::atoi(argv[2]) : 2000;
     const unsigned seed =
         argc > 3 ? static_cast<unsigned>(std::atoi(argv[3])) : 1234U;
+    // A time budget keeps a CI step's length fixed as targets grow slower
+    // (fuzz_edit does more per input with every milestone).
+    const int seconds = argc > 4 ? std::atoi(argv[4]) : 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
 
     std::vector<std::vector<std::uint8_t>> seeds;
     if (fs::is_directory(corpus)) {
@@ -121,7 +127,11 @@ int main(int argc, char** argv) {
         fs::temp_directory_path() / "leht-fuzz-crash.bin";
 
     std::mt19937 rng{seed};
-    for (int i = 0; i < iterations; ++i) {
+    int ran = 0;
+    for (int i = 0; i < iterations; ++i, ++ran) {
+        if (seconds > 0 && std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
         std::vector<std::uint8_t> bytes = seeds[rng() % seeds.size()];
         const int rounds = 1 + static_cast<int>(rng() % 8);
         for (int r = 0; r < rounds; ++r) {
@@ -143,6 +153,7 @@ int main(int argc, char** argv) {
     // Survived: remove the artifact so a stale file cannot mislead later.
     std::error_code ec;
     fs::remove(artifact, ec);
-    std::printf("done: no crash, no sanitizer report\n");
+    std::printf("done: %d iteration%s, no crash, no sanitizer report\n", ran,
+                ran == 1 ? "" : "s");
     return 0;
 }
