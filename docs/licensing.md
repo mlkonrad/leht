@@ -21,7 +21,7 @@ known, weighed cost of the model, not an oversight.
 | **Qt6** | LGPL-3.0, dynamically linked | UI toolkit for the viewer |
 | **libseccomp** | LGPL-2.1-only, dynamically linked | Builds the seccomp-bpf filter that sandboxes `leht-worker` (M3) |
 | **OpenSSL** (libcrypto, libssl) | Apache-2.0, dynamically linked | Signing and verification: PKCS#12, CMS/PAdES, RFC 3161 timestamps, and TLS for an https timestamp authority (M5) |
-| **Tesseract** | Apache-2.0 | OCR, later phase |
+| **Tesseract** | Apache-2.0, dynamically linked | OCR (`ocr/`), in its own sandboxed worker in the viewer. Its glyphless font `tessdata/pdf.ttf` (572 bytes, Apache-2.0) is embedded in `core/src/ops/glyphless_font.hpp`, with attribution, for the invisible text layer |
 
 **qpdf was removed from the build.** MuPDF 1.28 covers the structure work it was brought in
 for — `pdf_graft_page` for collision-safe merging, `pdf_write_options` for garbage

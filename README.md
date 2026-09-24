@@ -60,6 +60,8 @@ leht form      FILE                               list form fields
 leht fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]
 leht sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto) [--box P:BOX] [--tsa URL]
 leht keys      [--pkcs11-module LIB]              signing keys on ID cards and tokens
+leht ocr       FILE -o OUT.pdf [-p RANGES] [--lang est+eng] [--dpi N] [--force]
+                                                  make scanned pages searchable
 leht verify    FILE [--trust CA.pem]... [--json]  check every signature
 ```
 
@@ -128,6 +130,11 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   against SoftHSM2 only; **not yet tried with a real card and reader.**
 - **Release readiness:** `cmake --install` with desktop integration, CI on every push,
   and the whole suite, sanitizers and a fuzz pass run against the pinned MuPDF 1.28.4.
+- **Viewer editing:** move and resize annotations, free text typed in place, crop to a
+  box, and every watermark and crop option the CLI has. See [docs/editing.md](docs/editing.md).
+- **OCR:** scanned pages made searchable with an invisible text layer — Estonian and
+  English by default — read by Tesseract in its own sandboxed worker. See
+  [docs/ocr.md](docs/ocr.md).
 
 **Later** — packaging as Flatpak, RPM and DEB, once Leht has been used day to day.
 
@@ -178,11 +185,13 @@ cmake -S . -B build -G Ninja -DLEHT_MUPDF_ROOT="$(tools/build-mupdf.sh)"
 ```sh
 # Fedora
 sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel \
-                 p11-kit-devel
+                 p11-kit-devel tesseract-devel leptonica-devel
+sudo dnf install tesseract-langpack-est tesseract-langpack-eng  # OCR languages
 sudo dnf install qt6-qtbase-devel qt6-qtsvg  # only for the viewer
 
 # Debian / Ubuntu
-sudo apt install g++ cmake ninja-build libmupdf-dev libssl-dev libseccomp-dev libp11-kit-dev
+sudo apt install g++ cmake ninja-build libmupdf-dev libssl-dev libseccomp-dev libp11-kit-dev \
+                 libtesseract-dev libleptonica-dev tesseract-ocr-est tesseract-ocr-eng
 sudo apt install qt6-base-dev                # only for the viewer
 ```
 

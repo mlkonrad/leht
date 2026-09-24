@@ -11,7 +11,7 @@ parses documents in. That is the whole list; `core/` links no second PDF library
 ```sh
 # Fedora
 sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel \
-                 p11-kit-devel
+                 p11-kit-devel tesseract-devel leptonica-devel
 ```
 
 Building the viewer (`-DLEHT_BUILD_UI=ON`) additionally needs **`qt6-qtbase-devel`**. The
@@ -23,7 +23,8 @@ of Leht:**
 
 ```sh
 sudo dnf install mupdf qpdf ghostscript poppler-utils python3-pillow python3-numpy \
-                 softhsm libasan libubsan clang
+                 softhsm tesseract-langpack-eng tesseract-langpack-est \
+                 libasan libubsan clang
 ```
 
 - `mupdf` and `qpdf` — the `mutool` and `qpdf` **command-line** binaries, which the
@@ -40,6 +41,8 @@ sudo dnf install mupdf qpdf ghostscript poppler-utils python3-pillow python3-num
   whenever SoftHSM can start inside it (NSS loads every p11-kit module) — with a test
   token, or as root with the default config, as in CI. The tests run it with
   `SOFTHSM2_CONF` pointing at a file that does not exist.
+- `tesseract-langpack-eng`, `-est` — the OCR tests read English and Estonian; without the
+  data they skip (77). `-DLEHT_WITH_OCR=OFF` builds without Tesseract at all.
 - `poppler-utils`, Pillow, NumPy — for the render cross-check described under Testing.
 - `libasan`, `libubsan` — **required for `-DLEHT_SANITIZE=ON` to link.** Fedora ships the
   compiler-side `libasan.so` symlink without the runtime, so a sanitizer build configures

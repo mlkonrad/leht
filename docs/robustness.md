@@ -380,6 +380,15 @@ The private key goes the other way and never enters the worker at all; see
 [signing.md](signing.md#the-key-never-enters-the-sandbox) for why the split is the way
 round it is, and what the trusted side checks before it signs.
 
+### The OCR worker (M2)
+
+`leht-worker --ocr=LANGS` is the same binary in a second role, started for one OCR run.
+Tesseract reads images derived from an untrusted document, so it gets its own process and
+the same seccomp sandbox — but only after it has loaded its language data, because loading
+is opening files, and seccomp kills a process for that. It accepts no file descriptors and
+answers only `Recognize` (pixels in, words out); the document worker does the rendering.
+A test moves the load after the sandbox and checks the worker dies. See [ocr.md](ocr.md).
+
 ### What is deliberately not isolated
 
 - **The CLI and write-side ops** (`merge`, `compress`, `encrypt`, ...) run in-process with
