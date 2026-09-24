@@ -22,6 +22,7 @@ add_library(lehtcore
     src/ops/encrypt.cpp
     src/ops/redact.cpp
     src/ops/crop.cpp
+    src/ops/ocr_layer.cpp
     src/ops/watermark.cpp
     src/ops/annotate.cpp
     src/ops/forms.cpp

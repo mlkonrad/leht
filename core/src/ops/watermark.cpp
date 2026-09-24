@@ -8,6 +8,7 @@
 #include "leht/edit.hpp"
 #include "leht/error.hpp"
 #include "mupdf_c.hpp"
+#include "page_content.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -18,9 +19,6 @@ namespace leht::ops {
 namespace {
 
 using OwnedFont = detail::Owned<fz_font, fz_drop_font>;
-
-const unsigned char kSave[] = {'q', '\n'};
-const unsigned char kRestore[] = {'Q', '\n'};
 
 /// `rune` in Windows-1252, the encoding the base-14 font is given, or -1.
 int to_windows_1252(int rune) {
@@ -80,59 +78,6 @@ void validate(const WatermarkOptions& o) {
             throw Error(0, "watermark colour components must be 0 to 1");
         }
     }
-}
-
-/// A resource name not yet used in `dict`.
-void unused_name(fz_context* g, pdf_obj* dict, char* out, std::size_t size) {
-    for (int i = 0;; ++i) {
-        fz_snprintf(out, size, i == 0 ? "LehtMark" : "LehtMark%d", i);
-        if (pdf_dict_gets(g, dict, out) == nullptr) {
-            return;
-        }
-    }
-}
-
-/// Wraps the page's existing content between `q_ref` and `end_ref` (streams
-/// holding "q" and "Q"), so whatever graphics state it leaves behind cannot
-/// affect what is drawn after it, then adds `mark` before or after it.
-///
-/// A single content stream is first replaced by an array holding it. That
-/// array is created into `new_list`, an outer-frame slot, so it is released
-/// even when a later call throws -- as one does when resolving /Contents
-/// makes MuPDF repair a damaged file mid-edit.
-void add_content(fz_context* g, pdf_document* pdf, pdf_obj* page_obj, pdf_obj** new_list,
-                 pdf_obj* q_ref, pdf_obj* end_ref, pdf_obj* mark, bool under) {
-    pdf_obj* contents = pdf_dict_get(g, page_obj, PDF_NAME(Contents));
-    pdf_obj* list = contents;
-    if (!pdf_is_array(g, contents)) {
-        *new_list = pdf_new_array(g, pdf, 4);
-        if (contents != nullptr) {
-            pdf_array_push(g, *new_list, contents);
-        }
-        pdf_dict_put(g, page_obj, PDF_NAME(Contents), *new_list);
-        list = *new_list;
-    }
-    pdf_array_insert(g, list, q_ref, 0);
-    pdf_array_push(g, list, end_ref);
-    if (under) {
-        pdf_array_insert(g, list, mark, 0);
-    } else {
-        pdf_array_push(g, list, mark);
-    }
-}
-
-/// The page's own /Resources, created (as a copy, if inherited) when absent.
-pdf_obj* own_resources(fz_context* g, pdf_obj* page_obj) {
-    pdf_obj* res = pdf_dict_get(g, page_obj, PDF_NAME(Resources));
-    if (res != nullptr) {
-        return res;
-    }
-    pdf_obj* inherited = pdf_dict_get_inheritable(g, page_obj, PDF_NAME(Resources));
-    if (inherited == nullptr) {
-        return pdf_dict_put_dict(g, page_obj, PDF_NAME(Resources), 2);
-    }
-    pdf_dict_put_drop(g, page_obj, PDF_NAME(Resources), pdf_copy_dict(g, inherited));
-    return pdf_dict_get(g, page_obj, PDF_NAME(Resources));
 }
 
 }  // namespace
@@ -241,22 +186,22 @@ int watermark(const Context& ctx, Document& doc, const std::string& pages,
             *xobj.slot() = pdf_new_xobject(g, pdf, bounds, fz_invert_matrix(ctm), res.get(),
                                            form.get());
 
-            pdf_obj* xobjects = pdf_dict_get(g, own_resources(g, p->obj), PDF_NAME(XObject));
+            pdf_obj* xobjects = pdf_dict_get(g, content::own_resources(g, p->obj), PDF_NAME(XObject));
             if (xobjects == nullptr) {
-                xobjects = pdf_dict_put_dict(g, own_resources(g, p->obj), PDF_NAME(XObject), 1);
+                xobjects = pdf_dict_put_dict(g, content::own_resources(g, p->obj), PDF_NAME(XObject), 1);
             }
             char name[32];
-            unused_name(g, xobjects, name, sizeof(name));
+            content::unused_name(g, xobjects, "LehtMark", name, sizeof(name));
             pdf_dict_puts(g, xobjects, name, xobj.get());
 
             *call.slot() = fz_new_buffer(g, 64);
             fz_append_printf(g, call.get(), "q /%s Do Q\n", name);
             *mark.slot() = pdf_add_stream(g, pdf, call.get(), nullptr, 0);
-            *q_buf.slot() = fz_new_buffer_from_copied_data(g, kSave, 2);
+            *q_buf.slot() = fz_new_buffer_from_copied_data(g, content::kSave, 2);
             *q_ref.slot() = pdf_add_stream(g, pdf, q_buf.get(), nullptr, 0);
-            *end_buf.slot() = fz_new_buffer_from_copied_data(g, kRestore, 2);
+            *end_buf.slot() = fz_new_buffer_from_copied_data(g, content::kRestore, 2);
             *end_ref.slot() = pdf_add_stream(g, pdf, end_buf.get(), nullptr, 0);
-            add_content(g, pdf, p->obj, new_list.slot(), q_ref.get(), end_ref.get(), mark.get(),
+            content::add_content(g, pdf, p->obj, new_list.slot(), q_ref.get(), end_ref.get(), mark.get(),
                         under);
         });
         ++marked;
