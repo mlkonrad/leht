@@ -32,7 +32,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 6;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR
+inline constexpr std::uint32_t kProtocolVersion = 7;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -450,6 +450,12 @@ struct SignatureRow {
     bool covers_whole_revision = false;
     bool changed_after_signing = false;
     bool later_signature_covers_changes = false;
+    // Certification and locks (see ops::SignatureInfo).
+    std::uint8_t certification = 0;
+    std::string locks;
+    bool changes_judged = false;
+    bool changes_permitted = true;
+    std::vector<std::string> change_problems;
 
     // From verification. `checked` is false when the byte range made
     // verification pointless.

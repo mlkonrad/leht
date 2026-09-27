@@ -21,6 +21,7 @@
 #include "leht/ops/crop.hpp"
 #include "leht/ops/forms.hpp"
 #include "leht/ops/ocr_layer.hpp"
+#include "leht/ops/sign.hpp"
 #include "leht/ops/redact.hpp"
 #include "leht/ops/watermark.hpp"
 
@@ -148,6 +149,13 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         (void)leht::ops::add_text_layer(ctx, doc, 0, words);
         (void)leht::ops::add_text_layer(ctx, doc, doc.page_count() - 1, words);
         (void)leht::ops::page_has_text(ctx, doc, 0);
+    });
+
+    // Signatures, and judging what changed after each against its
+    // certification and locks: old revisions read through xref_base.
+    attempt(data, size, [&](leht::Document& doc) {
+        (void)leht::ops::certification_level(ctx, doc);
+        (void)leht::ops::list_signatures(ctx, doc);
     });
 
     // Forms: set every field to something plausible for its type, flatten.

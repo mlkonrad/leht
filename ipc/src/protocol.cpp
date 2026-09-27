@@ -711,6 +711,8 @@ void PrepareSignature::encode(Writer& w) const {
         }
     }
     put_strings(w, q.appearance.lines);
+    w.u8(static_cast<std::uint8_t>(q.certify));
+    w.u8(q.override_certification ? 1 : 0);
 }
 
 PrepareSignature PrepareSignature::decode(Reader& r) {
@@ -757,6 +759,11 @@ PrepareSignature PrepareSignature::decode(Reader& r) {
     if (q.appearance.lines.size() > kMaxLines) {
         throw ProtocolError("too many text lines in a signature appearance");
     }
+    q.certify = r.u8();
+    if (q.certify > 3) {
+        throw ProtocolError("certification level out of range");
+    }
+    q.override_certification = r.boolean();
     return m;
 }
 
@@ -804,6 +811,14 @@ void SignatureList::encode(Writer& w) const {
         w.u8(s.covers_whole_revision ? 1 : 0);
         w.u8(s.changed_after_signing ? 1 : 0);
         w.u8(s.later_signature_covers_changes ? 1 : 0);
+        w.u8(s.certification);
+        w.str(s.locks);
+        w.u8(s.changes_judged ? 1 : 0);
+        w.u8(s.changes_permitted ? 1 : 0);
+        w.u32(static_cast<std::uint32_t>(s.change_problems.size()));
+        for (const std::string& p : s.change_problems) {
+            w.str(p);
+        }
         w.u8(s.checked ? 1 : 0);
         w.u8(s.intact ? 1 : 0);
         w.str(s.problem);
@@ -851,6 +866,20 @@ SignatureList SignatureList::decode(Reader& r) {
         s.covers_whole_revision = r.boolean();
         s.changed_after_signing = r.boolean();
         s.later_signature_covers_changes = r.boolean();
+        s.certification = r.u8();
+        if (s.certification > 3) {
+            throw ProtocolError("certification level out of range");
+        }
+        s.locks = r.str(kMaxString);
+        s.changes_judged = r.boolean();
+        s.changes_permitted = r.boolean();
+        const std::size_t problems = r.count(4);
+        if (problems > 10000) {
+            throw ProtocolError("too many change problems");
+        }
+        for (std::size_t j = 0; j < problems; ++j) {
+            s.change_problems.push_back(r.str(kMaxString));
+        }
         s.checked = r.boolean();
         s.intact = r.boolean();
         s.problem = r.str(kMaxString);

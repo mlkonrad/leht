@@ -532,6 +532,11 @@ void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& ms
         row.covers_whole_revision = s.covers_whole_revision;
         row.changed_after_signing = s.changed_after_signing;
         row.later_signature_covers_changes = s.later_signature_covers_changes;
+        row.certification = static_cast<std::uint8_t>(s.certification);
+        row.locks = s.locks;
+        row.changes_judged = s.changes_judged;
+        row.changes_permitted = s.changes_permitted;
+        row.change_problems = s.change_problems;
         if (s.range_ok) {
             // Hostile DER, parsed here rather than in the viewer. That is the
             // whole reason verification happens in the sandbox.

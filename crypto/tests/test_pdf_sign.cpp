@@ -8,6 +8,7 @@
 #include "leht/document.hpp"
 #include "leht/error.hpp"
 #include "leht/ops/annotate.hpp"
+#include "leht/ops/encrypt.hpp"
 #include "leht/ops/redact.hpp"
 #include "leht/ops/sign.hpp"
 #include "leht/ops/watermark.hpp"
@@ -418,6 +419,60 @@ void a_signature_stamp_is_only_a_picture() {
 
 }  // namespace
 
+void an_encrypted_document_is_signed_and_stays_encrypted() {
+    // The signature dictionary's /Contents is the one string an encrypted
+    // file must not encrypt: every other string in the new revision (the
+    // /Reason here) is encrypted as the file is.
+    using leht::ops::Encryption;
+    for (const Encryption method : {Encryption::Aes256, Encryption::Aes128}) {
+        const bool aes256 = method == Encryption::Aes256;
+        const TempPath enc(aes256 ? "sign_enc256_in.pdf" : "sign_enc128_in.pdf");
+        const TempPath out(aes256 ? "sign_enc256.pdf" : "sign_enc128.pdf");
+        const Context ctx;
+        leht::ops::EncryptOptions o;
+        o.user_password = "user pw";
+        o.owner_password = "owner pw";
+        o.method = method;
+        leht::ops::encrypt(ctx, corpus("text_10p.pdf"), enc.str(), o);
+        {
+            Document doc = Document::open(ctx, enc.str());
+            CHECK(doc.needs_password() && doc.authenticate("user pw"));
+            SignatureRequest req;
+            req.reason = "A reason kept secret";
+            req.name = "Mari Maasikas";
+            (void)sign_into(ctx, doc, out.str(), req);
+        }
+        const std::string bytes = leht::test::read_file(out.str());
+        CHECK(bytes.find("A reason kept secret") == std::string::npos);
+        CHECK(bytes.find("/Contents <30") != std::string::npos ||
+              bytes.find("/Contents<30") != std::string::npos);  // the CMS, in the clear
+
+        Document signed_ = Document::open(ctx, out.str());
+        CHECK(signed_.needs_password() && signed_.authenticate("user pw"));
+        const auto sigs = leht::ops::list_signatures(ctx, signed_);
+        CHECK(sigs.size() == 1 && sigs.front().range_ok);
+        CHECK(sigs.front().reason == "A reason kept secret");
+        const CmsReport r = leht::crypto::verify_cms(
+            sigs.front().contents, leht::ops::signed_bytes(ctx, signed_, sigs.front().range),
+            pki().trust());
+        CHECK(r.intact() && r.trust == Trust::Trusted);
+
+        if (leht::test::have_tool("qpdf")) {
+            CHECK(std::system(("qpdf --check --password='user pw' '" + out.str() +
+                               "' >/dev/null 2>&1").c_str()) == 0);
+        }
+        if (leht::test::have_tool("pdfsig")) {
+            const std::string said = leht::test::capture(
+                "SOFTHSM2_CONF=/nonexistent/softhsm2.conf pdfsig -upw 'user pw' '" + out.str() +
+                "' 2>&1");
+            if (said.find("Signature is Valid") == std::string::npos) {
+                std::fprintf(stderr, "pdfsig said:\n%s\n", said.c_str());
+            }
+            CHECK(said.find("Signature is Valid") != std::string::npos);
+        }
+    }
+}
+
 int main() {
     leht::crypto::init();
     RUN(an_invisible_signature_is_pades_b_b_and_verifies);
@@ -431,5 +486,6 @@ int main() {
     RUN(a_lying_byte_range_is_not_believed);
     RUN(a_timestamped_signature_is_b_t);
     RUN(a_signature_stamp_is_only_a_picture);
+    RUN(an_encrypted_document_is_signed_and_stays_encrypted);
     return 0;
 }

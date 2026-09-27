@@ -82,7 +82,20 @@ struct SignatureRequest {
     std::int64_t time = 0;
     /// Bytes of DER the hole must hold: crypto::estimate_signature_size().
     std::size_t reserve = 16384;
+    /// Certify the document (DocMDP): 1 no changes allowed after this
+    /// signature, 2 form filling and further signatures, 3 also annotations.
+    /// 0 makes an ordinary (approval) signature. A certification must be the
+    /// document's first signature.
+    int certify = 0;
+    /// Sign even though the document is certified with no changes allowed:
+    /// the new signature will then show that certification broken.
+    bool override_certification = false;
 };
+
+/// The document's certification level (see SignatureRequest::certify): 0 when
+/// it is not certified. What editing it may do without breaking the
+/// certification follows from this.
+int certification_level(const Context& ctx, Document& doc);
 
 struct PreparedSignature {
     ByteRange range;
@@ -143,6 +156,23 @@ struct SignatureInfo {
     /// itself intact is for the caller to check -- and only then does this
     /// mean "the changes are signed for as well".
     bool later_signature_covers_changes = false;
+
+    /// DocMDP: this signature certifies the document at this level (1 no
+    /// changes, 2 form filling and signing, 3 also annotations); 0 for an
+    /// ordinary approval signature.
+    int certification = 0;
+    /// FieldMDP: the fields this signature locks, in words ("all fields",
+    /// "fields a, b", "all fields except c"); empty when it locks none.
+    std::string locks;
+    /// A certification or a field lock applies to the changes made after this
+    /// signature, so they were judged: the two below mean something only then.
+    /// Without either, Leht reports changed_after_signing and no verdict --
+    /// see the note on that field.
+    bool changes_judged = false;
+    bool changes_permitted = true;
+    /// Why not, in words: "the content of page 2 changed", "field 'name' was
+    /// changed, but a signature locks it".
+    std::vector<std::string> change_problems;
 };
 
 /// Every signed signature field, in field order. Unsigned signature fields are

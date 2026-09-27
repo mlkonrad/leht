@@ -40,6 +40,11 @@ leht_add_test(test_redact)
 leht_add_test(test_crop_watermark)
 leht_add_test(test_annotate)
 leht_add_test(test_ocr_layer)
+leht_add_test(test_mdp)
+# Only to ask MuPDF's own validator for a second opinion at DocMDP level 1.
+# (Imported targets are directory-scoped; bench/ finds MuPDF the same way.)
+find_package(MuPDF REQUIRED)
+target_link_libraries(test_mdp PRIVATE MuPDF::MuPDF)
 leht_add_test(test_forms)
 
 # Independent cross-check against poppler. Self-consistency proves nothing about

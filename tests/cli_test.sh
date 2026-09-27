@@ -229,6 +229,31 @@ if command -v openssl >/dev/null 2>&1; then
     printf 'X' | dd of="$OUT/bad.pdf" bs=1 seek=300 conv=notrunc status=none
     expect 4 "verify: broken signature"      verify "$OUT/bad.pdf" --trust "$OUT/ca.pem"
 
+    # Certification (M3): what it allows, what it forbids, and exit code 7.
+    expect 1 "sign --certify junk"           sign "$IN" -o "$OUT/cert.pdf" --p12 "$OUT/id.p12" --certify maybe --password-fd 0 < "$OUT/pw"
+    expect 1 "certify an already signed file" sign "$OUT/sig.pdf" -o "$OUT/cert.pdf" --p12 "$OUT/id.p12" --certify forms --password-fd 0 < "$OUT/pw"
+    expect 0 "sign --certify forms"          sign "$IN" -o "$OUT/cert.pdf" --p12 "$OUT/id.p12" --certify forms --password-fd 0 < "$OUT/pw"
+    grep -q "certifies: form filling and signing allowed" "$OUT/stdout" || {
+        echo "FAIL  sign did not say what it certifies"; failures=$((failures + 1)); }
+    expect 0 "verify a certified file"       verify "$OUT/cert.pdf" --trust "$OUT/ca.pem"
+    grep -q "certifies the document" "$OUT/stdout" || {
+        echo "FAIL  verify did not report the certification"; failures=$((failures + 1)); }
+    expect 1 "annotating it is refused"      annotate "$OUT/cert.pdf" --note "1:60,60:later" -o "$OUT/cert2.pdf"
+    [[ -e "$OUT/cert2.pdf" ]] && { echo "FAIL  a refused annotate still wrote output"; failures=$((failures + 1)); }
+    expect 0 "annotate --force"              annotate "$OUT/cert.pdf" --note "1:60,60:later" --force -o "$OUT/cert2.pdf"
+    expect 7 "verify: a forbidden change"    verify "$OUT/cert2.pdf" --trust "$OUT/ca.pem"
+    grep -q "FORBIDDEN" "$OUT/stdout" || { echo "FAIL  verify did not name the forbidden change"; failures=$((failures + 1)); }
+    expect 0 "a second signature is allowed" sign "$OUT/cert.pdf" -o "$OUT/cert3.pdf" --p12 "$OUT/id.p12" --password-fd 0 < "$OUT/pw"
+    expect 0 "verify: permitted"             verify "$OUT/cert3.pdf" --trust "$OUT/ca.pem"
+    grep -q "permitted" "$OUT/stdout" || { echo "FAIL  verify did not say the change was permitted"; failures=$((failures + 1)); }
+
+    # An encrypted document is signed as it is: key password, then its own.
+    expect 0 "encrypt for signing"           encrypt "$IN" --user-pw docpw -o "$OUT/enc.pdf"
+    printf 'secret\ndocpw\n' > "$OUT/pws"
+    expect 0 "sign an encrypted document"    sign "$OUT/enc.pdf" -o "$OUT/encsig.pdf" --p12 "$OUT/id.p12" < "$OUT/pws"
+    printf 'secret\nwrong\n' > "$OUT/pwsbad"
+    expect 1 "with the wrong document password" sign "$OUT/enc.pdf" -o "$OUT/encbad.pdf" --p12 "$OUT/id.p12" < "$OUT/pwsbad"
+
     # Redacting a signed file warns that it breaks the signatures.
     expect 0 "redact a signed document"      redact "$OUT/sig.pdf" --rect "1:72,100,300,120" -o "$OUT/sigredact.pdf"
     grep -q "signature" "$OUT/stderr" || { echo "FAIL  redact did not warn about signatures"; failures=$((failures + 1)); }

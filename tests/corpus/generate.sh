@@ -195,6 +195,24 @@ FORM
     echo "  made  form.pdf (AcroForm: a text field and a checkbox)"
 fi
 
+# A certified document changed afterwards in a way its certification forbids:
+# a seed that takes the fuzzers through judging changes after a signature
+# (see core/src/ops/mdp.cpp). The key is made here and thrown away.
+LEHT_BIN="${LEHT_BIN:-$(command -v leht 2>/dev/null || echo ../../build/cli/leht)}"
+if [[ ! -f certified.pdf && -x "$LEHT_BIN" ]] && command -v openssl >/dev/null 2>&1; then
+    seed=$(mktemp -d)
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$seed/key" -out "$seed/cert" \
+        -subj "/CN=Leht corpus seed" -days 1 >/dev/null 2>&1
+    openssl pkcs12 -export -inkey "$seed/key" -in "$seed/cert" -out "$seed/id.p12" \
+        -passout pass:seed >/dev/null 2>&1
+    printf 'seed\n' | "$LEHT_BIN" sign text_10p.pdf -o "$seed/signed.pdf" --p12 "$seed/id.p12" \
+            --certify forms --password-fd 0 >/dev/null \
+        && "$LEHT_BIN" annotate "$seed/signed.pdf" --note "1:60,60:later" --force \
+            -o certified.pdf >/dev/null \
+        && echo "  made  certified.pdf (certified for form filling, then annotated)"
+    rm -rf "$seed"
+fi
+
 # Encrypted fixture for the viewer's password-flow test. Built with the leht CLI
 # if one is present; the test skips when it is absent.
 LEHT_BIN="${LEHT_BIN:-$(command -v leht 2>/dev/null || echo ../../build/cli/leht)}"

@@ -9,6 +9,7 @@
 #include "leht/context.hpp"
 #include "leht/document.hpp"
 #include "leht/error.hpp"
+#include "mdp.hpp"
 #include "mupdf_c.hpp"
 
 #include <algorithm>
@@ -371,6 +372,40 @@ void collect(fz_context* c, pdf_obj* field, pdf_obj* ft, int depth, int& budget,
     }
 }
 
+/// Makes the fields `lock` covers read-only (Ff bit 1), except `signing`: what
+/// enacting a signature field's /Lock means to every reader, and to Leht's own
+/// set_field, which already refuses read-only fields. A field whose name the
+/// lock covers is flagged as a whole; its kids inherit the flag.
+void lock_fields(fz_context* c, pdf_obj* node, int depth, int& budget, const mdp::Lock& lock,
+                 const std::string& signing) {
+    if (depth > 32 || --budget < 0) {
+        return;
+    }
+    bool named = false;
+    pdf_obj* kids = nullptr;
+    int k = 0;
+    guarded(c, [&](fz_context* g) {
+        named = pdf_dict_get(g, node, PDF_NAME(T)) != nullptr;
+        kids = pdf_dict_get(g, node, PDF_NAME(Kids));
+        k = pdf_array_len(g, kids);
+    });
+    if (named) {
+        const std::string name = field_name(c, node);
+        if (name != signing && lock.covers(name)) {
+            guarded(c, [&](fz_context* g) {
+                const int ff = pdf_dict_get_int(g, node, PDF_NAME(Ff));
+                pdf_dict_put_int(g, node, PDF_NAME(Ff), ff | 1);
+            });
+            return;
+        }
+    }
+    for (int i = 0; i < k; ++i) {
+        pdf_obj* kid = nullptr;
+        guarded(c, [&](fz_context* g) { kid = pdf_array_get(g, kids, i); });
+        lock_fields(c, kid, depth + 1, budget, lock, signing);
+    }
+}
+
 std::string text_of(fz_context* c, pdf_obj* dict, pdf_obj* key) {
     const char* s = nullptr;
     guarded(c, [&](fz_context* g) {
@@ -500,6 +535,20 @@ PreparedSignature prepare_signature(const Context& ctx, Document& doc,
             throw Error(0, "signature fields cannot contain NUL");
         }
     }
+    if (request.certify < 0 || request.certify > 3) {
+        throw Error(0, "a certification level is 1, 2 or 3");
+    }
+    // A certification says what may happen after it, so it comes first; and
+    // a document certified with no changes allowed takes no more signatures.
+    if (request.certify > 0 && !list_signatures(ctx, doc).empty()) {
+        throw Error(0, "a certification must be the document's first signature, and this "
+                       "document is already signed");
+    }
+    if (certification_level(ctx, doc) == 1 && !request.override_certification) {
+        throw Error(0, "the document is certified with no changes allowed; another signature "
+                       "would show that certification broken");
+    }
+    const int certify = request.certify;
     const std::int64_t when =
         request.time != 0 ? request.time : static_cast<std::int64_t>(std::time(nullptr));
 
@@ -569,6 +618,34 @@ PreparedSignature prepare_signature(const Context& ctx, Document& doc,
         *signer.slot() = &h->base;
     });
 
+    // The field's own /Lock, set by the form's author: enacted with this
+    // signature (FieldMDP), and its fields made read-only.
+    mdp::Lock lock;
+    pdf_obj* lock_spec = nullptr;
+    guarded(c, [&](fz_context* g) {
+        pdf_obj* wobj = pdf_annot_obj(g, target.widget.get());
+        lock_spec = pdf_dict_get_inheritable(g, wobj, PDF_NAME(Lock));
+        lock = mdp::lock_of(g, nullptr, wobj);
+    });
+    if (lock.any()) {
+        pdf_obj* wobj = nullptr;
+        pdf_obj* top = nullptr;
+        int k = 0;
+        guarded(c, [&](fz_context* g) {
+            wobj = pdf_annot_obj(g, target.widget.get());
+            top = pdf_dict_getp(g, pdf_trailer(g, pdf), "Root/AcroForm/Fields");
+            k = pdf_array_len(g, top);
+        });
+        const std::string signing = field_name(c, wobj);
+        int budget = 100000;
+        for (int i = 0; i < k; ++i) {
+            pdf_obj* f = nullptr;
+            guarded(c, [&](fz_context* g) { f = pdf_array_get(g, top, i); });
+            lock_fields(c, f, 0, budget, lock, signing);
+        }
+    }
+    const bool enact_lock = lock.any() && lock_spec != nullptr;
+
     const char* sig_name = request.name.empty() ? nullptr : request.name.c_str();
     const char* reason = request.reason.empty() ? nullptr : request.reason.c_str();
     const char* location = request.location.empty() ? nullptr : request.location.c_str();
@@ -626,6 +703,39 @@ PreparedSignature prepare_signature(const Context& ctx, Document& doc,
         if (location != nullptr) {
             pdf_dict_put_text_string(g, v, PDF_NAME(Location), location);
         }
+        // What this signature certifies (DocMDP) and locks (FieldMDP), as
+        // signature references: what validators read.
+        if (certify > 0 || enact_lock) {
+            pdf_obj* refs = pdf_dict_put_array(g, v, PDF_NAME(Reference), 2);
+            if (certify > 0) {
+                pdf_obj* r = pdf_array_push_dict(g, refs, 3);
+                pdf_dict_put(g, r, PDF_NAME(Type), PDF_NAME(SigRef));
+                pdf_dict_put(g, r, PDF_NAME(TransformMethod), PDF_NAME(DocMDP));
+                pdf_obj* tp = pdf_dict_put_dict(g, r, PDF_NAME(TransformParams), 3);
+                pdf_dict_put(g, tp, PDF_NAME(Type), PDF_NAME(TransformParams));
+                pdf_dict_put_int(g, tp, PDF_NAME(P), certify);
+                pdf_dict_put_name(g, tp, PDF_NAME(V), "1.2");
+                // The catalog names the certifying signature.
+                pdf_obj* root = pdf_dict_get(g, pdf_trailer(g, pdf), PDF_NAME(Root));
+                pdf_obj* perms = pdf_dict_get(g, root, PDF_NAME(Perms));
+                if (perms == nullptr) {
+                    perms = pdf_dict_put_dict(g, root, PDF_NAME(Perms), 1);
+                }
+                pdf_dict_put_drop(g, perms, PDF_NAME(DocMDP), pdf_new_indirect(g, pdf, num, 0));
+            }
+            if (enact_lock) {
+                pdf_obj* r = pdf_array_push_dict(g, refs, 3);
+                pdf_dict_put(g, r, PDF_NAME(Type), PDF_NAME(SigRef));
+                pdf_dict_put(g, r, PDF_NAME(TransformMethod), PDF_NAME(FieldMDP));
+                pdf_obj* tp = pdf_dict_put_dict(g, r, PDF_NAME(TransformParams), 4);
+                pdf_dict_put(g, tp, PDF_NAME(Type), PDF_NAME(TransformParams));
+                pdf_dict_put(g, tp, PDF_NAME(Action), pdf_dict_get(g, lock_spec, PDF_NAME(Action)));
+                if (pdf_obj* fields = pdf_dict_get(g, lock_spec, PDF_NAME(Fields))) {
+                    pdf_dict_put(g, tp, PDF_NAME(Fields), fields);
+                }
+                pdf_dict_put_name(g, tp, PDF_NAME(V), "1.2");
+            }
+        }
         // From here MuPDF owns the completion: at save time it rewrites
         // /ByteRange with the real offsets and asks the signer for the blob.
         pdf_xref_store_unsaved_signature(g, pdf, wobj, signer.get());
@@ -657,6 +767,31 @@ PreparedSignature prepare_signature(const Context& ctx, Document& doc,
     out.range.v = {r[0], r[1], r[2], r[3]};
     return out;
 }
+
+namespace {
+
+/// A lock in words, for SignatureInfo::locks.
+std::string describe(const mdp::Lock& lock) {
+    const auto join = [](const std::vector<std::string>& names) {
+        std::string out;
+        for (const std::string& n : names) {
+            out += (out.empty() ? "" : ", ") + n;
+        }
+        return out;
+    };
+    if (lock.all) {
+        return "all fields";
+    }
+    if (!lock.include.empty()) {
+        return (lock.include.size() == 1 ? "field " : "fields ") + join(lock.include);
+    }
+    if (!lock.exclude.empty()) {
+        return "all fields except " + join(lock.exclude);
+    }
+    return {};
+}
+
+}  // namespace
 
 std::vector<SignatureInfo> list_signatures(const Context& ctx, Document& doc) {
     fz_context* c = ctx.raw();
@@ -707,6 +842,10 @@ std::vector<SignatureInfo> list_signatures(const Context& ctx, Document& doc) {
     }
 
     std::vector<SignatureInfo> out;
+    std::vector<pdf_obj*> dicts;         // each signature's /V, parallel to out
+    std::vector<mdp::Lock> field_locks;  // each signature's FieldMDP lock
+    int certifier = 0;
+    guarded(c, [&](fz_context* g) { certifier = mdp::certifying_signature(g, pdf); });
     for (pdf_obj* field : fields) {
         SignatureInfo s;
         s.field = field_name(c, field);
@@ -760,7 +899,17 @@ std::vector<SignatureInfo> list_signatures(const Context& ctx, Document& doc) {
         } else {
             check_range(c, pdf, br, s);
         }
+        mdp::Lock lock;
+        guarded(c, [&](fz_context* g) {
+            if (certifier != 0 && pdf_to_num(g, v) == certifier) {
+                s.certification = mdp::certification_of(g, v);
+            }
+            lock = mdp::lock_of(g, v, field);
+        });
+        s.locks = describe(lock);
         out.push_back(std::move(s));
+        dicts.push_back(v);
+        field_locks.push_back(std::move(lock));
     }
     // Which signatures' later bytes another signature signs as well.
     for (SignatureInfo& s : out) {
@@ -774,7 +923,53 @@ std::vector<SignatureInfo> list_signatures(const Context& ctx, Document& doc) {
             }
         }
     }
+
+    // What changed after each signature, judged against the certification
+    // and the locks in force by then: those of this signature and of every
+    // signature signed before it.
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        SignatureInfo& s = out[i];
+        if (!s.range_ok || !s.changed_after_signing) {
+            continue;
+        }
+        int level = 0;
+        std::vector<mdp::Lock> locks;
+        for (std::size_t j = 0; j < out.size(); ++j) {
+            const SignatureInfo& earlier = out[j];
+            if (!earlier.range_ok || earlier.range.end() > s.range.end()) {
+                continue;
+            }
+            if (earlier.certification != 0) {
+                level = earlier.certification;
+            }
+            if (field_locks[j].any() || field_locks[j].p != 0) {
+                locks.push_back(field_locks[j]);
+            }
+        }
+        if (level == 0 && locks.empty()) {
+            continue;  // nothing to judge by: changed_after_signing says it all
+        }
+        const mdp::Judgement j = mdp::judge_changes_after(c, pdf, dicts[i], level, locks);
+        s.changes_judged = true;
+        s.changes_permitted = j.problems.empty();
+        s.change_problems = j.problems;
+    }
     return out;
+}
+
+int certification_level(const Context& ctx, Document& doc) {
+    fz_context* c = ctx.raw();
+    pdf_document* pdf = detail::require_pdf(c, doc);
+    int level = 0;
+    guarded(c, [&](fz_context* g) {
+        const int num = mdp::certifying_signature(g, pdf);
+        if (num > 0) {
+            pdf_obj* sig = pdf_new_indirect(g, pdf, num, 0);
+            level = mdp::certification_of(g, sig);
+            pdf_drop_obj(g, sig);
+        }
+    });
+    return level;
 }
 
 ByteReader signed_bytes(const Context& ctx, const Document& doc, const ByteRange& range) {

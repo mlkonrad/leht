@@ -304,6 +304,8 @@ PrepareSignature sample_prepare() {
     m.request.appearance.strokes_height = 40;
     m.request.appearance.stroke_width = 1.5F;
     m.request.appearance.lines = {"Mari Maasikas", "2026-09-22"};
+    m.request.certify = 2;
+    m.request.override_certification = true;
     return m;
 }
 
@@ -319,6 +321,11 @@ SignatureList sample_signature_list() {
     signer.can_sign = true;
 
     SignatureRow row;
+    row.certification = 3;
+    row.locks = "field amount";
+    row.changes_judged = true;
+    row.changes_permitted = false;
+    row.change_problems = {"the content of page 2 changed"};
     row.field = "Signature1";
     row.page = 0;
     row.rect = {1, 2, 3, 4};
@@ -357,6 +364,7 @@ void test_signature_messages_round_trip() {
           p.request.appearance.strokes[0][1].y == 4.0F &&
           p.request.appearance.strokes[1].size() == 1);
     CHECK(p.request.appearance.lines.size() == 2);
+    CHECK(p.request.certify == 2 && p.request.override_certification);
 
     CHECK(round_trip(ListSignatures{"-----BEGIN CERTIFICATE-----"}).trust_pem ==
           "-----BEGIN CERTIFICATE-----");
@@ -371,6 +379,9 @@ void test_signature_messages_round_trip() {
     CHECK(l.rows.size() == 1);
     CHECK(l.rows[0].field == "Signature1" && l.rows[0].intact && l.rows[0].trust == 1);
     CHECK(l.rows[0].chain.size() == 2);
+    CHECK(l.rows[0].certification == 3 && l.rows[0].locks == "field amount" &&
+          l.rows[0].changes_judged && !l.rows[0].changes_permitted &&
+          l.rows[0].change_problems.size() == 1);
     CHECK(l.rows[0].signer.not_after == 1'800'000'000);
     CHECK(l.rows[0].has_timestamp && l.rows[0].timestamp_time == 1'790'000'001);
     CHECK(l.rows[0].later_signature_covers_changes);

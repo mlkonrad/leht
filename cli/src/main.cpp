@@ -97,6 +97,7 @@ constexpr const char* kUsage =
     "            other PKCS#11 tokens, with the URI --pkcs11 takes\n"
     "  verify    FILE [--trust CA.pem]... [--json]\n"
     "            check every signature: exits 4 broken, 5 untrusted, 6 changed after\n"
+    "            signing, 7 changed in a way a certification or field lock forbids\n"
     "\n"
     "options:\n"
     "  -o PATH        output file or pattern\n"
@@ -141,7 +142,15 @@ constexpr const char* kUsage =
     "  --password-fd N  read the password or PIN from this descriptor, one line.\n"
     "                 Without it, leht asks on the terminal. NEVER pass one as an\n"
     "                 argument: /proc shows it to every process on the machine\n"
-    "  --field NAME   sign this existing, empty signature field\n"
+    "  --field NAME   sign this existing, empty signature field; if the form's author\n"
+    "                 gave it a /Lock, the fields it names become read-only\n"
+    "  --certify L    make this the document's certification: no-changes, forms\n"
+    "                 (form filling and signing allowed) or comments (and annotations);\n"
+    "                 it must be the first signature\n"
+    "  --doc-password-fd N  an encrypted document's password, from this descriptor;\n"
+    "                 otherwise asked for (after the key's), or the next line of stdin\n"
+    "  --force        sign, or edit, a document certified against it anyway; the\n"
+    "                 certification will then report the change\n"
     "  --box P:BOX    place a new visible signature here; otherwise it is invisible\n"
     "  --image IMG    a picture for the signature to show (PNG or JPEG)\n"
     "  --tsa URL      timestamp the signature with this RFC 3161 authority (B-T)\n"
@@ -237,7 +246,7 @@ bool takes_value(const std::string& name) {
         "--angle", "--size", "--color", "--highlight", "--underline", "--strike",
         "--note", "--stamp", "--delete", "--author", "--move", "--set-text", "--freetext",
         "--p12", "--password-fd", "--field", "--image", "--name", "--reason",
-        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module", "--lang", "--dpi"};
+        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module", "--lang", "--dpi", "--certify", "--doc-password-fd"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -577,6 +586,33 @@ leht::ops::RedactImages parse_images(const std::string& name) {
 /// clean result.
 constexpr int kExitRemaining = 3;
 
+std::string certification_words(int level) {
+    switch (level) {
+        case 1: return "no changes allowed";
+        case 2: return "form filling and signing allowed";
+        case 3: return "form filling, signing and annotations allowed";
+        default: return "";
+    }
+}
+
+/// Refuses to edit a certified document beyond what its certification allows:
+/// `needs` is the level from which this edit is allowed (2 form filling, 3
+/// annotations, 4 never -- page content is fixed at every level). --force
+/// does it anyway; the certification will then report the change.
+void check_certification(const leht::Context& ctx, leht::Document& doc, const Args& args,
+                         int needs, const char* what) {
+    if (doc.needs_password() || args.has_switch("--force")) {
+        return;
+    }
+    const int level = leht::ops::certification_level(ctx, doc);
+    if (level != 0 && level < needs) {
+        throw leht::Error(0, std::string("this document is certified, ") +
+                                 certification_words(level) + "; " + what +
+                                 " would break the certification (--force does it anyway, "
+                                 "and the certification will then say so)");
+    }
+}
+
 int cmd_redact(const leht::Context& ctx, const Args& args) {
     const std::string input = require_input(args);
     const std::string output = require_output(args);
@@ -601,6 +637,7 @@ int cmd_redact(const leht::Context& ctx, const Args& args) {
     }
 
     leht::Document doc = leht::Document::open(ctx, input);
+    check_certification(ctx, doc, args, 4, "a redaction");
     if (doc.needs_password()) {
         throw leht::Error(0, "document is encrypted; decrypt it first");
     }
@@ -672,6 +709,7 @@ int cmd_crop(const leht::Context& ctx, const Args& args) {
     }
 
     leht::Document doc = leht::Document::open(ctx, input);
+    check_certification(ctx, doc, args, 4, "cropping");
     int pages = 0;
     if (!box.empty()) {
         float v[4];
@@ -730,6 +768,7 @@ int cmd_watermark(const leht::Context& ctx, const Args& args) {
     }
 
     leht::Document doc = leht::Document::open(ctx, input);
+    check_certification(ctx, doc, args, 4, "a watermark");
     const int pages = leht::ops::watermark(ctx, doc, args.flag("-p"), options);
     doc.save(output, leht::SaveOptions{});
     std::printf("watermarked %d page%s -> %s\n", pages, pages == 1 ? "" : "s",
@@ -777,6 +816,9 @@ int cmd_annots(const leht::Context& ctx, const Args& args) {
 constexpr int kExitBroken = 4;     ///< a signature does not verify
 constexpr int kExitUntrusted = 5;  ///< it verifies, but the signer is not trusted
 constexpr int kExitChanged = 6;    ///< it verifies and is trusted, but the file grew after it
+/// It verifies, but what was changed after it is more than its certification
+/// or a field lock allows.
+constexpr int kExitForbidden = 7;
 
 std::vector<std::uint8_t> read_bytes(const std::string& path, std::size_t limit) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
@@ -801,14 +843,15 @@ std::vector<std::uint8_t> read_bytes(const std::string& path, std::size_t limit)
 /// argument is visible in /proc to every process on the machine, and lands in
 /// shell history. From --password-fd when given (one line), else prompted on
 /// the terminal with echo off, else read from stdin when that is a pipe.
-leht::crypto::Secret read_password(const Args& args, const char* prompt = "PKCS#12 password: ") {
+leht::crypto::Secret read_password(const Args& args, const char* prompt = "PKCS#12 password: ",
+                                   const char* fd_option = "--password-fd") {
     std::string line;
-    const std::string fd_flag = args.flag("--password-fd");
+    const std::string fd_flag = args.flag(fd_option);
     int fd = -1;
     if (!fd_flag.empty()) {
-        fd = args.int_flag("--password-fd", -1);
+        fd = args.int_flag(fd_option, -1);
         if (fd < 0) {
-            throw leht::Error(0, "--password-fd expects a file descriptor number");
+            throw leht::Error(0, std::string(fd_option) + " expects a file descriptor number");
         }
     } else if (::isatty(STDIN_FILENO) == 0) {
         fd = STDIN_FILENO;
@@ -1030,6 +1073,18 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
 
     leht::crypto::SignOptions options;
     options.tsa_url = args.flag("--tsa");
+    if (const std::string c = args.flag("--certify"); !c.empty()) {
+        if (c == "no-changes") {
+            request.certify = 1;
+        } else if (c == "forms") {
+            request.certify = 2;
+        } else if (c == "comments") {
+            request.certify = 3;
+        } else {
+            throw leht::Error(0, "--certify takes no-changes, forms or comments");
+        }
+    }
+    request.override_certification = args.has_switch("--force");
 
     const leht::crypto::Identity identity = identity_from(args);
     const leht::crypto::CertInfo cert = identity.certificate();
@@ -1040,7 +1095,13 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
 
     leht::Document doc = leht::Document::open(ctx, input);
     if (doc.needs_password()) {
-        throw leht::Error(0, "document is encrypted; decrypt it first");
+        // Signed as it is, encrypted: the new revision is encrypted like the
+        // rest, except the signature itself, which must stay readable.
+        const leht::crypto::Secret pw =
+            read_password(args, "Document password: ", "--doc-password-fd");
+        if (!doc.authenticate(pw.str())) {
+            throw leht::Error(0, "wrong password for the document");
+        }
     }
     if (!doc.can_save_incrementally()) {
         // A repaired file has no revision to append to, so there is nothing a
@@ -1091,6 +1152,9 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
 
     std::printf("signed %s -> %s\n", input.c_str(), output.c_str());
     std::printf("  signer:    %s\n", cert.subject.c_str());
+    if (request.certify != 0) {
+        std::printf("  certifies: %s\n", certification_words(request.certify).c_str());
+    }
     std::printf("  field:     %s (%s)\n", field.c_str(),
                 invisible ? "invisible" : "visible");
     std::printf("  digest:    %s, %zu bytes of signature in a %zu byte slot\n",
@@ -1145,6 +1209,7 @@ int cmd_ocr(const leht::Context& ctx, const Args& args) {
     leht::ocr::Recognizer recognizer(langs, datadir);
 
     leht::Document doc = leht::Document::open(ctx, input);
+    check_certification(ctx, doc, args, 4, "adding a text layer");
     if (doc.needs_password()) {
         throw leht::Error(0, "document is encrypted; decrypt it first");
     }
@@ -1215,8 +1280,11 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
         const bool intact = s.range_ok && r.intact();
         const bool trusted = intact && r.trust == leht::crypto::Trust::Trusted;
         const bool changed = s.changed_after_signing && !s.later_signature_covers_changes;
+        const bool forbidden = s.changes_judged && !s.changes_permitted;
         if (!intact) {
             worst = std::max(worst, kExitBroken);
+        } else if (forbidden) {
+            worst = std::max(worst, kExitForbidden);
         } else if (!trusted) {
             worst = std::max(worst, kExitUntrusted);
         } else if (changed) {
@@ -1234,7 +1302,17 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                               ",\"changed_after_signing\":" + (s.changed_after_signing ? "true" : "false") +
                               ",\"later_signature_covers_changes\":" +
                               (s.later_signature_covers_changes ? "true" : "false") +
+                              ",\"certification\":" + std::to_string(s.certification) +
+                              ",\"locks\":" + json_string(s.locks) +
                               ",\"page\":" + std::to_string(s.page + 1);
+            if (s.changes_judged) {
+                std::string problems;
+                for (const std::string& p : s.change_problems) {
+                    problems += (problems.empty() ? "" : ",") + json_string(p);
+                }
+                row += ",\"changes_permitted\":" + std::string(s.changes_permitted ? "true" : "false") +
+                       ",\"change_problems\":[" + problems + "]";
+            }
             if (r.timestamp) {
                 row += ",\"timestamp\":{\"valid\":" + std::string(r.timestamp->valid ? "true" : "false") +
                        ",\"time\":" + std::to_string(r.timestamp->time) +
@@ -1282,11 +1360,28 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                         s.reason.empty() ? "" : " -- ", s.reason.c_str(),
                         s.location.empty() ? "" : " -- ", s.location.c_str());
         }
+        if (s.certification != 0) {
+            std::printf("  %-10s certifies the document: %s\n", "certifies",
+                        certification_words(s.certification).c_str());
+        }
+        if (!s.locks.empty()) {
+            std::printf("  %-10s %s\n", "locks", s.locks.c_str());
+        }
         if (s.changed_after_signing) {
             std::printf("  %-10s the document was added to after this was signed%s\n", "CHANGED",
                         s.later_signature_covers_changes
                             ? "; a later signature covers those bytes too"
                             : "");
+        }
+        if (s.changes_judged) {
+            if (s.changes_permitted) {
+                std::printf("  %-10s %s\n", "permitted",
+                            "every later change is one the certification and locks allow");
+            } else {
+                for (const std::string& p : s.change_problems) {
+                    std::printf("  %-10s %s\n", "FORBIDDEN", p.c_str());
+                }
+            }
         }
         if (!r.problem.empty() && intact) {
             std::printf("  %-10s %s\n", "note", r.problem.c_str());
@@ -1445,6 +1540,7 @@ int cmd_annotate(const leht::Context& ctx, const Args& args) {
     }
 
     leht::Document doc = leht::Document::open(ctx, input);
+    check_certification(ctx, doc, args, 3, "changing annotations");
     for (const auto& [page, name_box] : stamps) {
         leht::ops::AnnotSpec stamp = base;
         stamp.kind = AnnotKind::Stamp;
@@ -1571,6 +1667,7 @@ int cmd_fill(const leht::Context& ctx, const Args& args) {
     }
 
     leht::Document doc = leht::Document::open(ctx, input);
+    check_certification(ctx, doc, args, 2, "filling fields");
     for (const auto& [name, value] : values) {
         leht::ops::set_field(ctx, doc, name, value);
     }
