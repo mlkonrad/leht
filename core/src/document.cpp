@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "leht/document.hpp"
 
+#include "fd_output.hpp"
 #include "guards.hpp"
 #include "mupdf_c.hpp"
 #include "leht/context.hpp"
@@ -198,6 +199,45 @@ pdf_write_options write_options(const SaveOptions& options, bool redacted,
 }
 
 }  // namespace
+
+namespace detail {
+
+fz_output* new_fd_output(fz_context* ctx, int fd) {
+    void* state = reinterpret_cast<void*>(static_cast<std::intptr_t>(fd));
+    fz_output* out = fz_new_output(ctx, 8192, state, out_write, nullptr, nullptr);
+    out->seek = out_seek;
+    out->tell = out_tell;
+    out->as_stream = out_as_stream;
+    out->truncate = out_truncate;
+    return out;
+}
+
+void write_pdf_fd(fz_context* ctx, pdf_document* pdf, int fd,
+                  const pdf_write_options& opts) {
+    if (fd < 0) {
+        throw Error(0, "invalid output descriptor");
+    }
+    if (opts.do_incremental != 0) {
+        throw Error(0, "write_pdf_fd cannot write an incremental update");
+    }
+    pdf_write_options copy = opts;
+    Owned<fz_output, fz_drop_output> out{ctx};
+    guarded(ctx, [&](fz_context* g) {
+        *out.slot() = new_fd_output(g, fd);
+        pdf_write_document(g, pdf, out.get(), &copy);
+        fz_close_output(g, out.get());
+    });
+}
+
+std::size_t fd_size(int fd) noexcept {
+    struct stat st {};
+    if (fd < 0 || ::fstat(fd, &st) != 0 || st.st_size < 0) {
+        return 0;
+    }
+    return static_cast<std::size_t>(st.st_size);
+}
+
+}  // namespace detail
 
 Document::Document(fz_context* ctx, fz_document* doc) noexcept
     : ctx_(ctx), doc_(doc) {}
@@ -515,14 +555,9 @@ void Document::save_fd(int fd, const SaveOptions& options) const {
     // unreliable as a finished one.
     saved_incrementally_ = incremental;
     pdf_write_options opts = write_options(options, redacted_, incremental);
-    void* state = reinterpret_cast<void*>(static_cast<std::intptr_t>(fd));
     detail::Owned<fz_output, fz_drop_output> out{ctx_};
     guarded(ctx_, [&](fz_context* g) {
-        *out.slot() = fz_new_output(g, 8192, state, out_write, nullptr, nullptr);
-        out.get()->seek = out_seek;
-        out.get()->tell = out_tell;
-        out.get()->as_stream = out_as_stream;
-        out.get()->truncate = out_truncate;
+        *out.slot() = detail::new_fd_output(g, fd);
         pdf_write_document(g, pdf, out.get(), &opts);
         fz_close_output(g, out.get());
     });

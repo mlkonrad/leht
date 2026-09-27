@@ -7,6 +7,9 @@
 #include "leht/renderer.hpp"
 #include "test_harness.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -174,6 +177,40 @@ void missing_input_throws() {
     CHECK(threw);
 }
 
+
+/// Creates `path` for writing, read-write as Document::save_fd() requires.
+int open_write(const std::string& path) {
+    return ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+}
+
+void compresses_an_open_document_into_a_descriptor() {
+    Context ctx;
+    TempPdf heavy{"compress_fd_in.pdf"};
+    build_image_heavy(ctx, heavy);
+    TempPdf out{"compress_fd_out.pdf"};
+
+    Document doc = Document::open(ctx, heavy.str());
+    leht::ops::CompressOptions options;
+    options.preset = leht::ops::CompressPreset::Screen;
+    const int fd = open_write(out.str());
+    const CompressResult result = leht::ops::compress(ctx, doc, fd, options);
+    ::close(fd);
+
+    CHECK(result.input_bytes == 0);  // the caller's to fill in
+    CHECK(result.images_recompressed > 0);
+    CHECK(result.output_bytes == out.size());
+    CHECK(out.size() < heavy.size());
+
+    // Byte-for-byte what the path-based entry point writes, so the viewer and
+    // `leht compress` agree.
+    TempPdf by_path{"compress_fd_by_path.pdf"};
+    (void)leht::ops::compress(ctx, heavy.str(), by_path.str(), options);
+    CHECK(by_path.size() == out.size());
+
+    Document reopened = Document::open(ctx, out.str());
+    CHECK(reopened.page_count() == 3);
+}
+
 }  // namespace
 
 int main() {
@@ -184,5 +221,6 @@ int main() {
     RUN(compressed_output_still_renders);
     RUN(refuses_to_overwrite_its_input);
     RUN(missing_input_throws);
+    RUN(compresses_an_open_document_into_a_descriptor);
     return 0;
 }

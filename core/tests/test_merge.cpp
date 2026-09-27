@@ -6,7 +6,12 @@
 #include "leht/renderer.hpp"
 #include "test_harness.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -16,6 +21,7 @@ using leht::Renderer;
 using leht::ops::merge;
 using leht::ops::MergeOptions;
 using leht::ops::MergeResult;
+using leht::ops::Merger;
 
 namespace {
 
@@ -194,6 +200,94 @@ void garbage_collection_deduplicates_shared_resources() {
     CHECK(deduped.size() < plain.size());
 }
 
+
+/// Opens `path` for reading, as the viewer does before handing a descriptor over.
+int open_read(const std::string& path) {
+    return ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+}
+
+/// Creates `path` for writing, read-write as Document::save_fd() requires.
+int open_write(const std::string& path) {
+    return ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+}
+
+void merger_reads_descriptors_and_sniffs_the_format() {
+    Context ctx;
+    TempPdf out{"merge_fd.pdf"};
+
+    Merger merger(ctx);
+    // The names lie on purpose: add_fd goes by content, never by extension.
+    CHECK(merger.add_fd(open_read(corpus("text_10p.pdf")), "a.png") == 10);
+    CHECK(merger.add_fd(open_read(corpus("scan.jpg")), "b.pdf") == 1);
+    const int png = open_read(corpus("page.png"));
+    CHECK(merger.add_fd(png, "c") == 1);
+    // add_fd owns the descriptor: it must be closed by now.
+    CHECK(::fcntl(png, F_GETFD) == -1 && errno == EBADF);
+
+    const int fd = open_write(out.str());
+    const MergeResult result = merger.finish_fd(fd);
+    ::close(fd);
+
+    CHECK(result.inputs_merged == 3);
+    CHECK(result.pages_written == 12);
+    CHECK(result.output_bytes == out.size());
+    Document doc = Document::open(ctx, out.str());
+    CHECK(doc.page_count() == 12);
+}
+
+void merger_refuses_locked_and_unknown_inputs_and_carries_on() {
+    Context ctx;
+    TempPdf junk{"merge_junk.txt"};
+    {
+        std::ofstream f(junk.str());
+        f << "neither a PDF nor an image\n";
+    }
+
+    Merger merger(ctx);
+    bool locked_threw = false;
+    try {
+        merger.add_fd(open_read(corpus("locked.pdf")), "locked.pdf");
+    } catch (const leht::Error& e) {
+        locked_threw = std::string(e.what()).find("password") != std::string::npos;
+    }
+    CHECK(locked_threw);
+
+    bool junk_threw = false;
+    try {
+        merger.add_fd(open_read(junk.str()), "junk.txt");
+    } catch (const leht::Error&) {
+        junk_threw = true;
+    }
+    CHECK(junk_threw);
+
+    bool bad_fd_threw = false;
+    try {
+        merger.add_fd(-1, "nothing");
+    } catch (const leht::Error&) {
+        bad_fd_threw = true;
+    }
+    CHECK(bad_fd_threw);
+
+    // A refused input adds nothing, and the merge goes on.
+    CHECK(merger.inputs() == 0);
+    CHECK(merger.add_fd(open_read(corpus("page.png")), "page.png") == 1);
+    TempPdf out{"merge_after_refusal.pdf"};
+    CHECK(merger.finish(out.str()).pages_written == 1);
+}
+
+void finishing_an_empty_merger_throws() {
+    Context ctx;
+    Merger merger(ctx);
+    TempPdf out{"merge_nothing.pdf"};
+    bool threw = false;
+    try {
+        (void)merger.finish(out.str());
+    } catch (const leht::Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -205,5 +299,8 @@ int main() {
     RUN(empty_input_list_throws);
     RUN(missing_input_throws);
     RUN(garbage_collection_deduplicates_shared_resources);
+    RUN(merger_reads_descriptors_and_sniffs_the_format);
+    RUN(merger_refuses_locked_and_unknown_inputs_and_carries_on);
+    RUN(finishing_an_empty_merger_throws);
     return 0;
 }

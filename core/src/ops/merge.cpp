@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "leht/ops/merge.hpp"
 
+#include "edit_internal.hpp"
+#include "fd_output.hpp"
 #include "guards.hpp"
 #include "leht/context.hpp"
+#include "leht/document.hpp"
 #include "leht/error.hpp"
 #include "mupdf_c.hpp"
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <filesystem>
+#include <functional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace leht::ops {
 
@@ -43,10 +53,8 @@ pdf_write_options write_options(const MergeOptions& options) {
     return opts;
 }
 
-/// Appends one image as a page sized to the image's own resolution, so a
-/// 300 DPI scan produces a correctly sized page rather than a huge one.
-void append_image_page(fz_context* ctx, pdf_document* dst,
-                       const std::string& path) {
+/// Decodes the image at `path`. Throws if it is not one.
+OwnedImage image_from_file(fz_context* ctx, const std::string& path) {
     OwnedImage image{ctx};
     const char* cpath = path.c_str();
     guarded(ctx, [&](fz_context* g) {
@@ -55,8 +63,12 @@ void append_image_page(fz_context* ctx, pdf_document* dst,
     if (!image) {
         throw Error(0, "could not read image: " + path);
     }
+    return image;
+}
 
-    fz_image* img = image.get();
+/// Appends one image as a page sized to the image's own resolution, so a
+/// 300 DPI scan produces a correctly sized page rather than a huge one.
+void append_image_page(fz_context* ctx, pdf_document* dst, fz_image* img) {
     const float xres = img->xres > 0 ? static_cast<float>(img->xres) : 72.0F;
     const float yres = img->yres > 0 ? static_cast<float>(img->yres) : 72.0F;
     const float width = static_cast<float>(img->w) * 72.0F / xres;
@@ -96,10 +108,21 @@ void append_image_page(fz_context* ctx, pdf_document* dst,
     });
 }
 
-/// Appends every page of a PDF. pdf_graft_page remaps object numbers and
+/// Appends every page of `src`. pdf_graft_page remaps object numbers and
 /// resource names, which is what stops two inputs' /F1 fonts colliding.
-int append_pdf_pages(fz_context* ctx, pdf_document* dst,
-                     const std::string& path) {
+int append_pdf_pages(fz_context* ctx, pdf_document* dst, pdf_document* src) {
+    int pages = 0;
+    guarded(ctx, [&](fz_context* g) { pages = pdf_count_pages(g, src); });
+
+    for (int i = 0; i < pages; ++i) {
+        guarded(ctx, [&](fz_context* g) {
+            pdf_graft_page(g, dst, -1, src, i);
+        });
+    }
+    return pages;
+}
+
+int append_pdf_file(fz_context* ctx, pdf_document* dst, const std::string& path) {
     OwnedFzDoc source{ctx};
     const char* cpath = path.c_str();
     guarded(ctx, [&](fz_context* g) {
@@ -116,16 +139,67 @@ int append_pdf_pages(fz_context* ctx, pdf_document* dst,
     if (src_pdf == nullptr) {
         throw Error(0, "not a PDF and not a supported image: " + path);
     }
+    return append_pdf_pages(ctx, dst, src_pdf);
+}
 
-    int pages = 0;
-    guarded(ctx, [&](fz_context* g) { pages = pdf_count_pages(g, src_pdf); });
-
-    for (int i = 0; i < pages; ++i) {
-        guarded(ctx, [&](fz_context* g) {
-            pdf_graft_page(g, dst, -1, src_pdf, i);
-        });
+/// Closes a descriptor on scope exit, for Merger::add_fd's ownership promise.
+struct FdCloser {
+    int fd;
+    ~FdCloser() {
+        if (fd >= 0) {
+            ::close(fd);
+        }
     }
-    return pages;
+    int release() noexcept { return std::exchange(fd, -1); }
+};
+
+/// Reads the whole of `fd` with pread, which the worker's sandbox allows.
+OwnedBuffer read_all(fz_context* ctx, int fd, const std::string& name) {
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        throw Error(0, name + " is not a regular file");
+    }
+    // An image big enough to trip this would not fit the worker's address
+    // space decoded anyway; failing here says so clearly.
+    constexpr off_t kMaxImageBytes = off_t{512} << 20;
+    if (st.st_size > kMaxImageBytes) {
+        throw Error(0, name + " is too large to embed as an image");
+    }
+
+    OwnedBuffer buffer{ctx};
+    const auto size = static_cast<std::size_t>(st.st_size);
+    guarded(ctx, [&](fz_context* g) {
+        *buffer.slot() = fz_new_buffer(g, size > 0 ? size : 1);
+    });
+    fz_buffer* buf = buffer.get();
+    std::size_t done = 0;
+    while (done < size) {
+        const ssize_t n = ::pread(fd, buf->data + done, size - done,
+                                  static_cast<off_t>(done));
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            throw Error(0, "could not read " + name);
+        }
+        done += static_cast<std::size_t>(n);
+    }
+    buf->len = done;
+    return buffer;
+}
+
+/// True if `fd` starts like a PDF: "%PDF-" within the first KiB.
+bool sniffs_as_pdf(int fd) {
+    std::array<char, 1024> head{};
+    ssize_t n = 0;
+    do {
+        n = ::pread(fd, head.data(), head.size(), 0);
+    } while (n < 0 && errno == EINTR);
+    if (n <= 0) {
+        return false;
+    }
+    const std::string_view view(head.data(), static_cast<std::size_t>(n));
+    return view.find("%PDF-") != std::string_view::npos;
 }
 
 }  // namespace
@@ -140,43 +214,165 @@ bool looks_like_image(const std::string& path) {
                        [&ext](const char* known) { return ext == known; });
 }
 
+Merger::Merger(const Context& ctx, const MergeOptions& options)
+    : ctx_(&ctx), options_(options) {
+    fz_context* c = ctx.raw();
+    if (c == nullptr) {
+        throw Error(0, "cannot merge with a moved-from Context");
+    }
+    guarded(c, [&](fz_context* g) { dst_ = pdf_create_document(g); });
+    if (dst_ == nullptr) {
+        throw Error(0, "could not create the output document");
+    }
+}
+
+Merger::~Merger() {
+    if (dst_ != nullptr) {
+        pdf_drop_document(ctx_->raw(), dst_);
+    }
+}
+
+Merger::Merger(Merger&& other) noexcept
+    : ctx_(other.ctx_),
+      dst_(std::exchange(other.dst_, nullptr)),
+      options_(other.options_),
+      result_(std::exchange(other.result_, {})) {}
+
+Merger& Merger::operator=(Merger&& other) noexcept {
+    if (this != &other) {
+        if (dst_ != nullptr) {
+            pdf_drop_document(ctx_->raw(), dst_);
+        }
+        ctx_ = other.ctx_;
+        dst_ = std::exchange(other.dst_, nullptr);
+        options_ = other.options_;
+        result_ = std::exchange(other.result_, {});
+    }
+    return *this;
+}
+
+void Merger::require_open() const {
+    if (dst_ == nullptr) {
+        throw Error(0, "this merge has been moved from");
+    }
+}
+
+int Merger::add(const std::string& path) {
+    require_open();
+    fz_context* c = ctx_->raw();
+    return append_all_or_nothing([&] {
+        if (looks_like_image(path)) {
+            OwnedImage image = image_from_file(c, path);
+            append_image_page(c, dst_, image.get());
+            return 1;
+        }
+        return append_pdf_file(c, dst_, path);
+    });
+}
+
+int Merger::add_fd(int fd, const std::string& name) {
+    FdCloser closer{fd};
+    require_open();
+    if (fd < 0) {
+        throw Error(0, "invalid input descriptor for " + name);
+    }
+    fz_context* c = ctx_->raw();
+
+    return append_all_or_nothing([&] {
+        if (sniffs_as_pdf(fd)) {
+            // open_fd takes the descriptor, and closes it even if it throws.
+            Document source = Document::open_fd(*ctx_, closer.release(), "pdf");
+            if (source.needs_password()) {
+                throw Error(0, name + " is password-protected; decrypt it first");
+            }
+            return append_pdf_pages(c, dst_, detail::require_pdf(c, source));
+        }
+        OwnedBuffer bytes = read_all(c, fd, name);
+        OwnedImage image{c};
+        fz_buffer* buf = bytes.get();
+        try {
+            guarded(c, [&](fz_context* g) {
+                *image.slot() = fz_new_image_from_buffer(g, buf);
+            });
+        } catch (const Error&) {
+            throw Error(0, "not a PDF and not a supported image: " + name);
+        }
+        if (!image) {
+            throw Error(0, "not a PDF and not a supported image: " + name);
+        }
+        append_image_page(c, dst_, image.get());
+        return 1;
+    });
+}
+
+int Merger::append_all_or_nothing(const std::function<int()>& append) {
+    fz_context* c = ctx_->raw();
+    pdf_document* dst = dst_;
+    int before = 0;
+    guarded(c, [&](fz_context* g) { before = pdf_count_pages(g, dst); });
+    try {
+        const int added = append();
+        result_.pages_written += added;
+        result_.inputs_merged += 1;
+        return added;
+    } catch (...) {
+        // An input that fails part-way leaves none of its pages behind, so a
+        // caller may carry on without it. The orphaned objects are dropped by
+        // the garbage collection every merge is written with.
+        int now = before;
+        try {
+            guarded(c, [&](fz_context* g) { now = pdf_count_pages(g, dst); });
+            if (now > before) {
+                guarded(c, [&](fz_context* g) { pdf_delete_page_range(g, dst, before, now); });
+            }
+        } catch (const Error&) {
+            dst_ = nullptr;  // cannot trust it now; the Merger refuses further use
+            pdf_drop_document(c, dst);
+        }
+        throw;
+    }
+}
+
+MergeResult Merger::finish(const std::string& output) {
+    require_open();
+    if (result_.inputs_merged == 0) {
+        throw Error(0, "merge needs at least one input");
+    }
+    fz_context* c = ctx_->raw();
+    pdf_write_options opts = write_options(options_);
+    pdf_document* doc = dst_;
+    detail::refuse_directory_output(output);
+    const char* out = output.c_str();
+    guarded(c, [&](fz_context* g) { pdf_save_document(g, doc, out, &opts); });
+
+    MergeResult result = result_;
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(output, ec);
+    result.output_bytes = ec ? 0 : static_cast<std::size_t>(size);
+    return result;
+}
+
+MergeResult Merger::finish_fd(int fd) {
+    require_open();
+    if (result_.inputs_merged == 0) {
+        throw Error(0, "merge needs at least one input");
+    }
+    detail::write_pdf_fd(ctx_->raw(), dst_, fd, write_options(options_));
+    MergeResult result = result_;
+    result.output_bytes = detail::fd_size(fd);
+    return result;
+}
+
 MergeResult merge(const Context& ctx, const std::vector<std::string>& inputs,
                   const std::string& output, const MergeOptions& options) {
     if (inputs.empty()) {
         throw Error(0, "merge needs at least one input");
     }
-    fz_context* c = ctx.raw();
-    if (c == nullptr) {
-        throw Error(0, "cannot merge with a moved-from Context");
-    }
-
-    OwnedPdfDoc dst{c};
-    guarded(c, [&](fz_context* g) { *dst.slot() = pdf_create_document(g); });
-    if (!dst) {
-        throw Error(0, "could not create the output document");
-    }
-
-    MergeResult result;
+    Merger merger(ctx, options);
     for (const std::string& input : inputs) {
-        if (looks_like_image(input)) {
-            append_image_page(c, dst.get(), input);
-            result.pages_written += 1;
-        } else {
-            result.pages_written += append_pdf_pages(c, dst.get(), input);
-        }
-        result.inputs_merged += 1;
+        merger.add(input);
     }
-
-    pdf_write_options opts = write_options(options);
-    pdf_document* doc = dst.get();
-    detail::refuse_directory_output(output);
-    const char* out = output.c_str();
-    guarded(c, [&](fz_context* g) { pdf_save_document(g, doc, out, &opts); });
-
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(output, ec);
-    result.output_bytes = ec ? 0 : static_cast<std::size_t>(size);
-    return result;
+    return merger.finish(output);
 }
 
 }  // namespace leht::ops

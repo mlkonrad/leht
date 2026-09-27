@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "leht/ops/pages.hpp"
 
+#include "edit_internal.hpp"
+#include "fd_output.hpp"
 #include "guards.hpp"
 #include "leht/context.hpp"
 #include "leht/error.hpp"
@@ -51,9 +53,8 @@ int count_pages(fz_context* ctx, pdf_document* doc) {
 }
 
 /// Copies `selection` (0-based, in order) from `src` into a fresh document.
-PagesResult graft_selection(fz_context* ctx, pdf_document* src,
-                            const std::vector<int>& selection,
-                            const std::string& output) {
+OwnedPdfDoc graft_into_new(fz_context* ctx, pdf_document* src,
+                           const std::vector<int>& selection) {
     OwnedPdfDoc dst{ctx};
     guarded(ctx, [&](fz_context* g) { *dst.slot() = pdf_create_document(g); });
     if (!dst) {
@@ -66,8 +67,17 @@ PagesResult graft_selection(fz_context* ctx, pdf_document* src,
             pdf_graft_page(g, target, -1, src, page);
         });
     }
+    return dst;
+}
+
+/// graft_into_new(), saved to `output`.
+PagesResult graft_selection(fz_context* ctx, pdf_document* src,
+                            const std::vector<int>& selection,
+                            const std::string& output) {
+    OwnedPdfDoc dst = graft_into_new(ctx, src, selection);
 
     pdf_write_options opts = default_options();
+    pdf_document* target = dst.get();
     detail::refuse_directory_output(output);
     const char* out = output.c_str();
     guarded(ctx, [&](fz_context* g) {
@@ -329,6 +339,25 @@ std::vector<std::string> split(const Context& ctx, const std::string& input,
         written.push_back(path);
     }
     return written;
+}
+
+PagesResult extract(const Context& ctx, const Document& doc, int output_fd,
+                    const std::string& ranges) {
+    fz_context* c = ctx.raw();
+    pdf_document* pdf = detail::require_pdf(c, doc);
+    const std::vector<int> selection =
+        parse_page_ranges(ranges, count_pages(c, pdf));
+    if (selection.empty()) {
+        throw Error(0, "page selection is empty");
+    }
+
+    OwnedPdfDoc dst = graft_into_new(c, pdf, selection);
+    detail::write_pdf_fd(c, dst.get(), output_fd, default_options());
+
+    PagesResult result;
+    result.pages_written = static_cast<int>(selection.size());
+    result.output_bytes = detail::fd_size(output_fd);
+    return result;
 }
 
 }  // namespace leht::ops

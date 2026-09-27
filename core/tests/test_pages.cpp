@@ -5,6 +5,9 @@
 #include "leht/ops/pages.hpp"
 #include "test_harness.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -259,6 +262,37 @@ void split_requires_a_format_field() {
     CHECK(threw);
 }
 
+
+/// Creates `path` for writing, read-write as Document::save_fd() requires.
+int open_write(const std::string& path) {
+    return ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+}
+
+void extracts_from_an_open_document_into_a_descriptor() {
+    Context ctx;
+    TempPdf out{"pages_extract_fd.pdf"};
+
+    Document doc = Document::open(ctx, corpus("text_10p.pdf"));
+    const int fd = open_write(out.str());
+    const PagesResult result = extract(ctx, doc, fd, "2-4");
+    ::close(fd);
+
+    CHECK(result.pages_written == 3);
+    CHECK(result.output_bytes == fs::file_size(out.str()));
+    CHECK(doc.page_count() == 10);  // the source is only read
+
+    Document part = Document::open(ctx, out.str());
+    CHECK(part.page_count() == 3);
+
+    bool threw = false;
+    try {
+        (void)extract(ctx, doc, fd, "11");
+    } catch (const leht::Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
 }  // namespace
 
 int main() {
@@ -279,5 +313,6 @@ int main() {
     RUN(split_requires_a_format_field);
     RUN(split_rejects_dangerous_format_patterns);
     RUN(split_accepts_valid_format_patterns);
+    RUN(extracts_from_an_open_document_into_a_descriptor);
     return 0;
 }

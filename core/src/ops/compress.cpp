@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "leht/ops/compress.hpp"
 
+#include "edit_internal.hpp"
+#include "fd_output.hpp"
 #include "guards.hpp"
 #include "leht/context.hpp"
 #include "leht/error.hpp"
@@ -200,39 +202,11 @@ std::size_t file_size_or_zero(const std::string& path) {
     return ec ? 0 : static_cast<std::size_t>(size);
 }
 
-}  // namespace
-
-const char* preset_name(CompressPreset preset) {
-    switch (preset) {
-        case CompressPreset::Lossless: return "lossless";
-        case CompressPreset::Print:    return "print";
-        case CompressPreset::Ebook:    return "ebook";
-        case CompressPreset::Screen:   return "screen";
-    }
-    return "unknown";
-}
-
-CompressResult compress(const Context& ctx, const std::string& input,
-                        const std::string& output,
-                        const CompressOptions& options) {
-    fz_context* c = ctx.raw();
-    if (c == nullptr) {
-        throw Error(0, "cannot compress with a moved-from Context");
-    }
-    if (input == output) {
-        throw Error(0, "compress will not write over its input: " + input);
-    }
-
-    CompressResult result;
-    result.input_bytes = file_size_or_zero(input);
-
-    OwnedPdfDoc doc{c};
-    const char* in = input.c_str();
-    guarded(c, [&](fz_context* g) { *doc.slot() = pdf_open_document(g, in); });
-    if (!doc) {
-        throw Error(0, "could not open as PDF: " + input);
-    }
-
+/// Recompresses the images of `pdf` in place, as `options` asks, and returns
+/// the write options every compressed output is saved with.
+pdf_write_options recompress_document(fz_context* c, pdf_document* pdf,
+                                      const CompressOptions& options,
+                                      CompressResult& result) {
     const PresetValues preset = values_for(options.preset);
     const int max_edge =
         options.max_image_edge > 0 ? options.max_image_edge : preset.max_edge;
@@ -240,7 +214,6 @@ CompressResult compress(const Context& ctx, const std::string& input,
         options.jpeg_quality > 0 ? options.jpeg_quality : preset.quality;
 
     if (max_edge > 0 && quality > 0) {
-        pdf_document* pdf = doc.get();
         int object_count = 0;
         guarded(c, [&](fz_context* g) {
             object_count = pdf_count_objects(g, pdf);
@@ -280,6 +253,43 @@ CompressResult compress(const Context& ctx, const std::string& input,
     opts.do_compress_fonts = 1;
     opts.do_linear = options.linearize ? 1 : 0;
     opts.compression_effort = 100;  // slowest, smallest
+    return opts;
+}
+
+}  // namespace
+
+const char* preset_name(CompressPreset preset) {
+    switch (preset) {
+        case CompressPreset::Lossless: return "lossless";
+        case CompressPreset::Print:    return "print";
+        case CompressPreset::Ebook:    return "ebook";
+        case CompressPreset::Screen:   return "screen";
+    }
+    return "unknown";
+}
+
+CompressResult compress(const Context& ctx, const std::string& input,
+                        const std::string& output,
+                        const CompressOptions& options) {
+    fz_context* c = ctx.raw();
+    if (c == nullptr) {
+        throw Error(0, "cannot compress with a moved-from Context");
+    }
+    if (input == output) {
+        throw Error(0, "compress will not write over its input: " + input);
+    }
+
+    CompressResult result;
+    result.input_bytes = file_size_or_zero(input);
+
+    OwnedPdfDoc doc{c};
+    const char* in = input.c_str();
+    guarded(c, [&](fz_context* g) { *doc.slot() = pdf_open_document(g, in); });
+    if (!doc) {
+        throw Error(0, "could not open as PDF: " + input);
+    }
+
+    pdf_write_options opts = recompress_document(c, doc.get(), options, result);
 
     pdf_document* pdf = doc.get();
     detail::refuse_directory_output(output);
@@ -287,6 +297,18 @@ CompressResult compress(const Context& ctx, const std::string& input,
     guarded(c, [&](fz_context* g) { pdf_save_document(g, pdf, out, &opts); });
 
     result.output_bytes = file_size_or_zero(output);
+    return result;
+}
+
+CompressResult compress(const Context& ctx, Document& doc, int output_fd,
+                        const CompressOptions& options) {
+    fz_context* c = ctx.raw();
+    pdf_document* pdf = detail::require_pdf(c, doc);
+
+    CompressResult result;
+    const pdf_write_options opts = recompress_document(c, pdf, options, result);
+    detail::write_pdf_fd(c, pdf, output_fd, opts);
+    result.output_bytes = detail::fd_size(output_fd);
     return result;
 }
 

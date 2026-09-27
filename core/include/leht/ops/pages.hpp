@@ -7,6 +7,7 @@
 
 namespace leht {
 class Context;
+class Document;
 }
 
 namespace leht::ops {
@@ -30,6 +31,13 @@ struct PagesResult {
 /// Writes only the pages named by `ranges`, in the order given.
 PagesResult extract(const Context& ctx, const std::string& input,
                     const std::string& output, const std::string& ranges);
+
+/// As above, from an open document into `output_fd`, which is borrowed and
+/// written from its current offset. `doc` is only read. This is the sandboxed
+/// worker's entry point, and the viewer splits a document by calling it once
+/// per part.
+PagesResult extract(const Context& ctx, const Document& doc, int output_fd,
+                    const std::string& ranges);
 
 /// Writes everything EXCEPT the pages named by `ranges`.
 PagesResult remove_pages(const Context& ctx, const std::string& input,

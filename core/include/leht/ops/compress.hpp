@@ -6,6 +6,7 @@
 
 namespace leht {
 class Context;
+class Document;
 }
 
 namespace leht::ops {
@@ -65,6 +66,16 @@ struct CompressResult {
 /// a heuristic, and a deliberately conservative one.
 CompressResult compress(const Context& ctx, const std::string& input,
                         const std::string& output,
+                        const CompressOptions& options = {});
+
+/// As above, but compresses an open document into `output_fd`, which is
+/// borrowed and written from its current offset. This is the sandboxed
+/// worker's entry point: it cannot open paths.
+///
+/// Recompresses `doc` IN PLACE on the way, so the caller should hold a copy
+/// opened for the purpose, not the document it is showing. input_bytes is
+/// left 0: only the caller knows what the document was read from.
+CompressResult compress(const Context& ctx, Document& doc, int output_fd,
                         const CompressOptions& options = {});
 
 /// Human-readable preset name, for CLI output.
