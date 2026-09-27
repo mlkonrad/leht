@@ -88,8 +88,8 @@ noise. So saving learned to append:
   `/Lock /All`, which marks every other field read-only, and its signature dictionary
   carries a FieldMDP `/Reference` that locks nothing. Leht writes the dictionary itself and
   omits both: signing a document says "these bytes are mine", not "nobody may fill in this
-  form". A `/Lock` the document's author put there is not enacted either, and that is a
-  gap, not a feature — it is listed under Not yet.
+  form". A `/Lock` the document's author put there *is* enacted — see Certification and
+  field locks below.
 - The digest follows the key: SHA-256, or SHA-384 for a P-384 key (SHA-512 above that), so
   the hash never becomes the weak half of the pair.
 - `--tsa URL` timestamps the signature value over HTTP or HTTPS. The reply's imprint and
@@ -136,6 +136,74 @@ from the sandboxed worker.
   Solutions, with `--trust` or *Trust a Certificate…*. Leht does not consult the EU Trusted
   List, which is what would make it say *qualified*.
 
+## Certification and field locks
+
+An ordinary signature says "I signed this". A **certification** is the author's signature,
+and says what others may still do without breaking it:
+
+```
+leht sign FILE -o OUT.pdf --p12 ID.p12 --certify no-changes|forms|comments
+```
+
+- `no-changes` (DocMDP level 1): nothing at all.
+- `forms` (level 2): filling in form fields, and signing.
+- `comments` (level 3): those, and annotations.
+
+The signature dictionary gets a DocMDP `/Reference` and the catalog a `/Perms /DocMDP`
+entry naming it. A certification must be the **first** signature — Leht refuses to certify
+a document that is already signed — and a document certified with no changes allowed takes
+no further signature unless `--force`d. In the viewer: *Certify* in the Sign dialog, offered
+only while the document has no signature.
+
+A **field lock** is the form author's: a signature field whose `/Lock` names fields (all,
+these, or all but these) that signing it should freeze. Leht enacts it by writing a
+FieldMDP `/Reference` that mirrors the lock, and by making the locked fields read-only in
+the same revision, so every reader stops editing them — and so does Leht's own form
+filling.
+
+### What changed, and was it allowed
+
+Whenever a certification or a lock applies, Leht judges every change made after each
+signature, object by object, by what the object is:
+
+| change | allowed at |
+|---|---|
+| a field's value and its widget's appearance (form filling) | level 2 and 3, unless a lock covers the field |
+| a new signature field, its widget, and its entry in the form | level 2 and 3 |
+| an annotation added, changed or removed | level 3 |
+| long-term-validation data (DSS, document timestamps) | always |
+| page content, resources, the page tree, anything else | never |
+
+It reads each earlier revision the way MuPDF's own validator does — through the xref section
+that revision ended with — which works on encrypted files too. MuPDF's validator itself is
+not used: it only enforces level 1, and at levels 2 and 3 treats any change to a page
+dictionary as a violation, which is exactly how a permitted new signature or annotation
+arrives. At level 1, where MuPDF's judgement is sound, a test checks that the two agree
+on every kind of change. The full permission matrix is a test too
+(`core/tests/test_mdp.cpp`).
+
+`leht verify` prints the certification and, per signature, either that every later change
+was allowed or each one that was not ("the content of page 2 changed", "field 'amount' was
+changed, but a signature locks it"), and exits 7. The viewer's Signatures panel says the
+same, the banner names the certification, and the tools a certification forbids are
+disabled, with the reason in their tooltip; on the CLI an edit a certification forbids is
+refused unless `--force`. A file whose revisions cannot be told apart — MuPDF had to repair
+it — is reported as not judgeable, never as permitted.
+
+Without a certification or a lock nothing is judged: an ordinary signature still reports
+only that the document was *changed after signing* (see above for why there is no verdict
+then).
+
+## Encrypted documents
+
+An encrypted PDF is signed as it is, and stays encrypted. The new revision's strings —
+`/Reason`, `/Name`, `/M` — are encrypted like the rest of the file; the signature's own
+`/Contents` is the one string the standard requires to stay in the clear, and MuPDF's
+writer leaves it so. The CLI asks for the document's password after the key's
+(`--doc-password-fd N`, or the next line of stdin); the viewer already holds an
+authenticated document. `pdfsig -upw` and `qpdf --password` confirm the result in the tests,
+for AES-256 and AES-128.
+
 ## Verifying
 
 `leht verify FILE [--trust CA.pem]... [--json]`, and in the viewer a Signatures panel plus a
@@ -152,7 +220,8 @@ Four things are reported, and kept apart on purpose:
 
 Exit codes say the same thing to scripts: **0** all valid and trusted, **4** something is
 broken, **5** intact but the signer is not trusted, **6** intact and trusted but the
-document was added to afterwards.
+document was added to afterwards, **7** changed in a way a certification or a field lock
+forbids.
 
 **The byte range is checked before the cryptography.** A signature's `/ByteRange` must be
 two spans, start at 0, lie inside the file, and leave out exactly the gap its own
@@ -237,6 +306,3 @@ certificate's SHA-256 fingerprint.
 - **B-LT / LTV**: a DSS dictionary with OCSP and CRL data, and document timestamps, so a
   signature stays verifiable after its certificate expires or is revoked.
 - **The EU Trusted List**, which is what "qualified" means in practice.
-- **Enacting a field's `/Lock`**, and DocMDP certification signatures ("no changes
-  allowed").
-- **Encrypted documents** cannot be signed: decrypt first.

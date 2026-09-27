@@ -59,6 +59,7 @@ leht annotate  FILE -o OUT.pdf [--highlight TEXT] [--note P:X,Y:TEXT] [--freetex
 leht form      FILE                               list form fields
 leht fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]
 leht sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto) [--box P:BOX] [--tsa URL]
+               [--certify no-changes|forms|comments]
 leht keys      [--pkcs11-module LIB]              signing keys on ID cards and tokens
 leht ocr       FILE -o OUT.pdf [-p RANGES] [--lang est+eng] [--dpi N] [--force]
                                                   make scanned pages searchable
@@ -80,9 +81,10 @@ how each claim is tested: [docs/editing.md](docs/editing.md).
 original bytes untouched, so signatures already in the file stay valid — and so saving a
 signed document now appends rather than rewrites. `verify` keeps four questions apart: are
 these the signed bytes, whose key was it, is that name trustworthy, and was anything added
-afterwards. Exit codes say the same: 4 broken, 5 untrusted, 6 changed after signing. The
-private key never enters the sandboxed worker that parses the PDF, and the signature blobs
-coming out of a document are only ever parsed inside it: [docs/signing.md](docs/signing.md).
+afterwards. Exit codes say the same: 4 broken, 5 untrusted, 6 changed after signing, 7
+changed in a way a certification or field lock forbids. The private key never enters the
+sandboxed worker that parses the PDF, and the signature blobs coming out of a document are
+only ever parsed inside it: [docs/signing.md](docs/signing.md).
 
 **Page ranges are 1-based and inclusive:** `1-5,8,12-`. A **descending range reverses those
 pages** — `-p 5-1` flips them. That is deliberate, not a parsing accident.
@@ -132,6 +134,10 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   and the whole suite, sanitizers and a fuzz pass run against the pinned MuPDF 1.28.4.
 - **Viewer editing:** move and resize annotations, free text typed in place, crop to a
   box, and every watermark and crop option the CLI has. See [docs/editing.md](docs/editing.md).
+- **Certification, field locks, encrypted signing:** certify a document for no changes,
+  form filling, or comments; a form's field locks enacted; every later change judged
+  against them (`verify` exits 7 on a forbidden one); encrypted PDFs signed as they are.
+  See [docs/signing.md](docs/signing.md#certification-and-field-locks).
 - **OCR:** scanned pages made searchable with an invisible text layer — Estonian and
   English by default — read by Tesseract in its own sandboxed worker. See
   [docs/ocr.md](docs/ocr.md).
