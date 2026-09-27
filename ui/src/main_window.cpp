@@ -497,9 +497,22 @@ void MainWindow::buildEditActions() {
          PageView::Tool::Crop},
         {"Sign", "Drag a box to place a signature there", PageView::Tool::Sign},
     };
+    // The certification level from which each tool is allowed (see
+    // applyCertification): 2 signing, 3 annotations, 4 never.
+    const auto certNeeds = [](PageView::Tool tool) {
+        switch (tool) {
+            case PageView::Tool::Select: return 0;
+            case PageView::Tool::Sign:   return 2;
+            case PageView::Tool::Redact:
+            case PageView::Tool::Crop:   return 4;
+            default:                     return 3;
+        }
+    };
     for (const auto& t : kTools) {
         QAction* a = bar->addAction(tr(t.label));
         a->setToolTip(tr(t.tip));
+        a->setProperty("baseTip", tr(t.tip));
+        a->setProperty("certNeeds", certNeeds(t.tool));
         a->setCheckable(true);
         tools_->addAction(a);
         const PageView::Tool tool = t.tool;
@@ -514,6 +527,9 @@ void MainWindow::buildEditActions() {
     menu->addAction(saveAsAction);
     menu->addSeparator();
     QAction* redactText = menu->addAction(tr("Redact Text…"));
+    redactText->setProperty("certMenu", true);
+    redactText->setProperty("certNeeds", 4);
+    redactText->setProperty("baseTip", redactText->toolTip());
     connect(redactText, &QAction::triggered, this, [this] {
         bool ok = false;
         const QString needle = QInputDialog::getText(
@@ -524,6 +540,9 @@ void MainWindow::buildEditActions() {
         }
     });
     QAction* watermark = menu->addAction(tr("Watermark…"));
+    watermark->setProperty("certMenu", true);
+    watermark->setProperty("certNeeds", 4);
+    watermark->setProperty("baseTip", watermark->toolTip());
     connect(watermark, &QAction::triggered, this, [this] {
         const int page = std::max(0, view_->currentPage());
         WatermarkDialog dialog(this, view_->pageImage(page), view_->pageSizePoints(page),
@@ -535,10 +554,16 @@ void MainWindow::buildEditActions() {
         }
     });
     QAction* ocr = menu->addAction(tr("Recognize Text (OCR)…"));
+    ocr->setProperty("certMenu", true);
+    ocr->setProperty("certNeeds", 4);
+    ocr->setProperty("baseTip", ocr->toolTip());
     ocr->setToolTip(tr("Make scanned pages searchable"));
     connect(ocr, &QAction::triggered, this, &MainWindow::recognizeText);
     menu->addSeparator();
     QAction* signInvisibly = menu->addAction(tr("Sign Invisibly…"));
+    signInvisibly->setProperty("certMenu", true);
+    signInvisibly->setProperty("certNeeds", 2);
+    signInvisibly->setProperty("baseTip", signInvisibly->toolTip());
     signInvisibly->setToolTip(tr("Sign the document without marking a page"));
     connect(signInvisibly, &QAction::triggered, this, [this] { startSigning(0, QRectF()); });
     QAction* trustCert = menu->addAction(tr("Trust a Certificate…"));
@@ -552,6 +577,9 @@ void MainWindow::buildEditActions() {
     });
     menu->addSeparator();
     QAction* crop = menu->addAction(tr("Crop Margins…"));
+    crop->setProperty("certMenu", true);
+    crop->setProperty("certNeeds", 4);
+    crop->setProperty("baseTip", crop->toolTip());
     connect(crop, &QAction::triggered, this, [this] {
         CropMarginsDialog dialog(this, view_->pageCount());
         if (dialog.exec() == QDialog::Accepted) {
@@ -620,6 +648,9 @@ std::pair<QString, QColor> verdict(const SigRow& row) {
     if (!row.rangeOk || !row.intact) {
         return {MainWindow::tr("Broken"), QColor(170, 20, 20)};
     }
+    if (row.changesJudged && !row.changesPermitted) {
+        return {MainWindow::tr("Intact, but changed in a way it forbids"), QColor(170, 20, 20)};
+    }
     const bool trusted = static_cast<leht::crypto::Trust>(row.trust) ==
                          leht::crypto::Trust::Trusted;
     if (row.changedAfterSigning && !row.laterSignatureCoversChanges) {
@@ -630,6 +661,15 @@ std::pair<QString, QColor> verdict(const SigRow& row) {
         return {MainWindow::tr("Intact, signer not trusted"), QColor(170, 110, 0)};
     }
     return {MainWindow::tr("Valid"), QColor(20, 120, 40)};
+}
+
+QString certificationWords(int level) {
+    switch (level) {
+        case 1: return MainWindow::tr("no changes allowed");
+        case 2: return MainWindow::tr("form filling and signing allowed");
+        case 3: return MainWindow::tr("form filling, signing and comments allowed");
+        default: return {};
+    }
 }
 
 QString localTime(qint64 unix_seconds) {
@@ -643,6 +683,7 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     signatures_->clear();
     auto* dock = findChild<QDockWidget*>(QStringLiteral("signatureDock"));
     if (rows.isEmpty()) {
+        applyCertification(0);
         signatureBanner_->hide();
         if (dock != nullptr) {
             dock->hide();
@@ -694,6 +735,15 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
         }
         add(tr("Reason"), row.reason);
         add(tr("Location"), row.location);
+        if (row.certification != 0) {
+            add(tr("Certifies"), certificationWords(row.certification));
+        }
+        add(tr("Locks"), row.locks);
+        if (row.changesJudged) {
+            add(tr("Later changes"), row.changesPermitted
+                                         ? tr("all of them allowed")
+                                         : row.changeProblems.join(QStringLiteral("; ")));
+        }
         if (row.changedAfterSigning) {
             add(tr("Changed"), row.laterSignatureCoversChanges
                                    ? tr("yes, and a later signature covers those changes")
@@ -701,7 +751,7 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
         }
         add(tr("Certificate fingerprint"), row.fingerprint);
 
-        if (!row.rangeOk || !row.intact) {
+        if (!row.rangeOk || !row.intact || (row.changesJudged && !row.changesPermitted)) {
             worst = 2;
         } else if (worst < 1 && (row.changedAfterSigning && !row.laterSignatureCoversChanges)) {
             worst = 1;
@@ -716,8 +766,14 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
         worst == 2 ? tr("⚠ This document has a broken signature.")
         : worst == 1 ? tr("This document is signed, with something worth checking.")
                      : tr("✓ Signed and verified.");
-    signatureBannerLabel_->setText(tr(" %1  (%n signature(s)) ", nullptr, signatureCount_)
-                                       .arg(summary));
+    int certified = 0;
+    for (const SigRow& row : rows) {
+        certified = row.certification != 0 ? row.certification : certified;
+    }
+    signatureBannerLabel_->setText(
+        tr(" %1  (%n signature(s)) ", nullptr, signatureCount_).arg(summary) +
+        (certified != 0 ? tr(" Certified: %1. ").arg(certificationWords(certified)) : QString()));
+    applyCertification(certified);
     QPalette pal = signatureBannerLabel_->palette();
     pal.setColor(QPalette::WindowText, worst == 2 ? QColor(170, 20, 20)
                                        : worst == 1 ? QColor(140, 90, 0)
@@ -726,6 +782,45 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     signatureBanner_->show();
     if (dock != nullptr && worst > 0) {
         dock->show();
+    }
+}
+
+void MainWindow::applyCertification(int level) {
+    // What a certified document still lets one do, in the tools: each tool
+    // and menu entry carries the level from which it is allowed (2 form
+    // filling and signing, 3 annotations, 4 never -- page content is fixed at
+    // every level). Leht does not break a certification by a click.
+    const auto gate = [level](QAction* a) {
+        const int needs = a->property("certNeeds").toInt();
+        if (needs == 0) {
+            return;
+        }
+        const bool allowed = level == 0 || level >= needs;
+        a->setEnabled(allowed);
+        const QString base = a->property("baseTip").toString();
+        a->setToolTip(allowed ? base
+                              : tr("%1\n\nNot available: the document is certified, %2.")
+                                    .arg(base, certificationWords(level)));
+    };
+    if (tools_ != nullptr) {
+        for (QAction* a : tools_->actions()) {
+            gate(a);
+        }
+    }
+    for (QAction* a : findChildren<QAction*>()) {
+        if (a->property("certMenu").toBool()) {
+            gate(a);
+        }
+    }
+    // Filling fields is the one change level 2 and 3 allow and 1 does not.
+    if (fields_ != nullptr) {
+        fields_->setEnabled(level != 1);
+    }
+    if (level != 0 && tools_ != nullptr) {
+        QAction* current = tools_->checkedAction();
+        if (current != nullptr && !current->isEnabled()) {
+            tools_->actions().first()->trigger();  // back to Select
+        }
     }
 }
 
@@ -746,7 +841,7 @@ void MainWindow::startSigning(int page, QRectF rect) {
     if (pageCount_ == 0) {
         return;
     }
-    SignDialog dialog(this, page, rect, QString());
+    SignDialog dialog(this, page, rect, QString(), signatureCount_ == 0);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }

@@ -83,6 +83,8 @@ protected:
 public slots:
     /// More -> Recognize Text (OCR)...
     void recognizeText();
+    /// Disables what a certification at `level` forbids (0: nothing).
+    void applyCertification(int level);
 
 private:
     void buildActions();

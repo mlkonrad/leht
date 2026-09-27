@@ -57,7 +57,10 @@ class SignDialog : public QDialog {
 public:
     /// `rect` empty means an invisible signature: the appearance controls are
     /// then hidden, because there is nothing to show.
-    SignDialog(QWidget* parent, int page, QRectF rect, QString suggestedField);
+    /// `canCertify`: the document has no signature yet, so this one may be
+    /// its certification.
+    SignDialog(QWidget* parent, int page, QRectF rect, QString suggestedField,
+               bool canCertify = true);
 
     /// The collected request. Only valid after exec() returned Accepted.
     [[nodiscard]] SignSpec spec() const;
@@ -93,6 +96,7 @@ private:
     QLineEdit* location_ = nullptr;
     QLineEdit* tsa_ = nullptr;
     QCheckBox* useTsa_ = nullptr;
+    QComboBox* certify_ = nullptr;
     QRadioButton* textOnly_ = nullptr;
     QRadioButton* drawn_ = nullptr;
     QRadioButton* imported_ = nullptr;

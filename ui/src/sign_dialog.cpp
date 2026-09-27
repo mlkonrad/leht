@@ -74,7 +74,8 @@ void DrawPad::paintEvent(QPaintEvent* /*event*/) {
     }
 }
 
-SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggestedField)
+SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggestedField,
+                       bool canCertify)
     : QDialog(parent), page_(page), rect_(rect), field_(std::move(suggestedField)) {
     setWindowTitle(tr("Sign document"));
     QSettings settings;
@@ -138,6 +139,19 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
     form->addRow(tr("Reason:"), reason_);
     location_ = new QLineEdit(settings.value(QStringLiteral("signing/location")).toString(), this);
     form->addRow(tr("Location:"), location_);
+    // Certifying says what may still be done to the document after this
+    // signature; only the first signature can.
+    certify_ = new QComboBox(this);
+    certify_->addItem(tr("No: an ordinary signature"), 0);
+    certify_->addItem(tr("Yes: no changes allowed afterwards"), 1);
+    certify_->addItem(tr("Yes: form filling and signing allowed"), 2);
+    certify_->addItem(tr("Yes: also comments (annotations) allowed"), 3);
+    certify_->setEnabled(canCertify);
+    certify_->setToolTip(canCertify
+                             ? tr("A certification is the author's signature: it says what "
+                                  "others may still change without breaking it.")
+                             : tr("Only a document's first signature can certify it."));
+    form->addRow(tr("Certify:"), certify_);
     layout->addLayout(form);
 
     if (!rect_.isEmpty()) {
@@ -397,6 +411,7 @@ SignSpec SignDialog::spec() const {
         spec.p12Path = keyPath_->text().trimmed();
         spec.password = password_->text();
     }
+    spec.certify = certify_->currentData().toInt();
     spec.field = field_;
     spec.page = page_;
     spec.rect = rect_;

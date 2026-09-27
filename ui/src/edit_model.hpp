@@ -44,6 +44,7 @@ struct SignSpec {
     QString p12Path;
     QString pkcs11Uri;  ///< a key on an ID card or token instead of p12Path
     QString password;   ///< the .p12 password, or the card's PIN
+    int certify = 0;    ///< certify the document at this DocMDP level; 0: an ordinary signature
     QString field;      ///< an existing empty signature field, or empty
     int page = 0;
     QRectF rect;        ///< empty means an invisible signature
@@ -73,6 +74,11 @@ struct SigRow {
     QString rangeProblem;
     bool changedAfterSigning = false;
     bool laterSignatureCoversChanges = false;
+    int certification = 0;       ///< DocMDP level this signature certifies with; 0 none
+    QString locks;               ///< the fields it locks, in words
+    bool changesJudged = false;  ///< a certification or lock applies to later changes
+    bool changesPermitted = true;
+    QStringList changeProblems;
     bool checked = false;
     bool intact = false;
     QString problem;

@@ -55,6 +55,7 @@
 #include <QTableWidget>
 
 #include <QDockWidget>
+#include <QInputDialog>
 #include <QScrollBar>
 #include <QTreeWidget>
 #include "thumbnail_bar.hpp"
@@ -1124,6 +1125,132 @@ int main(int argc, char** argv) {
                 check(false, "the signed file opens");
             }
 
+            // A certification (M3): made through the same path, and afterwards
+            // the tools it forbids are off, the ones it allows are on.
+            {
+                const QString certified = tmp.filePath(QStringLiteral("to_certify.pdf"));
+                QFile::remove(certified);
+                QFile::copy(QStringLiteral(LEHT_CORPUS_DIR "/text_10p.pdf"), certified);
+                window.openPath(certified);
+                pump(1500);
+                {
+                    SignDialog fresh(&window, 0, QRectF(), QString(), true);
+                    auto* combo = fresh.findChildren<QComboBox*>().value(0);
+                    bool found = false;
+                    for (auto* c : fresh.findChildren<QComboBox*>()) {
+                        found = found || c->count() == 4;
+                    }
+                    check(found && combo != nullptr, "the sign dialog offers to certify");
+                }
+                QVector<SigRow> certRows;
+                const auto got = QObject::connect(
+                    worker, &RenderWorker::signaturesReady, &window,
+                    [&certRows](const QVector<SigRow>& rows) { certRows = rows; });
+                SignSpec certify = spec;
+                certify.rect = QRectF();
+                certify.strokes.clear();
+                certify.lines.clear();
+                certify.password = QStringLiteral("pw");
+                certify.certify = 2;
+                QString certFailure;
+                const auto failed = QObject::connect(
+                    worker, &RenderWorker::saveFailed, &window,
+                    [&certFailure](const QString& m) { certFailure = m; });
+                QTimer closer;
+                QObject::connect(&closer, &QTimer::timeout, [] {
+                    if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                        box->accept();
+                    }
+                });
+                closer.start(50);
+                QMetaObject::invokeMethod(worker, "signDocument", Qt::QueuedConnection,
+                                          Q_ARG(QString, certified), Q_ARG(SignSpec, certify));
+                pump(3000);
+                closer.stop();
+                QObject::disconnect(failed);
+                if (!certFailure.isEmpty()) {
+                    std::printf("      certify failed: %s\n", qPrintable(certFailure));
+                }
+                check(certRows.size() == 1 && certRows.first().certification == 2,
+                      "the signature certifies the document for form filling");
+                QAction* highlight = nullptr;
+                QAction* signTool = nullptr;
+                for (QAction* a : window.findChildren<QAction*>()) {
+                    if (a->text() == QStringLiteral("Highlight")) {
+                        highlight = a;
+                    } else if (a->text() == QStringLiteral("Sign")) {
+                        signTool = a;
+                    }
+                }
+                check(highlight != nullptr && !highlight->isEnabled(),
+                      "a form-filling certification turns annotating off");
+                check(signTool != nullptr && signTool->isEnabled(),
+                      "and leaves signing on");
+                shot(&window, "m3-certified");
+                QObject::disconnect(got);
+            }
+
+            // An encrypted document is signed as it is: the worker holds it
+            // authenticated, and the hole it leaves is plaintext, so this side
+            // signs it exactly as it would an unencrypted one.
+            const QString lockedSrc = QStringLiteral(LEHT_CORPUS_DIR "/locked.pdf");
+            if (QFile::exists(lockedSrc)) {
+                const QString encrypted = tmp.filePath(QStringLiteral("to_sign_locked.pdf"));
+                QFile::remove(encrypted);
+                QFile::copy(lockedSrc, encrypted);
+                QTimer answer;
+                QObject::connect(&answer, &QTimer::timeout, [] {
+                    QWidget* modal = QApplication::activeModalWidget();
+                    if (auto* ask = qobject_cast<QInputDialog*>(modal)) {
+                        ask->setTextValue(QStringLiteral("s3cret"));
+                        ask->accept();
+                    } else if (auto* box = qobject_cast<QMessageBox*>(modal)) {
+                        box->accept();
+                    }
+                });
+                answer.start(50);
+                window.openPath(encrypted);
+                pump(1500);
+                QVector<SigRow> encRows;
+                const auto got = QObject::connect(
+                    worker, &RenderWorker::signaturesReady, &window,
+                    [&encRows](const QVector<SigRow>& rows) { encRows = rows; });
+                SignSpec invisible = spec;
+                invisible.rect = QRectF();
+                invisible.strokes.clear();
+                invisible.lines.clear();
+                invisible.password = QStringLiteral("pw");
+                QString encFailure;
+                const auto failed = QObject::connect(
+                    worker, &RenderWorker::saveFailed, &window,
+                    [&encFailure](const QString& m) { encFailure = m; });
+                QMetaObject::invokeMethod(worker, "signDocument", Qt::QueuedConnection,
+                                          Q_ARG(QString, encrypted), Q_ARG(SignSpec, invisible));
+                pump(3000);
+                answer.stop();
+                QObject::disconnect(failed);
+                QObject::disconnect(got);
+                if (!encFailure.isEmpty()) {
+                    std::printf("      encrypted signing failed: %s\n", qPrintable(encFailure));
+                }
+                check(encRows.size() == 1 && encRows.first().intact,
+                      "the viewer signs an encrypted document, and the signature verifies");
+                try {
+                    leht::Document onDisk = leht::Document::open(ctx, encrypted.toStdString());
+                    check(onDisk.needs_password() && onDisk.authenticate("s3cret") &&
+                              onDisk.signature_count() == 1,
+                          "the signed file is still encrypted, and carries the signature");
+                } catch (const leht::Error&) {
+                    check(false, "the signed encrypted file opens");
+                }
+            } else {
+                std::printf("      SKIP encrypted signing: locked.pdf missing\n");
+            }
+
+            // Back to the signed copy for the card.
+            window.openPath(toSign);
+            pump(1500);
+
             // The same through a card: SoftHSM standing in for an ID card.
             if (leht::test::SoftHsm::available()) {
                 leht::test::SoftHsm hsm;
@@ -1143,10 +1270,12 @@ int main(int argc, char** argv) {
                     if (card != nullptr) {
                         card->setChecked(true);
                     }
-                    const auto combos = dialog.findChildren<QComboBox*>();
-                    check(combos.size() == 1 && combos.first()->count() == 1 &&
-                              combos.first()->itemText(0).contains(QStringLiteral("Jaan Tamm")),
-                          "the dialog lists the card's signing key");
+                    bool listed = false;  // the key list, not the Certify choice
+                    for (auto* combo : dialog.findChildren<QComboBox*>()) {
+                        listed = listed || (combo->count() == 1 &&
+                                            combo->itemText(0).contains(QStringLiteral("Jaan Tamm")));
+                    }
+                    check(listed, "the dialog lists the card's signing key");
                 }
 
                 QString failure;

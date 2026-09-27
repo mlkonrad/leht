@@ -1224,6 +1224,7 @@ void RenderWorker::signDocument(QString path, SignSpec spec) {
     leht::ops::SignatureRequest& r = request.request;
     r.field = spec.field.toStdString();
     r.page = spec.page;
+    r.certify = spec.certify;
     if (!spec.rect.isEmpty()) {
         r.rect = leht::Rect{static_cast<float>(spec.rect.left()),
                             static_cast<float>(spec.rect.top()),
@@ -1347,6 +1348,13 @@ void RenderWorker::listSignatures() {
                 row.rangeProblem = QString::fromStdString(s.range_problem);
                 row.changedAfterSigning = s.changed_after_signing;
                 row.laterSignatureCoversChanges = s.later_signature_covers_changes;
+                row.certification = s.certification;
+                row.locks = QString::fromStdString(s.locks);
+                row.changesJudged = s.changes_judged;
+                row.changesPermitted = s.changes_permitted;
+                for (const std::string& p : s.change_problems) {
+                    row.changeProblems << QString::fromStdString(p);
+                }
                 row.checked = s.checked;
                 row.intact = s.intact;
                 row.problem = QString::fromStdString(s.problem);
