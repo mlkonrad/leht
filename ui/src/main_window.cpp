@@ -9,6 +9,8 @@
 
 #include "page_view.hpp"
 #include "page_dialogs.hpp"
+#include "file_tools.hpp"
+#include "file_tools_dialogs.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "leht/ocr/ocr.hpp"
 #endif
@@ -237,6 +239,7 @@ MainWindow::MainWindow() {
     buildActions();
     buildEditActions();
     buildSignaturePanel();
+    buildFileTools();
 
     pageLabel_ = new QLabel(this);
     zoomLabel_ = new QLabel(this);
@@ -397,10 +400,14 @@ void MainWindow::onWorker(std::function<void(RenderWorker*)> fn) {
 MainWindow::~MainWindow() {
     workerThread_.quit();
     workerThread_.wait();
+    fileTools_->cancel();
+    fileToolsThread_.quit();
+    fileToolsThread_.wait();
 }
 
 void MainWindow::buildActions() {
     QToolBar* bar = addToolBar(tr("Main"));
+    bar->setObjectName(QStringLiteral("mainBar"));
     bar->setMovable(false);
 
     QAction* open = bar->addAction(tr("Open"));
@@ -1357,4 +1364,178 @@ bool MainWindow::printDocument(QPrinter& printer, int fromPage, int toPage) {
     }
     painter.end();
     return true;
+}
+
+// --- File tools: Combine Files, Reduce File Size, Split Document ----------------
+
+void MainWindow::buildFileTools() {
+    fileTools_ = new FileTools();
+    fileTools_->moveToThread(&fileToolsThread_);
+    connect(&fileToolsThread_, &QThread::finished, fileTools_, &QObject::deleteLater);
+    fileToolsThread_.start();
+
+    auto* bar = findChild<QToolBar*>(QStringLiteral("mainBar"));
+    bar->addSeparator();
+    fileToolsButton_ = new QToolButton(bar);
+    fileToolsButton_->setObjectName(QStringLiteral("fileTools"));
+    fileToolsButton_->setText(tr("Files"));
+    fileToolsButton_->setPopupMode(QToolButton::InstantPopup);
+    auto* menu = new QMenu(fileToolsButton_);
+
+    QAction* combine = menu->addAction(tr("Combine Files…"));
+    combine->setObjectName(QStringLiteral("combineFiles"));
+    combine->setToolTip(tr("Put PDFs and images together into one new PDF"));
+    QAction* reduce = menu->addAction(tr("Reduce File Size…"));
+    reduce->setObjectName(QStringLiteral("reduceFileSize"));
+    reduce->setToolTip(tr("Make a smaller copy of this document"));
+    QAction* split = menu->addAction(tr("Split Document…"));
+    split->setObjectName(QStringLiteral("splitDocument"));
+    split->setToolTip(tr("Write this document's pages into separate files"));
+    reduce->setEnabled(false);  // until a document is open
+    split->setEnabled(false);
+    fileToolsButton_->setMenu(menu);
+    bar->addWidget(fileToolsButton_);
+
+    connect(worker_, &RenderWorker::opened, this,
+            [reduce, split](int pageCount, const QVector<QSize>&) {
+                reduce->setEnabled(pageCount > 0);
+                split->setEnabled(pageCount > 0);
+            });
+
+    connect(combine, &QAction::triggered, this, [this] {
+        CombineDialog dialog(this, pageCount_ > 0 ? currentPath_ : QString());
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        const QStringList inputs = dialog.inputs();
+        const QString output = dialog.output();
+        const auto go = [this, inputs, output] {
+            runFileTool(tr("Combining files…"), [inputs, output](FileTools* t, const QString&) {
+                t->combine(inputs, output, false);
+            });
+        };
+        // The open document goes in as it is on disk.
+        if (!inputs.contains(currentPath_) || resolveUnsaved(go)) {
+            go();
+        }
+    });
+
+    // Reduce and Split read the file on disk, so unsaved edits are settled
+    // first; the dialogs then describe the file that will actually be used.
+    connect(reduce, &QAction::triggered, this, [this, reduce] {
+        if (pageCount_ <= 0 || !resolveUnsaved([reduce] { reduce->trigger(); })) {
+            return;
+        }
+        ReduceDialog dialog(this, currentPath_, signatureCount_ > 0);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        const QString input = currentPath_;
+        const QString output = dialog.output();
+        const int preset = dialog.preset();
+        runFileTool(tr("Reducing file size…"),
+                    [input, output, preset](FileTools* t, const QString& password) {
+                        t->compress(input, password, output, preset, 0, false);
+                    });
+    });
+
+    connect(split, &QAction::triggered, this, [this, split] {
+        if (pageCount_ <= 0 || !resolveUnsaved([split] { split->trigger(); })) {
+            return;
+        }
+        SplitDialog dialog(this, currentPath_, pageCount_, signatureCount_ > 0);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        const QString input = currentPath_;
+        const QStringList ranges = dialog.ranges();
+        const QStringList outputs = dialog.outputs();
+        runFileTool(tr("Splitting document…"),
+                    [input, ranges, outputs](FileTools* t, const QString& password) {
+                        t->split(input, password, ranges, outputs);
+                    });
+    });
+
+    connect(fileTools_, &FileTools::progress, this, [this](int done, int total, const QString& what) {
+        if (fileToolsProgress_ != nullptr) {
+            fileToolsProgress_->setMaximum(total);
+            fileToolsProgress_->setValue(done);
+            fileToolsProgress_->setLabelText(what);
+        }
+    });
+    connect(fileTools_, &FileTools::failed, this, [this](const QString& message) {
+        const QString title = fileToolTitle_;
+        endFileTool();
+        QMessageBox::warning(this, title, message);
+    });
+    connect(fileTools_, &FileTools::finished, this,
+            [this](const QString& summary, const QStringList& written) {
+                const QString title = fileToolTitle_;
+                endFileTool();
+                statusBar()->showMessage(summary, 8000);
+                QMessageBox box(QMessageBox::Information, title, summary, QMessageBox::Close, this);
+                QPushButton* open = nullptr;
+                if (written.size() == 1) {
+                    open = box.addButton(tr("Open It"), QMessageBox::AcceptRole);
+                }
+                box.exec();
+                if (open != nullptr && box.clickedButton() == open) {
+                    openPath(written.first());
+                }
+            });
+    connect(fileTools_, &FileTools::passwordRequired, this, [this](bool wrong) {
+        if (fileToolsProgress_ != nullptr) {
+            fileToolsProgress_->hide();
+        }
+        bool ok = false;
+        const QString password = QInputDialog::getText(
+            this, tr("Password required"),
+            wrong ? tr("Wrong password. Try again for “%1”:").arg(currentTitle_)
+                  : tr("“%1” is password-protected. Enter its password:").arg(currentTitle_),
+            QLineEdit::Password, QString(), &ok);
+        if (!ok || !fileToolJob_) {
+            endFileTool();
+            return;
+        }
+        if (fileToolsProgress_ != nullptr) {
+            fileToolsProgress_->show();
+        }
+        FileTools* tools = fileTools_;
+        QMetaObject::invokeMethod(
+            tools, [tools, job = fileToolJob_, password] { job(tools, password); },
+            Qt::QueuedConnection);
+    });
+}
+
+void MainWindow::runFileTool(const QString& title, std::function<void(FileTools*, QString)> job) {
+    fileToolTitle_ = QString(title).remove(QStringLiteral("…"));
+    fileToolJob_ = std::move(job);
+    fileToolsButton_->setEnabled(false);  // one job at a time
+
+    fileToolsProgress_ = new QProgressDialog(title, tr("Cancel"), 0, 0, this);
+    fileToolsProgress_->setObjectName(QStringLiteral("fileToolsProgress"));
+    fileToolsProgress_->setWindowTitle(fileToolTitle_);
+    fileToolsProgress_->setWindowModality(Qt::WindowModal);
+    fileToolsProgress_->setMinimumDuration(400);
+    fileToolsProgress_->setAutoClose(false);
+    fileToolsProgress_->setAutoReset(false);
+    connect(fileToolsProgress_, &QProgressDialog::canceled, this, [this] {
+        fileTools_->cancel();  // thread-safe; the job stops after its current step
+        if (fileToolsProgress_ != nullptr) {
+            fileToolsProgress_->setLabelText(tr("Stopping…"));
+        }
+    });
+
+    FileTools* tools = fileTools_;
+    QMetaObject::invokeMethod(
+        tools, [tools, job = fileToolJob_] { job(tools, QString()); }, Qt::QueuedConnection);
+}
+
+void MainWindow::endFileTool() {
+    if (fileToolsProgress_ != nullptr) {
+        fileToolsProgress_->deleteLater();
+        fileToolsProgress_ = nullptr;
+    }
+    fileToolJob_ = nullptr;
+    fileToolsButton_->setEnabled(true);
 }

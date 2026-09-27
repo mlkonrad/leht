@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "render_worker.hpp"
+#include "worker_files.hpp"
 
 #include "leht/edit.hpp"
 
@@ -41,16 +42,6 @@ namespace {
 /// newest possible generation, so the worker never treats them as stale.
 constexpr quint64 kNoGeneration = std::numeric_limits<quint64>::max();
 
-/// How long the worker may take to produce each reply before it is killed and
-/// the file blamed. Generous: a legitimate open sizes every page, and 30 s
-/// covers documents far beyond any real one. LEHT_WORKER_TIMEOUT_MS overrides
-/// it (the tests use a short one).
-std::chrono::milliseconds requestTimeout() {
-    bool ok = false;
-    const int ms = qEnvironmentVariableIntValue("LEHT_WORKER_TIMEOUT_MS", &ok);
-    return std::chrono::milliseconds(ok && ms > 0 ? ms : 30'000);
-}
-
 /// The largest zoom the worker accepts; see ipc/src/protocol.cpp.
 constexpr double kMaxZoom = 64.0;
 
@@ -74,28 +65,6 @@ QVector<QRectF> toRects(const std::vector<leht::TextQuad>& quads) {
                                q.max_y() - q.min_y()));
     }
     return boxes;
-}
-
-/// Where leht-worker lives, in order of preference: an explicit override, next
-/// to the running binary (an app bundle), libexec relative to the binary (a
-/// relocated or DESTDIR install), the configured install location, and the
-/// build tree (tests and running from the build directory).
-QString workerPath() {
-    const QString env = qEnvironmentVariable("LEHT_WORKER_PATH");
-    if (!env.isEmpty()) {
-        return env;
-    }
-    const QString appDir = QCoreApplication::applicationDirPath();
-    for (const QString& candidate :
-         {appDir + QStringLiteral("/leht-worker"),
-          QDir::cleanPath(appDir + QStringLiteral("/" LEHT_WORKER_RELATIVE_PATH)),
-          QStringLiteral(LEHT_WORKER_INSTALLED_PATH),
-          QStringLiteral(LEHT_WORKER_BUILD_PATH)}) {
-        if (QFileInfo(candidate).isExecutable()) {
-            return candidate;
-        }
-    }
-    return QStringLiteral(LEHT_WORKER_BUILD_PATH);
 }
 
 /// Files that crashed a worker, for the rest of the session. Keyed on file
@@ -655,24 +624,6 @@ void setColor(float out[3], const QColor& color) {
     out[0] = static_cast<float>(color.redF());
     out[1] = static_cast<float>(color.greenF());
     out[2] = static_cast<float>(color.blueF());
-}
-
-/// The process umask, read without changing it (umask(2) can only be read by
-/// setting it, which would race with other threads creating files).
-mode_t currentUmask() {
-    QFile status(QStringLiteral("/proc/self/status"));
-    if (status.open(QIODevice::ReadOnly)) {
-        for (const QByteArray& line : status.readAll().split('\n')) {
-            if (line.startsWith("Umask:")) {
-                bool ok = false;
-                const uint mask = line.mid(6).trimmed().toUInt(&ok, 8);
-                if (ok) {
-                    return static_cast<mode_t>(mask);
-                }
-            }
-        }
-    }
-    return 022;
 }
 
 }  // namespace
@@ -1334,63 +1285,6 @@ void RenderWorker::signDocument(QString path, SignSpec spec) {
 }
 
 namespace {
-
-/// A new file beside `target`, for the worker to write into; commit() makes it
-/// the target, atomically and durably. Discarded unless committed.
-class Beside {
-public:
-    explicit Beside(const QString& target) : info_(target) {
-        temp_ = QFile::encodeName(info_.absolutePath() + QStringLiteral("/.") + info_.fileName() +
-                                  QStringLiteral(".leht-XXXXXX"));
-        fd_ = ::mkostemp(temp_.data(), O_CLOEXEC);
-        if (fd_ < 0) {
-            error_ = QString::fromUtf8(std::strerror(errno));
-        }
-    }
-    Beside(const Beside&) = delete;
-    Beside& operator=(const Beside&) = delete;
-    ~Beside() {
-        if (fd_ >= 0) {
-            ::close(fd_);
-            ::unlink(temp_.constData());
-        }
-    }
-
-    [[nodiscard]] int fd() const { return fd_; }
-    [[nodiscard]] const QString& error() const { return error_; }
-    [[nodiscard]] QString path() const { return info_.absoluteFilePath(); }
-
-    /// Returns empty on success, why not otherwise.
-    QString commit() {
-        struct stat st {};
-        const QByteArray target = QFile::encodeName(info_.absoluteFilePath());
-        const mode_t mode = ::stat(target.constData(), &st) == 0 ? (st.st_mode & 07777)
-                                                                 : (0666 & ~currentUmask());
-        if (::fchmod(fd_, mode) != 0 || ::fsync(fd_) != 0) {
-            return QString::fromUtf8(std::strerror(errno));
-        }
-        ::close(fd_);
-        fd_ = -1;
-        if (::rename(temp_.constData(), target.constData()) != 0) {
-            const int err = errno;
-            ::unlink(temp_.constData());
-            return QString::fromUtf8(std::strerror(err));
-        }
-        const int dir = ::open(QFile::encodeName(info_.absolutePath()).constData(),
-                               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (dir >= 0) {
-            (void)::fsync(dir);
-            ::close(dir);
-        }
-        return {};
-    }
-
-private:
-    QFileInfo info_;
-    QByteArray temp_;
-    int fd_ = -1;
-    QString error_;
-};
 
 QString hosts_of(const std::vector<leht::crypto::RevocationQuery>& queries) {
     QStringList hosts;

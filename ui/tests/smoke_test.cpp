@@ -12,6 +12,7 @@
 #include <QClipboard>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QPrinter>
 #include <QTemporaryDir>
 #include <QImage>
@@ -27,6 +28,8 @@
 #include <QThread>
 
 #include "page_dialogs.hpp"
+#include "file_tools.hpp"
+#include "file_tools_dialogs.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "leht/ocr/ocr.hpp"
 #endif
@@ -58,6 +61,7 @@
 #include <QDockWidget>
 #include <QPushButton>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QScrollBar>
 #include <QTreeWidget>
 #include "thumbnail_bar.hpp"
@@ -679,6 +683,196 @@ int main(int argc, char** argv) {
             std::printf("      open error: %s\n", e.what());
         }
     }
+
+    // --- File tools: Combine Files, Reduce File Size, Split Document -----------
+    //
+    // Each job runs in a sandboxed worker of its own. The window answers every
+    // prompt and result box through `answer`, as a user would.
+    {
+        QTemporaryDir tmp;
+        window.openPath(QString::fromStdString(doc));
+        pump(1500);
+
+        auto* combineAction = window.findChild<QAction*>(QStringLiteral("combineFiles"));
+        auto* reduceAction = window.findChild<QAction*>(QStringLiteral("reduceFileSize"));
+        auto* splitAction = window.findChild<QAction*>(QStringLiteral("splitDocument"));
+        check(combineAction != nullptr && reduceAction != nullptr && splitAction != nullptr,
+              "the Files menu offers Combine, Reduce and Split");
+        check(combineAction != nullptr && combineAction->isEnabled() &&
+                  reduceAction != nullptr && reduceAction->isEnabled() &&
+                  splitAction != nullptr && splitAction->isEnabled(),
+              "and all three are enabled with a document open");
+
+        FileTools* tools = window.fileTools();
+        QObject listener;  // the test's own connections end with this block
+        QStringList written;
+        QString failure;
+        int passwordAsks = 0;
+        bool done = false;
+        QObject::connect(tools, &FileTools::finished, &listener,
+                         [&](const QString&, const QStringList& files) {
+                             written = files;
+                             done = true;
+                         });
+        QObject::connect(tools, &FileTools::failed, &listener, [&](const QString& message) {
+            failure = message;
+            done = true;
+        });
+        QObject::connect(tools, &FileTools::passwordRequired, &listener,
+                         [&](bool) { ++passwordAsks; });
+        const auto waitDone = [&done] {
+            QElapsedTimer t;
+            t.start();
+            while (!done && t.elapsed() < 20000) {
+                pump(50);
+            }
+            pump(100);  // let the window's own handlers finish
+            const bool was = done;
+            done = false;
+            return was;
+        };
+
+        // Answers whatever the window asks: fills the tool dialogs in, gives
+        // the test document's password, and closes the result box.
+        QString reduceTo;
+        QString splitInto;
+        QTimer answer;
+        QObject::connect(&answer, &QTimer::timeout, [&] {
+            QWidget* modal = QApplication::activeModalWidget();
+            if (auto* reduce = qobject_cast<ReduceDialog*>(modal)) {
+                reduce->findChild<QLineEdit*>(QStringLiteral("reduceOutput"))->setText(reduceTo);
+                reduce->accept();
+            } else if (auto* split = qobject_cast<SplitDialog*>(modal)) {
+                split->findChild<QLineEdit*>(QStringLiteral("splitFolder"))->setText(splitInto);
+                for (QPushButton* b : split->findChildren<QPushButton*>()) {
+                    if (b->text() == QStringLiteral("Split")) {
+                        b->click();
+                    }
+                }
+            } else if (auto* ask = qobject_cast<QInputDialog*>(modal)) {
+                ask->setTextValue(QStringLiteral("s3cret"));
+                ask->accept();
+            } else if (auto* box = qobject_cast<QMessageBox*>(modal)) {
+                box->accept();
+            }
+        });
+        answer.start(50);
+
+        // Combine: a PDF and two images, in order.
+        const QString combined = tmp.filePath(QStringLiteral("combined.pdf"));
+        const QString corpusDir = QStringLiteral(LEHT_CORPUS_DIR);
+        QMetaObject::invokeMethod(
+            tools,
+            [tools, combined, corpusDir] {
+                tools->combine({corpusDir + QStringLiteral("/text_10p.pdf"),
+                                corpusDir + QStringLiteral("/scan.jpg"),
+                                corpusDir + QStringLiteral("/page.png")},
+                               combined, false);
+            },
+            Qt::QueuedConnection);
+        check(waitDone() && failure.isEmpty() && written == QStringList{combined},
+              "Combine Files writes one PDF");
+        try {
+            leht::Context ctx;
+            check(leht::Document::open(ctx, combined.toStdString()).page_count() == 12,
+                  "with the PDF's 10 pages and a page per image");
+        } catch (const leht::Error& e) {
+            check(false, e.what());
+        }
+
+        // A file that is neither: refused, and nothing is left behind.
+        const QString notDoc = tmp.filePath(QStringLiteral("notes.txt"));
+        {
+            QFile f(notDoc);
+            (void)f.open(QIODevice::WriteOnly);
+            f.write("not a document\n");
+        }
+        const QString refused = tmp.filePath(QStringLiteral("refused.pdf"));
+        failure.clear();
+        QMetaObject::invokeMethod(
+            tools, [tools, notDoc, refused] { tools->combine({notDoc}, refused, false); },
+            Qt::QueuedConnection);
+        check(waitDone() && failure.contains(QStringLiteral("notes.txt")) &&
+                  !QFile::exists(refused) && QDir(tmp.path()).entryList(QDir::Hidden | QDir::Files)
+                                                     .filter(QStringLiteral(".leht-"))
+                                                     .isEmpty(),
+              "a file that is not a PDF or image is refused, leaving nothing behind");
+
+        // The split dialog's arithmetic.
+        check(SplitDialog::chunks(10, 4) == QStringList({"1-4", "5-8", "9-10"}) &&
+                  SplitDialog::chunks(3, 1) == QStringList({"1", "2", "3"}),
+              "Split makes the right page groups");
+        check(QFileInfo(SplitDialog::numberedNames(tmp.path(), QStringLiteral("x"), 12).first())
+                      .fileName() == QStringLiteral("x-01.pdf"),
+              "and numbers the files so they sort");
+
+        // Split, through the window: every page to a file by default.
+        splitInto = tmp.filePath(QStringLiteral("parts"));
+        QDir().mkpath(splitInto);
+        failure.clear();
+        splitAction->trigger();
+        check(waitDone() && failure.isEmpty() && written.size() == 10,
+              "Split Document writes one file per page");
+        if (!written.isEmpty()) {
+            check(QFileInfo(written.first()).fileName() == QStringLiteral("text_10p-01.pdf"),
+                  "named after the document");
+            try {
+                leht::Context ctx;
+                check(leht::Document::open(ctx, written.last().toStdString()).page_count() == 1,
+                      "each holding its page");
+            } catch (const leht::Error& e) {
+                check(false, e.what());
+            }
+        }
+
+        // Reduce, through the window, on a document of scans.
+        const QString heavy = tmp.filePath(QStringLiteral("scans.pdf"));
+        {
+            leht::Context ctx;
+            const std::string scan = (corpusDir + QStringLiteral("/scan.jpg")).toStdString();
+            (void)leht::ops::merge(ctx, {scan, scan, scan}, heavy.toStdString());
+        }
+        window.openPath(heavy);
+        pump(1500);
+        reduceTo = tmp.filePath(QStringLiteral("scans-smaller.pdf"));
+        failure.clear();
+        reduceAction->trigger();
+        check(waitDone() && failure.isEmpty() && written == QStringList{reduceTo},
+              "Reduce File Size writes a copy");
+        check(QFile::exists(reduceTo) && QFileInfo(reduceTo).size() < QFileInfo(heavy).size(),
+              "and the copy is smaller than the original");
+
+        // A text-only file cannot get smaller at the lossless setting: nothing
+        // is written, and the user is told so.
+        const QString same = tmp.filePath(QStringLiteral("same.pdf"));
+        QMetaObject::invokeMethod(
+            tools, [tools, combined, same] { tools->compress(combined, {}, same, 0, 0, false); },
+            Qt::QueuedConnection);
+        (void)waitDone();
+        check(failure.isEmpty() && (written.isEmpty() ? !QFile::exists(same)
+                                                      : QFileInfo(same).size() <
+                                                            QFileInfo(combined).size()),
+              "Reduce never hands back a bigger file");
+
+        // An encrypted document: the window asks for its password, then the
+        // job runs again with it.
+        const QString lockedSrc = corpusDir + QStringLiteral("/locked.pdf");
+        if (QFile::exists(lockedSrc)) {
+            window.openPath(lockedSrc);
+            pump(1500);
+            splitInto = tmp.filePath(QStringLiteral("locked-parts"));
+            QDir().mkpath(splitInto);
+            passwordAsks = 0;
+            failure.clear();
+            splitAction->trigger();
+            check(waitDone() && failure.isEmpty() && passwordAsks == 1 && !written.isEmpty(),
+                  "splitting an encrypted document asks for its password once, then works");
+        } else {
+            std::printf("  skip  file tools on an encrypted document (no locked.pdf)\n");
+        }
+        answer.stop();
+    }
+
 
     // --- Moving, free text, watermark and crop options (M1) ------------------
     {

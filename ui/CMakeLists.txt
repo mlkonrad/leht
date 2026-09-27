@@ -5,12 +5,15 @@ qt_standard_project_setup()
 # The window, view and worker as a library, so both the viewer binary and the
 # headless smoke test link the exact same code.
 qt_add_library(leht_viewer_lib STATIC
+    src/file_tools.cpp
+    src/file_tools_dialogs.cpp
     src/main_window.cpp
     src/page_dialogs.cpp
     src/page_view.cpp
     src/render_worker.cpp
     src/sign_dialog.cpp
     src/thumbnail_bar.cpp
+    src/worker_files.cpp
 )
 target_include_directories(leht_viewer_lib PUBLIC src)
 # leht::warnings is deliberately not applied: Qt's moc output and headers do not

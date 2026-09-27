@@ -19,6 +19,9 @@ class RenderWorker;
 class QLabel;
 class QLineEdit;
 class QToolBar;
+class QToolButton;
+class QProgressDialog;
+class FileTools;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QSpinBox;
@@ -39,6 +42,7 @@ public:
     // and has no parent, so findChild cannot reach it.
     [[nodiscard]] PageView* view() const { return view_; }
     [[nodiscard]] RenderWorker* worker() const { return worker_; }
+    [[nodiscard]] FileTools* fileTools() const { return fileTools_; }
 
 private slots:
     void openDialog();
@@ -138,4 +142,19 @@ private:
     int signatureCount_ = 0;
     bool populatingFields_ = false;
     std::function<void()> afterSave_;  ///< what an unsaved-changes prompt was waiting for
+
+    // File tools: Combine Files, Reduce File Size, Split Document. Jobs run on
+    // their own thread, each in a worker of its own (see file_tools.hpp).
+    void buildFileTools();
+    /// Starts `job` on the file-tools thread with an empty password, showing
+    /// `title` in a progress dialog. If the file turns out to be encrypted,
+    /// asks for the password and runs `job` again with it.
+    void runFileTool(const QString& title, std::function<void(FileTools*, QString)> job);
+    void endFileTool();
+    QThread fileToolsThread_;
+    FileTools* fileTools_ = nullptr;
+    QToolButton* fileToolsButton_ = nullptr;
+    QProgressDialog* fileToolsProgress_ = nullptr;
+    QString fileToolTitle_;
+    std::function<void(FileTools*, QString)> fileToolJob_;
 };
