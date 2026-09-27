@@ -69,6 +69,16 @@ void decode_frame(const Frame& f) {
     case MsgType::PrepareDocTimestamp: (void)decode_as<PrepareDocTimestamp>(f); break;
     case MsgType::RevocationQueryList: (void)decode_as<RevocationQueryList>(f); break;
     case MsgType::ValidationDataAdded: (void)decode_as<ValidationDataAdded>(f); break;
+
+    case MsgType::Compress: (void)decode_as<Compress>(f); break;
+    case MsgType::ExtractPages: (void)decode_as<ExtractPages>(f); break;
+    case MsgType::MergeBegin: (void)decode_as<MergeBegin>(f); break;
+    case MsgType::MergeAdd: (void)decode_as<MergeAdd>(f); break;
+    case MsgType::MergeFinish: (void)decode_as<MergeFinish>(f); break;
+    case MsgType::Compressed: (void)decode_as<Compressed>(f); break;
+    case MsgType::PagesWritten: (void)decode_as<PagesWritten>(f); break;
+    case MsgType::MergeAdded: (void)decode_as<MergeAdded>(f); break;
+    case MsgType::Merged: (void)decode_as<Merged>(f); break;
     }
 }
 

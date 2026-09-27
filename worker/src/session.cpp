@@ -6,10 +6,13 @@
 #include "leht/edit.hpp"
 #include "leht/error.hpp"
 #include "leht/ops/annotate.hpp"
+#include "leht/ops/compress.hpp"
 #include "leht/ops/crop.hpp"
 #include "leht/ops/ocr_layer.hpp"
 #include "leht/crypto/crypto.hpp"
 #include "leht/ops/forms.hpp"
+#include "leht/ops/merge.hpp"
+#include "leht/ops/pages.hpp"
 #include "leht/ops/sign.hpp"
 #include "leht/ops/redact.hpp"
 #include "leht/ops/watermark.hpp"
@@ -187,6 +190,22 @@ void Session::dispatch(Frame& frame) {
             return;
         case MsgType::PrepareDocTimestamp:
             on_prepare_doc_timestamp(id, frame);
+            return;
+
+        case MsgType::Compress:
+            on_compress(id, frame);
+            return;
+        case MsgType::ExtractPages:
+            on_extract_pages(id, frame);
+            return;
+        case MsgType::MergeBegin:
+            on_merge_begin(id, decode_as<MergeBegin>(frame));
+            return;
+        case MsgType::MergeAdd:
+            on_merge_add(id, frame);
+            return;
+        case MsgType::MergeFinish:
+            on_merge_finish(id, frame);
             return;
         default:
             throw ProtocolError("not a request type");
@@ -722,6 +741,98 @@ void Session::on_list_fields(std::uint64_t id) {
         return;
     }
     channel_.send(id, FieldList{ops::list_fields(ctx_, *doc_)});
+}
+
+// --- file tools ----------------------------------------------------------------
+//
+// The viewer runs these in a worker of their own (see protocol.hpp), so the
+// document here is the file as it is on disk, not the one on screen.
+
+void Session::on_compress(std::uint64_t id, Frame& frame) {
+    const Compress m = decode_as<Compress>(frame);
+    if (!require_document(id)) {
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to Compress"});
+        return;
+    }
+    if (!doc_->is_pdf()) {
+        channel_.send(id, Failed{"only a PDF can be compressed"});
+        return;
+    }
+    ops::CompressOptions options;
+    options.preset = static_cast<ops::CompressPreset>(m.preset);
+    options.jpeg_quality = static_cast<int>(m.jpeg_quality);
+    options.max_image_edge = static_cast<int>(m.max_image_edge);
+    options.linearize = m.linearize;
+
+    // Compression rewrites the document in place, so whatever happens it no
+    // longer matches its file: close it, and nothing else is asked of it.
+    struct CloseAfter {
+        Session& s;
+        ~CloseAfter() { s.close_document(); }
+    } close_after{*this};
+    const ops::CompressResult r = ops::compress(ctx_, *doc_, frame.fd.get(), options);
+    channel_.send(id, Compressed{r.output_bytes, static_cast<std::uint32_t>(r.images_examined),
+                                 static_cast<std::uint32_t>(r.images_recompressed)});
+}
+
+void Session::on_extract_pages(std::uint64_t id, Frame& frame) {
+    const ExtractPages m = decode_as<ExtractPages>(frame);
+    if (!require_document(id)) {
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to ExtractPages"});
+        return;
+    }
+    if (!doc_->is_pdf()) {
+        channel_.send(id, Failed{"only a PDF can be split"});
+        return;
+    }
+    const ops::PagesResult r = ops::extract(ctx_, *doc_, frame.fd.get(), m.ranges);
+    channel_.send(id, PagesWritten{static_cast<std::uint32_t>(r.pages_written), r.output_bytes});
+}
+
+void Session::on_merge_begin(std::uint64_t id, const MergeBegin& m) {
+    merger_.reset();
+    ops::MergeOptions options;
+    options.linearize = m.linearize;
+    merger_ = std::make_unique<ops::Merger>(ctx_, options);
+    channel_.send(id, MergeAdded{0});
+}
+
+void Session::on_merge_add(std::uint64_t id, Frame& frame) {
+    const MergeAdd m = decode_as<MergeAdd>(frame);
+    if (!merger_) {
+        channel_.send(id, Failed{"no merge has been started"});
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to MergeAdd"});
+        return;
+    }
+    // add_fd takes the descriptor and closes it at once: a merge of many files
+    // must never hold more than one open, under the sandbox's RLIMIT_NOFILE.
+    const int pages = merger_->add_fd(frame.fd.release(), m.name.empty() ? "input" : m.name);
+    channel_.send(id, MergeAdded{static_cast<std::uint32_t>(pages)});
+}
+
+void Session::on_merge_finish(std::uint64_t id, Frame& frame) {
+    (void)decode_as<MergeFinish>(frame);
+    if (!merger_) {
+        channel_.send(id, Failed{"no merge has been started"});
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to MergeFinish"});
+        return;
+    }
+    const ops::MergeResult r = merger_->finish_fd(frame.fd.get());
+    merger_.reset();
+    channel_.send(id, Merged{static_cast<std::uint32_t>(r.inputs_merged),
+                             static_cast<std::uint32_t>(r.pages_written), r.output_bytes});
 }
 
 }  // namespace leht::worker

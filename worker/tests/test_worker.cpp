@@ -10,6 +10,8 @@
 #include "leht/ipc/process.hpp"
 #include "leht/ipc/protocol.hpp"
 #include "leht/ops/annotate.hpp"
+#include "leht/ops/compress.hpp"
+#include "leht/ops/merge.hpp"
 #include "leht/renderer.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "leht/ocr/ocr.hpp"
@@ -659,6 +661,141 @@ void moves_new_words_and_crop_boxes_replay() {
     CHECK(std::abs(ft.rect.x0 - 300) < 1 && std::abs(ft.rect.y1 - 140) < 1);
 }
 
+/// Creates `path` for the worker to write into, as the viewer does.
+int create_output(const std::string& path) {
+    const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    CHECK(fd >= 0);
+    return fd;
+}
+
+/// Sends `m` with the file at `path` attached, read-only, and returns the reply.
+template <typename Msg>
+Frame send_input(WorkerProcess& w, std::uint64_t id, const Msg& m, const std::string& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    CHECK(fd >= 0);
+    w.channel().send(id, m, fd);
+    ::close(fd);
+    return next(w);
+}
+
+/// Sends `m` with a fresh output file at `path` attached, and returns the reply.
+template <typename Msg>
+Frame send_output(WorkerProcess& w, std::uint64_t id, const Msg& m, const std::string& path) {
+    const int fd = create_output(path);
+    w.channel().send(id, m, fd);
+    ::close(fd);
+    return next(w);
+}
+
+std::string failure(const Frame& f) {
+    return f.type == MsgType::Failed ? decode_as<Failed>(f).message : std::string();
+}
+
+void merges_inside_the_sandbox() {
+    leht::test::TempPath out("worker_merge.pdf");
+    auto w = start();
+
+    w->channel().send(1, MergeBegin{false});
+    CHECK(decode_as<MergeAdded>(next(*w)).pages == 0);
+    CHECK(decode_as<MergeAdded>(send_input(*w, 2, MergeAdd{"text.pdf"}, corpus("text_10p.pdf")))
+              .pages == 10);
+    CHECK(decode_as<MergeAdded>(send_input(*w, 3, MergeAdd{"scan.jpg"}, corpus("scan.jpg")))
+              .pages == 1);
+    // More inputs than the sandbox lets the worker hold open at once: each
+    // descriptor must be closed as soon as its pages are in.
+    for (std::uint64_t id = 4; id < 24; ++id) {
+        CHECK(decode_as<MergeAdded>(send_input(*w, id, MergeAdd{"page.png"}, corpus("page.png")))
+                  .pages == 1);
+    }
+    // A refused input is an ordinary failure, and the merge carries on.
+    const Frame locked = send_input(*w, 30, MergeAdd{"locked.pdf"}, corpus("locked.pdf"));
+    CHECK(failure(locked).find("password") != std::string::npos);
+
+    const Merged m = decode_as<Merged>(send_output(*w, 31, MergeFinish{}, out.str()));
+    CHECK(m.inputs == 22 && m.pages == 31);
+    CHECK(m.bytes == std::filesystem::file_size(out.str()));
+    CHECK(leht::test::qpdf_check(out.str()));
+
+    leht::Context ctx;
+    CHECK(leht::Document::open(ctx, out.str()).page_count() == 31);
+
+    // The merge is over: another MergeAdd needs a MergeBegin first.
+    CHECK(!failure(send_input(*w, 32, MergeAdd{"page.png"}, corpus("page.png"))).empty());
+}
+
+void compresses_and_splits_inside_the_sandbox() {
+    leht::test::TempPath heavy("worker_heavy.pdf");
+    {
+        leht::Context ctx;
+        (void)leht::ops::merge(ctx, {corpus("scan.jpg"), corpus("scan.jpg"), corpus("scan.jpg")},
+                               heavy.str());
+    }
+
+    // Split: one ExtractPages per part, from one open document.
+    {
+        auto w = start();
+        (void)open_ok(*w, corpus("text_10p.pdf"));
+        leht::test::TempPath first("worker_part1.pdf");
+        leht::test::TempPath second("worker_part2.pdf");
+        const PagesWritten a = decode_as<PagesWritten>(
+            send_output(*w, 10, ExtractPages{"1-4"}, first.str()));
+        const PagesWritten b = decode_as<PagesWritten>(
+            send_output(*w, 11, ExtractPages{"5-10"}, second.str()));
+        CHECK(a.pages == 4 && b.pages == 6);
+        CHECK(a.bytes == std::filesystem::file_size(first.str()));
+        leht::Context ctx;
+        CHECK(leht::Document::open(ctx, second.str()).page_count() == 6);
+
+        leht::test::TempPath bad("worker_part_bad.pdf");
+        CHECK(!failure(send_output(*w, 12, ExtractPages{"11"}, bad.str())).empty());
+    }
+
+    // Compress: the same bytes as `leht compress`, and the document is spent.
+    {
+        auto w = start();
+        (void)open_ok(*w, heavy.str());
+        leht::test::TempPath out("worker_compressed.pdf");
+        Compress c;
+        c.preset = 3;  // screen
+        const Compressed r = decode_as<Compressed>(send_output(*w, 20, c, out.str()));
+        CHECK(r.images_recompressed > 0);
+        CHECK(r.bytes == std::filesystem::file_size(out.str()));
+        CHECK(r.bytes < std::filesystem::file_size(heavy.str()));
+
+        leht::test::TempPath by_path("worker_compressed_in_process.pdf");
+        leht::Context ctx;
+        leht::ops::CompressOptions options;
+        options.preset = leht::ops::CompressPreset::Screen;
+        (void)leht::ops::compress(ctx, heavy.str(), by_path.str(), options);
+        CHECK(std::filesystem::file_size(by_path.str()) == r.bytes);
+
+        leht::test::TempPath again("worker_compressed_again.pdf");
+        CHECK(failure(send_output(*w, 21, c, again.str())) == "no document is open");
+    }
+
+    // An encrypted document, unlocked: the smaller copy keeps its encryption
+    // and passwords, while a split-off part is a new, unencrypted document.
+    {
+        auto w = start();
+        CHECK(!decode_as<NeedsPassword>(open(*w, corpus("locked.pdf"))).retry);
+        w->channel().send(2, Authenticate{"s3cret"});
+        (void)decode_as<Opened>(next(*w));
+        (void)decode_as<Outline>(next(*w));
+        leht::test::TempPath part("worker_locked_part.pdf");
+        CHECK(decode_as<PagesWritten>(send_output(*w, 3, ExtractPages{"1"}, part.str())).pages ==
+              1);
+        leht::test::TempPath smaller("worker_locked_compressed.pdf");
+        Compress lossless;
+        lossless.preset = 0;
+        (void)decode_as<Compressed>(send_output(*w, 4, lossless, smaller.str()));
+
+        leht::Context ctx;
+        CHECK(!leht::Document::open(ctx, part.str()).needs_password());
+        leht::Document copy = leht::Document::open(ctx, smaller.str());
+        CHECK(copy.needs_password() && copy.authenticate("s3cret"));
+    }
+}
+
 void edits_on_a_non_pdf_fail_cleanly() {
     auto w = start();
     (void)open_ok(*w, corpus("page.png"));
@@ -1061,6 +1198,8 @@ int main() {
     RUN(replay_is_deterministic);
     RUN(moves_new_words_and_crop_boxes_replay);
     RUN(a_text_layer_replays_and_is_found);
+    RUN(merges_inside_the_sandbox);
+    RUN(compresses_and_splits_inside_the_sandbox);
 #ifdef LEHT_HAVE_OCR
     RUN(the_ocr_worker_reads_pixels_in_its_sandbox);
     RUN(the_ocr_worker_must_load_before_its_sandbox);

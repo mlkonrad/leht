@@ -194,7 +194,10 @@ CertRow get_cert(Reader& r) {
 bool takes_fd(MsgType type) noexcept {
     return type == MsgType::Open || type == MsgType::Save ||
            type == MsgType::PrepareSignature || type == MsgType::AddValidationData ||
-           type == MsgType::PrepareDocTimestamp;
+           type == MsgType::PrepareDocTimestamp ||
+
+           type == MsgType::Compress || type == MsgType::ExtractPages ||
+           type == MsgType::MergeAdd || type == MsgType::MergeFinish;
 }
 
 bool is_known(std::uint16_t type) noexcept {
@@ -216,6 +219,10 @@ bool is_known(std::uint16_t type) noexcept {
     case MsgType::PrepareDocTimestamp: case MsgType::RevocationQueryList:
     case MsgType::ValidationDataAdded:
     case MsgType::ListTextPages: case MsgType::TextPageList:
+
+    case MsgType::Compress: case MsgType::ExtractPages: case MsgType::MergeBegin:
+    case MsgType::MergeAdd: case MsgType::MergeFinish: case MsgType::Compressed:
+    case MsgType::PagesWritten: case MsgType::MergeAdded: case MsgType::Merged:
         return true;
     }
     return false;
@@ -695,6 +702,100 @@ Edited Edited::decode(Reader& r) {
 
 void Saved::encode(Writer& w) const { w.u64(bytes); }
 Saved Saved::decode(Reader& r) { return {r.u64()}; }
+
+// --- file tools ----------------------------------------------------------------
+
+void Compress::encode(Writer& w) const {
+    w.u8(preset);
+    w.u32(jpeg_quality);
+    w.u32(max_image_edge);
+    w.u8(linearize ? 1 : 0);
+}
+Compress Compress::decode(Reader& r) {
+    Compress m;
+    m.preset = r.u8();
+    m.jpeg_quality = r.u32();
+    m.max_image_edge = r.u32();
+    m.linearize = r.boolean();
+    if (m.preset > 3) {
+        throw ProtocolError("unknown compression preset");
+    }
+    if (m.jpeg_quality > 100) {
+        throw ProtocolError("JPEG quality out of range");
+    }
+    if (m.max_image_edge > 65536) {
+        throw ProtocolError("image edge out of range");
+    }
+    return m;
+}
+
+void ExtractPages::encode(Writer& w) const { w.str(ranges); }
+ExtractPages ExtractPages::decode(Reader& r) {
+    ExtractPages m;
+    m.ranges = r.str(std::size_t{64} << 10);
+    return m;
+}
+
+void MergeBegin::encode(Writer& w) const { w.u8(linearize ? 1 : 0); }
+MergeBegin MergeBegin::decode(Reader& r) {
+    MergeBegin m;
+    m.linearize = r.boolean();
+    return m;
+}
+
+void MergeAdd::encode(Writer& w) const { w.str(name); }
+MergeAdd MergeAdd::decode(Reader& r) {
+    MergeAdd m;
+    m.name = r.str(4096);
+    return m;
+}
+
+void Compressed::encode(Writer& w) const {
+    w.u64(bytes);
+    w.u32(images_examined);
+    w.u32(images_recompressed);
+}
+Compressed Compressed::decode(Reader& r) {
+    Compressed m;
+    m.bytes = r.u64();
+    m.images_examined = r.u32();
+    m.images_recompressed = r.u32();
+    if (m.images_recompressed > m.images_examined) {
+        throw ProtocolError("more images recompressed than examined");
+    }
+    return m;
+}
+
+void PagesWritten::encode(Writer& w) const {
+    w.u32(pages);
+    w.u64(bytes);
+}
+PagesWritten PagesWritten::decode(Reader& r) {
+    PagesWritten m;
+    m.pages = r.u32();
+    m.bytes = r.u64();
+    return m;
+}
+
+void MergeAdded::encode(Writer& w) const { w.u32(pages); }
+MergeAdded MergeAdded::decode(Reader& r) {
+    MergeAdded m;
+    m.pages = r.u32();
+    return m;
+}
+
+void Merged::encode(Writer& w) const {
+    w.u32(inputs);
+    w.u32(pages);
+    w.u64(bytes);
+}
+Merged Merged::decode(Reader& r) {
+    Merged m;
+    m.inputs = r.u32();
+    m.pages = r.u32();
+    m.bytes = r.u64();
+    return m;
+}
 
 void PrepareSignature::encode(Writer& w) const {
     const ops::SignatureRequest& q = request;

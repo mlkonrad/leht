@@ -32,7 +32,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 8;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation
+inline constexpr std::uint32_t kProtocolVersion = 9;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -65,6 +65,13 @@ enum class MsgType : std::uint16_t {
     AddValidationData = 19,    ///< carries the output file's fd via SCM_RIGHTS
     PrepareDocTimestamp = 20,  ///< carries the output file's fd via SCM_RIGHTS
 
+    // File tools (merge, compress, split): requests 21-29.
+    Compress = 21,     ///< carries the output file's fd via SCM_RIGHTS
+    ExtractPages = 22, ///< carries the output file's fd via SCM_RIGHTS
+    MergeBegin = 23,
+    MergeAdd = 24,     ///< carries an INPUT file's fd via SCM_RIGHTS
+    MergeFinish = 25,  ///< carries the output file's fd via SCM_RIGHTS
+
     // worker -> viewer
     HelloAck = 100,
     NeedsPassword = 101,
@@ -86,11 +93,18 @@ enum class MsgType : std::uint16_t {
     TextPageList = 117,
     RevocationQueryList = 118,
     ValidationDataAdded = 119,
+
+    // File tools: replies 120-129.
+    Compressed = 120,
+    PagesWritten = 121,
+    MergeAdded = 122,
+    Merged = 123,
 };
 
 /// Whether a frame of `type` may carry a file descriptor: only those that hand
-/// the worker a file to read (Open) or to write (Save, PrepareSignature,
-/// AddValidationData, PrepareDocTimestamp).
+/// the worker a file to read (Open, MergeAdd) or to write (Save,
+/// PrepareSignature, AddValidationData, PrepareDocTimestamp, Compress,
+/// ExtractPages, MergeFinish).
 [[nodiscard]] bool takes_fd(MsgType type) noexcept;
 
 /// True for every value in MsgType. Frames with any other type are rejected
@@ -433,6 +447,93 @@ struct Saved {
     std::uint64_t bytes = 0;
     void encode(Writer& w) const;
     static Saved decode(Reader& r);
+};
+
+// --- file tools: merge, compress, split ---------------------------------------
+//
+// These run in a worker of their own, never in the one showing the document:
+// compress rewrites its document in place, and a hostile input to a merge
+// should cost that job, not the open document. Compress and ExtractPages act
+// on the document that worker opened (Open, and Authenticate if need be), as
+// it is on disk; a merge needs no Open at all.
+
+/// Recompresses the open document into the attached fd (ops::compress).
+struct Compress {
+    static constexpr MsgType kType = MsgType::Compress;
+    std::uint8_t preset = 2;          ///< ops::CompressPreset: 0 lossless .. 3 screen
+    std::uint32_t jpeg_quality = 0;   ///< 0 = the preset's; else 1-100
+    std::uint32_t max_image_edge = 0; ///< 0 = the preset's; else pixels
+    bool linearize = false;
+    void encode(Writer& w) const;
+    static Compress decode(Reader& r);
+};
+
+/// Writes the pages `ranges` names (ops::parse_page_ranges syntax) of the open
+/// document into the attached fd. The viewer splits by sending one per part.
+struct ExtractPages {
+    static constexpr MsgType kType = MsgType::ExtractPages;
+    std::string ranges;
+    void encode(Writer& w) const;
+    static ExtractPages decode(Reader& r);
+};
+
+/// Starts a merge (ops::Merger), dropping any unfinished one. Answered with
+/// MergeAdded{0}.
+struct MergeBegin {
+    static constexpr MsgType kType = MsgType::MergeBegin;
+    bool linearize = false;
+    void encode(Writer& w) const;
+    static MergeBegin decode(Reader& r);
+};
+
+/// Appends the attached file, a PDF or an image, to the merge. `name` is for
+/// error messages only; the worker goes by the content.
+struct MergeAdd {
+    static constexpr MsgType kType = MsgType::MergeAdd;
+    std::string name;
+    void encode(Writer& w) const;
+    static MergeAdd decode(Reader& r);
+};
+
+/// Writes the merge into the attached fd and ends it.
+struct MergeFinish {
+    static constexpr MsgType kType = MsgType::MergeFinish;
+    void encode(Writer&) const {}
+    static MergeFinish decode(Reader&) { return {}; }
+};
+
+struct Compressed {
+    static constexpr MsgType kType = MsgType::Compressed;
+    std::uint64_t bytes = 0;
+    std::uint32_t images_examined = 0;
+    std::uint32_t images_recompressed = 0;
+    void encode(Writer& w) const;
+    static Compressed decode(Reader& r);
+};
+
+struct PagesWritten {
+    static constexpr MsgType kType = MsgType::PagesWritten;
+    std::uint32_t pages = 0;
+    std::uint64_t bytes = 0;
+    void encode(Writer& w) const;
+    static PagesWritten decode(Reader& r);
+};
+
+/// One MergeAdd succeeded, adding `pages`.
+struct MergeAdded {
+    static constexpr MsgType kType = MsgType::MergeAdded;
+    std::uint32_t pages = 0;
+    void encode(Writer& w) const;
+    static MergeAdded decode(Reader& r);
+};
+
+struct Merged {
+    static constexpr MsgType kType = MsgType::Merged;
+    std::uint32_t inputs = 0;
+    std::uint32_t pages = 0;
+    std::uint64_t bytes = 0;
+    void encode(Writer& w) const;
+    static Merged decode(Reader& r);
 };
 
 /// From the OCR worker: the words it read, in base coordinates.

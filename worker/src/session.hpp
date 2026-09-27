@@ -19,6 +19,9 @@ class Context;
 class Document;
 class Renderer;
 class TextPage;
+namespace ops {
+class Merger;
+}
 }  // namespace leht
 
 namespace leht::worker {
@@ -61,6 +64,13 @@ private:
     void on_add_validation_data(std::uint64_t id, ipc::Frame& frame);
     void on_prepare_doc_timestamp(std::uint64_t id, ipc::Frame& frame);
 
+    // File tools: merge, compress, split.
+    void on_compress(std::uint64_t id, ipc::Frame& frame);
+    void on_extract_pages(std::uint64_t id, ipc::Frame& frame);
+    void on_merge_begin(std::uint64_t id, const ipc::MergeBegin& m);
+    void on_merge_add(std::uint64_t id, ipc::Frame& frame);
+    void on_merge_finish(std::uint64_t id, ipc::Frame& frame);
+
     void finish_open(std::uint64_t id);
     void close_document() noexcept;
     /// Whether a document is open and unlocked; answers Failed if not.
@@ -74,6 +84,7 @@ private:
     std::unique_ptr<Document> doc_;
     std::unique_ptr<Renderer> renderer_;
     std::map<int, std::unique_ptr<TextPage>> text_pages_;
+    std::unique_ptr<ops::Merger> merger_;  ///< between MergeBegin and MergeFinish
 
     // Queue between the reader thread and run().
     std::mutex mutex_;

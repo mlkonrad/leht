@@ -787,6 +787,51 @@ void test_recv_timeout() {
     CHECK(timed_out);
 }
 
+void test_file_tools() {
+    Compress c;
+    c.preset = 3;
+    c.jpeg_quality = 55;
+    c.max_image_edge = 1200;
+    c.linearize = true;
+    const Compress c2 = round_trip(c);
+    CHECK(c2.preset == 3 && c2.jpeg_quality == 55 && c2.max_image_edge == 1200 &&
+          c2.linearize);
+    Compress bad = c;
+    bad.preset = 4;
+    CHECK(rejects<Compress>(make_frame(1, bad).payload));
+    bad = c;
+    bad.jpeg_quality = 101;
+    CHECK(rejects<Compress>(make_frame(1, bad).payload));
+    bad = c;
+    bad.max_image_edge = 70000;
+    CHECK(rejects<Compress>(make_frame(1, bad).payload));
+
+    CHECK(round_trip(ExtractPages{"1-5,9"}).ranges == "1-5,9");
+    CHECK(round_trip(MergeBegin{true}).linearize);
+    CHECK(round_trip(MergeAdd{"scan.jpg"}).name == "scan.jpg");
+    (void)round_trip(MergeFinish{});
+
+    const Compressed d = round_trip(Compressed{4096, 7, 5});
+    CHECK(d.bytes == 4096 && d.images_examined == 7 && d.images_recompressed == 5);
+    CHECK(rejects<Compressed>(make_frame(1, Compressed{1, 2, 3}).payload));
+    const PagesWritten p = round_trip(PagesWritten{3, 999});
+    CHECK(p.pages == 3 && p.bytes == 999);
+    CHECK(round_trip(MergeAdded{12}).pages == 12);
+    const Merged m = round_trip(Merged{3, 12, 1U << 20});
+    CHECK(m.inputs == 3 && m.pages == 12 && m.bytes == (1U << 20));
+
+    for (const MsgType t : {MsgType::Compress, MsgType::ExtractPages, MsgType::MergeBegin,
+                            MsgType::MergeAdd, MsgType::MergeFinish, MsgType::Compressed,
+                            MsgType::PagesWritten, MsgType::MergeAdded, MsgType::Merged}) {
+        CHECK(is_known(static_cast<std::uint16_t>(t)));
+    }
+    CHECK(!is_known(26) && !is_known(124));
+    // Outputs, and a merge's inputs, arrive as fds; nothing else here does.
+    CHECK(takes_fd(MsgType::Compress) && takes_fd(MsgType::ExtractPages) &&
+          takes_fd(MsgType::MergeAdd) && takes_fd(MsgType::MergeFinish));
+    CHECK(!takes_fd(MsgType::MergeBegin) && !takes_fd(MsgType::Merged));
+}
+
 }  // namespace
 
 int main() {
@@ -805,5 +850,6 @@ int main() {
     RUN(test_fd_passing);
     RUN(test_unwanted_fds_are_rejected);
     RUN(test_recv_timeout);
+    RUN(test_file_tools);
     return 0;
 }
