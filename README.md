@@ -59,11 +59,12 @@ leht annotate  FILE -o OUT.pdf [--highlight TEXT] [--note P:X,Y:TEXT] [--freetex
 leht form      FILE                               list form fields
 leht fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]
 leht sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto) [--box P:BOX] [--tsa URL]
-               [--certify no-changes|forms|comments]
+               [--certify no-changes|forms|comments] [--ltv | --lta]
+leht ltv       FILE -o OUT.pdf [--tsa URL]        embed validation data (B-LT, B-LTA)
 leht keys      [--pkcs11-module LIB]              signing keys on ID cards and tokens
 leht ocr       FILE -o OUT.pdf [-p RANGES] [--lang est+eng] [--dpi N] [--force]
                                                   make scanned pages searchable
-leht verify    FILE [--trust CA.pem]... [--json]  check every signature
+leht verify    FILE [--trust CA.pem]... [--online] [--json]  check every signature
 ```
 
 `-o` output · `-p` pages · `-z` zoom (1.0 = 72 DPI) · `-n` pages per file · `-d` degrees ·
@@ -138,6 +139,11 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   form filling, or comments; a form's field locks enacted; every later change judged
   against them (`verify` exits 7 on a forbidden one); encrypted PDFs signed as they are.
   See [docs/signing.md](docs/signing.md#certification-and-field-locks).
+- **Long-term validation:** PAdES B-LT and B-LTA — the certificates, OCSP responses and
+  CRLs a signature needs embedded in the document, and a document timestamp over them, so
+  it can be checked after its certificate expires; revocation checked against them, or
+  online on request. Only certificate identifiers ever go over the network. See
+  [docs/signing.md](docs/signing.md#long-term-validation).
 - **OCR:** scanned pages made searchable with an invisible text layer — Estonian and
   English by default — read by Tesseract in its own sandboxed worker. See
   [docs/ocr.md](docs/ocr.md).

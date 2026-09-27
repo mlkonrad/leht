@@ -9,8 +9,9 @@ The level is **PAdES baseline B-B**, and **B-T** when a timestamp authority is g
 CMS is CAdES-shaped: `/SubFilter /ETSI.CAdES.detached`, signed attributes carrying
 content-type, message-digest and ESS `signing-certificate-v2`, and **no CMS signing-time
 attribute** — PAdES takes the claimed time from the dictionary's `/M` and forbids a second,
-possibly disagreeing one. B-LT (embedded revocation data for long-term validation) is not
-in M5.
+possibly disagreeing one. **B-LT** and **B-LTA** — revocation data embedded for
+long-term validation, and document timestamps — came later; see
+[Long-term validation](#long-term-validation).
 
 ## The key never enters the sandbox
 
@@ -216,12 +217,16 @@ Four things are reported, and kept apart on purpose:
 | Are these the bytes that were signed? | The message digest over the `/ByteRange`, and the signature over the signed attributes |
 | Whose key was it? | The signer's certificate, with `signing-certificate-v2` checked so a substituted certificate with the same key does not pass |
 | Do we have any reason to believe that name? | A chain to the system CA bundle plus certificates you added — reported as trusted, not trusted, expired or not yet valid |
-| Is what I am looking at what was signed? | Whether the file grew after the signed revision, and whether a later signature covers those bytes too |
+| Is what I am looking at what was signed? | Whether the file grew after the signed revision, and whether a later signature covers those bytes too — validation data added afterwards does not count |
+| Was the certificate revoked? | OCSP responses and CRLs: the document's own `/DSS`, and with `--online` what the certificates' services say now — see [Long-term validation](#long-term-validation) |
 
 Exit codes say the same thing to scripts: **0** all valid and trusted, **4** something is
-broken, **5** intact but the signer is not trusted, **6** intact and trusted but the
-document was added to afterwards, **7** changed in a way a certification or a field lock
-forbids.
+broken, **5** intact but the signer is not trusted (a certificate revoked before the
+signing time included), **6** intact and trusted but the document was added to
+afterwards, **7** changed in a way a certification or a field lock forbids.
+
+An encrypted document is verified with its password: `--doc-password-fd N`, else it is
+asked for.
 
 **The byte range is checked before the cryptography.** A signature's `/ByteRange` must be
 two spans, start at 0, lie inside the file, and leave out exactly the gap its own
@@ -242,8 +247,98 @@ Certificate…*. The EU Trusted List, which is what makes eIDAS qualified signat
 verifiable as such, is **not** consulted: an Estonian ID-card signature will verify as
 intact and, unless you add the right roots yourself, as untrusted.
 
-**Revocation is not checked.** A certificate revoked after signing verifies here. That is
-PAdES B-LT territory.
+**Revocation is checked only against data Leht was given.** Without any — no `/DSS` in the
+file, no `--online` — `verify` says *revocation: not checked* and keeps its exit code: a
+missing answer is reported, not treated as a failure, or every B-B and B-T signature ever
+made would fail.
+
+## Long-term validation
+
+A signature has to stay checkable after its certificate expires and after its CA's
+revocation services have moved on. PAdES does that in two steps, and Leht makes both:
+
+- **B-LT** — the validation data goes into the document: every certificate in the chains,
+  and an OCSP response or CRL for each one, in the catalog's `/DSS` (Document Security
+  Store). Checked later, the document answers for itself, offline.
+- **B-LTA** — a **document timestamp** over all of it (`/Type /DocTimeStamp`,
+  `/SubFilter /ETSI.RFC3161`): an RFC 3161 token on the whole file, proving the data
+  existed at that time. It signs nobody's name.
+
+```
+leht sign FILE -o OUT.pdf --p12 ID.p12 --tsa URL --ltv    # B-T, then B-LT
+leht sign FILE -o OUT.pdf --p12 ID.p12 --tsa URL --lta    # ... then B-LTA
+leht ltv  FILE -o OUT.pdf [--tsa URL]                     # for signatures already there
+leht verify FILE [--online]
+```
+
+`--ltv` needs `--tsa`: validation data proves a certificate was good *at a time*, and only
+a timestamp makes that time more than the signer's say-so. `leht ltv` works on any signed
+document, other people's signatures included, and **renews**: run it again with `--tsa`
+before the last document timestamp's authority certificate expires, and the new timestamp
+covers the old one along with fresh data for it.
+
+In the viewer: *Add long-term validation data* in the Sign dialog (with a timestamp
+authority), *More → Add Long-Term Validation…* for a document already signed, and
+*Check Revocation Online* in the Signatures panel.
+
+### What goes over the network
+
+Only when asked: `--ltv`, `--lta`, `leht ltv`, `verify --online`, or the viewer's two
+actions. Each says which hosts it is about to contact. **What travels is an OCSP request —
+a hash of the issuer's name and key and the certificate's serial number — or a plain
+download of a CRL. Never the document.** The addresses come from the certificates
+themselves (their Authority Information Access and CRL Distribution Points); only
+`http://` and `https://` are followed, with no redirects, and replies are capped at 1 MB
+for OCSP and 16 MB for a CRL.
+
+In the viewer the split is the same as for signing: the worker, which parses the
+document, works out what to ask and parses every reply; the viewer only moves bytes, and a
+worker that asks it to fetch anything but an http(s) URL is not believed.
+
+### How revocation is judged
+
+The time that matters is the **trusted time**: the signature's timestamp when it has a
+valid one, else now. Each certificate in the chain — the trust anchor left out, since it
+is trusted by being in the store — is:
+
+- **revoked** when valid data says it was revoked *before* that time. The signature is
+  then reported as untrusted (exit 5), with the date.
+- **good** when valid data issued after that time says it was not revoked, or data whose
+  validity window (*thisUpdate* to *nextUpdate*) covers that time does. The second case
+  matters: many responders pre-compute their answers, so one fetched right after signing is
+  often a little older than the signature. A revocation *after* the trusted time is shown
+  — *good when signed, revoked later* — and does not undo the signature. That is what
+  long-term validation is for.
+- **unknown** otherwise: no data, data too old, or data that is not valid. An OCSP response
+  counts only if it is signed by the certificate's issuer, or by a responder the issuer
+  certified for exactly that (id-kp-OCSPSigning), valid when it answered. A CRL counts
+  only if the issuer signed it. The tests try each of those the other way round.
+
+A timestamp authority's own certificate is judged the same way, at its token's time. So
+the **newest** document timestamp usually reports its authority as *unknown*: its
+validation data was fetched before it existed, and can only go in under the next one.
+That is how B-LTA works, not a fault, and `verify` says so; the next `leht ltv --tsa`
+adds it.
+
+### What it does not do
+
+- The validation model is a chain checked at one trusted time, not the full ETSI EN 319
+  102-1 past-signature-validation algorithm with its per-certificate time sliding.
+- No `/VRI` entries are written. PAdES makes them optional; Leht reads them in other
+  tools' files.
+- No revocation data goes inside the CMS signature (Adobe's
+  `adbe-revocationInfoArchival`); it all goes in the `/DSS`, which is where PAdES puts it.
+
+### Certifications and later changes
+
+Validation data and document timestamps are the one thing a certification allows at
+**every** level, "no changes" included, and Leht's change checker says so. Nor do they
+make a signature *changed after signing*: `verify` reports *validation data was added
+afterwards; it changes nothing signed*, and exits 0. A real change after them is still a
+change.
+
+A document timestamp is listed with the signatures, as a document timestamp. Before M4,
+Leht took one for a CMS signature and reported it **broken**.
 
 ## The visible mark that is not a signature
 
@@ -294,15 +389,15 @@ back past a signature**, which is as it should be — undoing into a signed revi
 only invalidate it.
 
 The Signatures panel gives each signature one line — *Valid*, *Intact, signer not trusted*,
-*Intact, but the document was changed afterwards*, *Broken* — and the details under it:
-signer, issuer, trust, algorithm, claimed time, timestamp, reason, location and the
-certificate's SHA-256 fingerprint.
+*Intact, but the certificate was revoked*, *Intact, but the document was changed
+afterwards*, *Broken* — and the details under it: signer, issuer, trust, revocation,
+algorithm, claimed time, timestamp, reason, location and the certificate's SHA-256
+fingerprint. A document timestamp has its own line, with the time it proves and its
+authority.
 
 ## Not yet
 
 - **Smart-ID and Mobile-ID**, the Estonian signing apps. The `Identity` behind a card key
   is "a certificate plus something that signs a hash", which is what those services are
   too.
-- **B-LT / LTV**: a DSS dictionary with OCSP and CRL data, and document timestamps, so a
-  signature stays verifiable after its certificate expires or is revoked.
 - **The EU Trusted List**, which is what "qualified" means in practice.
