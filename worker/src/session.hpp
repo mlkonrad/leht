@@ -57,6 +57,9 @@ private:
     void on_list_text_pages(std::uint64_t id);
     void on_prepare_signature(std::uint64_t id, ipc::Frame& frame);
     void on_list_signatures(std::uint64_t id, const ipc::ListSignatures& msg);
+    void on_list_revocation_queries(std::uint64_t id, const ipc::ListRevocationQueries& msg);
+    void on_add_validation_data(std::uint64_t id, ipc::Frame& frame);
+    void on_prepare_doc_timestamp(std::uint64_t id, ipc::Frame& frame);
 
     void finish_open(std::uint64_t id);
     void close_document() noexcept;

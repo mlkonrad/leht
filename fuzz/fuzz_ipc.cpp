@@ -64,6 +64,11 @@ void decode_frame(const Frame& f) {
     case MsgType::Words: (void)decode_as<Words>(f); break;
     case MsgType::ListTextPages: (void)decode_as<ListTextPages>(f); break;
     case MsgType::TextPageList: (void)decode_as<TextPageList>(f); break;
+    case MsgType::ListRevocationQueries: (void)decode_as<ListRevocationQueries>(f); break;
+    case MsgType::AddValidationData: (void)decode_as<AddValidationData>(f); break;
+    case MsgType::PrepareDocTimestamp: (void)decode_as<PrepareDocTimestamp>(f); break;
+    case MsgType::RevocationQueryList: (void)decode_as<RevocationQueryList>(f); break;
+    case MsgType::ValidationDataAdded: (void)decode_as<ValidationDataAdded>(f); break;
     }
 }
 

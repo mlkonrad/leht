@@ -32,7 +32,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 7;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification
+inline constexpr std::uint32_t kProtocolVersion = 8;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -61,6 +61,9 @@ enum class MsgType : std::uint16_t {
     ListSignatures = 15,
     Recognize = 16,    ///< to the OCR worker: pixels to read
     ListTextPages = 17,
+    ListRevocationQueries = 18,
+    AddValidationData = 19,    ///< carries the output file's fd via SCM_RIGHTS
+    PrepareDocTimestamp = 20,  ///< carries the output file's fd via SCM_RIGHTS
 
     // worker -> viewer
     HelloAck = 100,
@@ -81,10 +84,13 @@ enum class MsgType : std::uint16_t {
     SignatureList = 115,
     Words = 116,       ///< from the OCR worker: what it read
     TextPageList = 117,
+    RevocationQueryList = 118,
+    ValidationDataAdded = 119,
 };
 
 /// Whether a frame of `type` may carry a file descriptor: only those that hand
-/// the worker a file to read (Open) or to write (Save, PrepareSignature).
+/// the worker a file to read (Open) or to write (Save, PrepareSignature,
+/// AddValidationData, PrepareDocTimestamp).
 [[nodiscard]] bool takes_fd(MsgType type) noexcept;
 
 /// True for every value in MsgType. Frames with any other type are rejected
@@ -257,9 +263,48 @@ struct PrepareSignature {
 ///
 /// `trust_pem` is the certificates to trust, as PEM: the viewer reads the
 /// system store (the worker cannot open files) and adds the user's own.
+/// A revocation response the viewer fetched, passed on unread: the worker
+/// parses it. `kind` is crypto::RevocationQuery::Kind's value.
+struct FetchedRow {
+    std::uint8_t kind = 0;
+    std::string url;
+    std::vector<std::uint8_t> body;  ///< empty when the fetch failed
+    std::string error;
+};
+
+/// Long-term validation, in three steps so that the worker parses and the
+/// viewer only moves bytes: ListRevocationQueries (what to fetch), the viewer
+/// fetches, AddValidationData (the worker picks what to keep and appends the
+/// /DSS revision). Then, optionally, PrepareDocTimestamp: a hole the viewer
+/// fills with a token from the TSA, as it fills a signature's.
+struct ListRevocationQueries {
+    static constexpr MsgType kType = MsgType::ListRevocationQueries;
+    std::string trust_pem;
+    void encode(Writer& w) const;
+    static ListRevocationQueries decode(Reader& r);
+};
+
+struct AddValidationData {
+    static constexpr MsgType kType = MsgType::AddValidationData;
+    std::string trust_pem;
+    std::vector<FetchedRow> fetched;
+    void encode(Writer& w) const;
+    static AddValidationData decode(Reader& r);
+};
+
+struct PrepareDocTimestamp {
+    static constexpr MsgType kType = MsgType::PrepareDocTimestamp;
+    std::uint32_t reserve = 16384;
+    void encode(Writer& w) const;
+    static PrepareDocTimestamp decode(Reader& r);
+};
+
 struct ListSignatures {
     static constexpr MsgType kType = MsgType::ListSignatures;
     std::string trust_pem;
+    /// Responses fetched just now (Check Revocation Online), to check against
+    /// along with the document's own; not embedded.
+    std::vector<FetchedRow> online{};
     void encode(Writer& w) const;
     static ListSignatures decode(Reader& r);
 };
@@ -435,6 +480,40 @@ struct CertRow {
     bool can_sign = true;
 };
 
+/// One certificate's revocation status (crypto::RevocationCheck).
+struct RevocationRow {
+    std::string subject;  ///< its common name, or the whole subject
+    std::uint8_t status = 2;  ///< crypto::RevocationStatus: 0 good, 1 revoked, 2 unknown
+    std::string source;
+    std::int64_t data_time = 0;
+    std::int64_t revoked_at = 0;
+    std::string problem;
+};
+
+/// What to fetch: crypto::RevocationQuery.
+struct QueryRow {
+    std::uint8_t kind = 0;  ///< 0 OCSP (POST `request`), 1 CRL (GET)
+    std::string url;
+    std::vector<std::uint8_t> request;
+    std::string subject;
+};
+
+struct RevocationQueryList {
+    static constexpr MsgType kType = MsgType::RevocationQueryList;
+    std::vector<QueryRow> queries;
+    void encode(Writer& w) const;
+    static RevocationQueryList decode(Reader& r);
+};
+
+/// How much a /DSS revision added; all zero when there was nothing new, and
+/// then nothing was written.
+struct ValidationDataAdded {
+    static constexpr MsgType kType = MsgType::ValidationDataAdded;
+    std::uint32_t certs = 0, ocsps = 0, crls = 0;
+    void encode(Writer& w) const;
+    static ValidationDataAdded decode(Reader& r);
+};
+
 /// One signature: what the document claims, and what verification made of it.
 ///
 /// The CMS blob itself stays in the worker. Nothing here is parsed further by
@@ -477,6 +556,14 @@ struct SignatureRow {
     CertRow authority;
     std::uint8_t timestamp_trust = 0;
     std::string timestamp_problem;
+
+    // Long-term validation. A document timestamp fills the timestamp fields
+    // and `intact`; it has no signer of its own.
+    bool document_timestamp = false;
+    bool only_validation_data_after = false;
+    /// Empty when no revocation data was there to check against.
+    std::vector<RevocationRow> revocation;
+    std::vector<RevocationRow> timestamp_revocation;
 };
 
 struct SignatureList {

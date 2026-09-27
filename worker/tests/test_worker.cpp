@@ -766,6 +766,110 @@ void signing_through_the_worker() {
     CHECK(bare.rows[0].trust == static_cast<std::uint8_t>(leht::crypto::Trust::Untrusted));
 }
 
+/// Long-term validation the way the viewer does it: the worker says what to
+/// fetch, this process fetches it (the viewer's part: bytes only), the worker
+/// picks what to keep and appends the /DSS, then leaves a hole for a document
+/// timestamp that this process fills. All of it inside the sandbox, which is
+/// the point: OCSP and CRL parsing must not need anything seccomp forbids.
+void long_term_validation_through_the_worker() {
+    leht::test::LtvPki k;
+    const std::string pem = k.ca.pem();
+    const leht::test::TempPath bt("worker_ltv_bt.pdf");
+    const leht::test::TempPath lt("worker_ltv_lt.pdf");
+    const leht::test::TempPath lta("worker_ltv_lta.pdf");
+    leht::crypto::SignOptions tsa;
+    tsa.tsa_url = k.tsa.url();
+    const auto fresh = [](const std::string& path) {
+        const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        CHECK(fd >= 0);
+        return fd;
+    };
+    {
+        auto w = start();
+        (void)open_ok(*w, corpus("text_10p.pdf"));
+        leht::ops::SignatureRequest request;
+        request.reserve = leht::crypto::estimate_signature_size(k.identity(), tsa);
+        const int fd = fresh(bt.str());
+        w->channel().send(2, PrepareSignature{request}, fd);
+        const auto prepared = decode_as<SignaturePrepared>(next(*w));
+        (void)leht::crypto::sign_prepared(fd, prepared.range, k.identity(), tsa);
+        ::close(fd);
+    }
+
+    std::vector<FetchedRow> fetched;
+    {
+        auto w = start();
+        (void)open_ok(*w, bt.str());
+        w->channel().send(2, ListRevocationQueries{pem});
+        const auto list = decode_as<RevocationQueryList>(next(*w));
+        CHECK(list.queries.size() == 3);  // OCSP for signer and TSA, one CRL
+        std::vector<leht::crypto::RevocationQuery> queries;
+        for (const QueryRow& q : list.queries) {
+            CHECK(q.url.rfind(k.revocation.base(), 0) == 0);
+            leht::crypto::RevocationQuery x;
+            x.kind = q.kind == 0 ? leht::crypto::RevocationQuery::Kind::Ocsp
+                                 : leht::crypto::RevocationQuery::Kind::Crl;
+            x.url = q.url;
+            x.request = q.request;
+            queries.push_back(std::move(x));
+        }
+        for (const auto& f : leht::crypto::fetch_revocation(queries, 5)) {
+            CHECK(!f.body.empty());
+            fetched.push_back(FetchedRow{
+                static_cast<std::uint8_t>(f.kind == leht::crypto::RevocationQuery::Kind::Ocsp ? 0 : 1),
+                f.url, f.body, f.error});
+        }
+        const int fd = fresh(lt.str());
+        w->channel().send(3, AddValidationData{pem, fetched}, fd);
+        const Frame reply = next(*w);
+        CHECK(reply.type == MsgType::ValidationDataAdded);
+        const auto added = decode_as<ValidationDataAdded>(reply);
+        CHECK(added.certs >= 2 && added.ocsps == 2 && added.crls == 1);
+        ::close(fd);
+    }
+    {
+        auto w = start();
+        (void)open_ok(*w, lt.str());
+        const int fd = fresh(lta.str());
+        w->channel().send(2, PrepareDocTimestamp{16384}, fd);
+        const Frame reply = next(*w);
+        CHECK(reply.type == MsgType::SignaturePrepared);
+        const auto prepared = decode_as<SignaturePrepared>(reply);
+        CHECK(prepared.field == "Timestamp1");
+        (void)leht::crypto::timestamp_prepared(fd, prepared.range, tsa);
+        ::close(fd);
+    }
+
+    k.revocation.hang_up();
+    {
+        auto w = start();
+        (void)open_ok(*w, lta.str());
+        w->channel().send(2, ListSignatures{pem, {}});
+        const auto list = decode_as<SignatureList>(next(*w));
+        CHECK(list.rows.size() == 2);
+        const SignatureRow& sig = list.rows[0];
+        CHECK(!sig.document_timestamp && sig.intact && sig.only_validation_data_after);
+        CHECK(sig.trust == static_cast<std::uint8_t>(leht::crypto::Trust::Trusted));
+        CHECK(sig.revocation.size() == 1 && sig.revocation[0].status == 0 &&
+              sig.revocation[0].source == "OCSP, embedded");
+        CHECK(sig.timestamp_revocation.size() == 1 && sig.timestamp_revocation[0].status == 0);
+        const SignatureRow& ts = list.rows[1];
+        CHECK(ts.document_timestamp && ts.intact && ts.timestamp_valid);
+        CHECK(ts.authority.common_name == "Leht LTV TSA");
+        CHECK(ts.trust == static_cast<std::uint8_t>(leht::crypto::Trust::Trusted));
+    }
+    {
+        // Check Revocation Online: the B-T file, with what was fetched.
+        auto w = start();
+        (void)open_ok(*w, bt.str());
+        w->channel().send(2, ListSignatures{pem, fetched});
+        const auto list = decode_as<SignatureList>(next(*w));
+        CHECK(list.rows.size() == 1 && list.rows[0].revocation.size() == 1);
+        CHECK(list.rows[0].revocation[0].status == 0 &&
+              list.rows[0].revocation[0].source == "OCSP, fetched now");
+    }
+}
+
 /// The preload in leht-worker's main() is load-bearing, not belt and braces:
 /// without it OpenSSL fetches an algorithm the first time it verifies, that
 /// fetch opens a file, and seccomp kills the process. Proving it here keeps
@@ -963,6 +1067,7 @@ int main() {
 #endif
     RUN(edits_on_a_non_pdf_fail_cleanly);
     RUN(signing_through_the_worker);
+    RUN(long_term_validation_through_the_worker);
     RUN(verification_needs_the_preload_inside_the_sandbox);
     RUN(a_broken_signature_is_reported_not_fatal);
     RUN(clean_shutdown);

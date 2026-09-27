@@ -213,6 +213,16 @@ if [[ ! -f certified.pdf && -x "$LEHT_BIN" ]] && command -v openssl >/dev/null 2
     rm -rf "$seed"
 fi
 
+# A signed document with long-term validation data and a document timestamp
+# (PAdES B-LTA): a seed that takes the fuzzers through /DSS, OCSP responses,
+# CRLs and RFC 3161 tokens. Made by the LTV test binary, which carries its own
+# TSA and OCSP/CRL servers on localhost; nothing here touches the network.
+LTV_TOOL="${LEHT_LTV_TOOL:-$(dirname "$LEHT_BIN")/../crypto/test_pdf_ltv}"
+if [[ ! -f ltv.pdf && -x "$LTV_TOOL" ]]; then
+    "$LTV_TOOL" --write-seed "$PWD/ltv.pdf" >/dev/null \
+        && echo "  made  ltv.pdf (signed, validation data, document timestamp)"
+fi
+
 # Encrypted fixture for the viewer's password-flow test. Built with the leht CLI
 # if one is present; the test skips when it is absent.
 LEHT_BIN="${LEHT_BIN:-$(command -v leht 2>/dev/null || echo ../../build/cli/leht)}"

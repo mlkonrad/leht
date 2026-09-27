@@ -153,6 +153,10 @@ constexpr std::size_t kMaxStrokePoints = 100000; ///< points across all of them
 constexpr std::size_t kMaxLines = 64;            ///< text lines in an appearance
 constexpr std::size_t kMaxCerts = 64;            ///< certificates in a chain
 constexpr std::size_t kMaxSignatures = 4096;
+constexpr std::size_t kMaxQueries = 256;          ///< revocation fetches per document
+constexpr std::size_t kMaxFetched = std::size_t{16} << 20;  ///< one fetched response (a CRL)
+constexpr std::size_t kMaxRevocationRows = 64;
+constexpr std::uint8_t kMaxTrust = 5;  ///< crypto::Trust::Revoked, the last value
 /// A signature hole: crypto::estimate_signature_size() asks for far less.
 constexpr std::size_t kMaxReserve = std::size_t{1} << 20;
 
@@ -189,7 +193,8 @@ CertRow get_cert(Reader& r) {
 
 bool takes_fd(MsgType type) noexcept {
     return type == MsgType::Open || type == MsgType::Save ||
-           type == MsgType::PrepareSignature;
+           type == MsgType::PrepareSignature || type == MsgType::AddValidationData ||
+           type == MsgType::PrepareDocTimestamp;
 }
 
 bool is_known(std::uint16_t type) noexcept {
@@ -207,6 +212,9 @@ bool is_known(std::uint16_t type) noexcept {
     case MsgType::PrepareSignature: case MsgType::ListSignatures:
     case MsgType::SignaturePrepared: case MsgType::SignatureList:
     case MsgType::Recognize: case MsgType::Words:
+    case MsgType::ListRevocationQueries: case MsgType::AddValidationData:
+    case MsgType::PrepareDocTimestamp: case MsgType::RevocationQueryList:
+    case MsgType::ValidationDataAdded:
     case MsgType::ListTextPages: case MsgType::TextPageList:
         return true;
     }
@@ -767,10 +775,152 @@ PrepareSignature PrepareSignature::decode(Reader& r) {
     return m;
 }
 
-void ListSignatures::encode(Writer& w) const { w.str(trust_pem); }
+namespace {
+
+void put_fetched(Writer& w, const std::vector<FetchedRow>& rows) {
+    w.u32(static_cast<std::uint32_t>(rows.size()));
+    for (const FetchedRow& f : rows) {
+        w.u8(f.kind);
+        w.str(f.url);
+        w.bytes(f.body);
+        w.str(f.error);
+    }
+}
+
+std::vector<FetchedRow> get_fetched(Reader& r) {
+    const std::size_t n = r.count(13);
+    if (n > kMaxQueries) {
+        throw ProtocolError("too many fetched revocation responses");
+    }
+    std::vector<FetchedRow> out(n);
+    for (FetchedRow& f : out) {
+        f.kind = r.u8();
+        if (f.kind > 1) {
+            throw ProtocolError("unknown revocation data kind");
+        }
+        f.url = r.str(kMaxName);
+        f.body = r.bytes(kMaxFetched);
+        f.error = r.str(kMaxName);
+    }
+    return out;
+}
+
+void put_revocation(Writer& w, const std::vector<RevocationRow>& rows) {
+    w.u32(static_cast<std::uint32_t>(rows.size()));
+    for (const RevocationRow& c : rows) {
+        w.str(c.subject);
+        w.u8(c.status);
+        w.str(c.source);
+        put_i64(w, c.data_time);
+        put_i64(w, c.revoked_at);
+        w.str(c.problem);
+    }
+}
+
+std::vector<RevocationRow> get_revocation(Reader& r) {
+    const std::size_t n = r.count(29);
+    if (n > kMaxRevocationRows) {
+        throw ProtocolError("too many revocation rows");
+    }
+    std::vector<RevocationRow> out(n);
+    for (RevocationRow& c : out) {
+        c.subject = r.str(kMaxString);
+        c.status = r.u8();
+        if (c.status > 2) {
+            throw ProtocolError("revocation status out of range");
+        }
+        c.source = r.str(kMaxName);
+        c.data_time = get_i64(r);
+        c.revoked_at = get_i64(r);
+        c.problem = r.str(kMaxString);
+    }
+    return out;
+}
+
+}  // namespace
+
+void ListSignatures::encode(Writer& w) const {
+    w.str(trust_pem);
+    put_fetched(w, online);
+}
 ListSignatures ListSignatures::decode(Reader& r) {
     ListSignatures m;
     m.trust_pem = r.str(kMaxString);
+    m.online = get_fetched(r);
+    return m;
+}
+
+void ListRevocationQueries::encode(Writer& w) const { w.str(trust_pem); }
+ListRevocationQueries ListRevocationQueries::decode(Reader& r) {
+    ListRevocationQueries m;
+    m.trust_pem = r.str(kMaxString);
+    return m;
+}
+
+void AddValidationData::encode(Writer& w) const {
+    w.str(trust_pem);
+    put_fetched(w, fetched);
+}
+AddValidationData AddValidationData::decode(Reader& r) {
+    AddValidationData m;
+    m.trust_pem = r.str(kMaxString);
+    m.fetched = get_fetched(r);
+    return m;
+}
+
+void PrepareDocTimestamp::encode(Writer& w) const { w.u32(reserve); }
+PrepareDocTimestamp PrepareDocTimestamp::decode(Reader& r) {
+    PrepareDocTimestamp m;
+    m.reserve = r.u32();
+    if (m.reserve < 1024 || m.reserve > (1U << 20)) {
+        throw ProtocolError("timestamp reserve out of range");
+    }
+    return m;
+}
+
+void RevocationQueryList::encode(Writer& w) const {
+    w.u32(static_cast<std::uint32_t>(queries.size()));
+    for (const QueryRow& q : queries) {
+        w.u8(q.kind);
+        w.str(q.url);
+        w.bytes(q.request);
+        w.str(q.subject);
+    }
+}
+RevocationQueryList RevocationQueryList::decode(Reader& r) {
+    const std::size_t n = r.count(13);
+    if (n > kMaxQueries) {
+        throw ProtocolError("too many revocation queries");
+    }
+    RevocationQueryList m;
+    m.queries.resize(n);
+    for (QueryRow& q : m.queries) {
+        q.kind = r.u8();
+        if (q.kind > 1) {
+            throw ProtocolError("unknown revocation query kind");
+        }
+        q.url = r.str(kMaxName);
+        // The viewer sends this to the network: only http(s), as the worker
+        // was told. A worker that says otherwise is not believed.
+        if (q.url.rfind("http://", 0) != 0 && q.url.rfind("https://", 0) != 0) {
+            throw ProtocolError("a revocation query that is not http(s)");
+        }
+        q.request = r.bytes(std::size_t{64} << 10);
+        q.subject = r.str(kMaxName);
+    }
+    return m;
+}
+
+void ValidationDataAdded::encode(Writer& w) const {
+    w.u32(certs);
+    w.u32(ocsps);
+    w.u32(crls);
+}
+ValidationDataAdded ValidationDataAdded::decode(Reader& r) {
+    ValidationDataAdded m;
+    m.certs = r.u32();
+    m.ocsps = r.u32();
+    m.crls = r.u32();
     return m;
 }
 
@@ -838,6 +988,10 @@ void SignatureList::encode(Writer& w) const {
         put_cert(w, s.authority);
         w.u8(s.timestamp_trust);
         w.str(s.timestamp_problem);
+        w.u8(s.document_timestamp ? 1 : 0);
+        w.u8(s.only_validation_data_after ? 1 : 0);
+        put_revocation(w, s.revocation);
+        put_revocation(w, s.timestamp_revocation);
     }
 }
 
@@ -894,6 +1048,9 @@ SignatureList SignatureList::decode(Reader& r) {
             s.chain.push_back(get_cert(r));
         }
         s.trust = r.u8();
+        if (s.trust > kMaxTrust) {
+            throw ProtocolError("trust value out of range");
+        }
         s.trust_detail = r.str(kMaxString);
         s.has_signing_certificate_v2 = r.boolean();
         s.has_signing_time_attribute = r.boolean();
@@ -902,7 +1059,14 @@ SignatureList SignatureList::decode(Reader& r) {
         s.timestamp_time = get_i64(r);
         s.authority = get_cert(r);
         s.timestamp_trust = r.u8();
+        if (s.timestamp_trust > kMaxTrust) {
+            throw ProtocolError("trust value out of range");
+        }
         s.timestamp_problem = r.str(kMaxString);
+        s.document_timestamp = r.boolean();
+        s.only_validation_data_after = r.boolean();
+        s.revocation = get_revocation(r);
+        s.timestamp_revocation = get_revocation(r);
         m.rows.push_back(std::move(s));
     }
     return m;

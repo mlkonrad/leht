@@ -179,6 +179,15 @@ void Session::dispatch(Frame& frame) {
         case MsgType::ListSignatures:
             on_list_signatures(id, decode_as<ListSignatures>(frame));
             return;
+        case MsgType::ListRevocationQueries:
+            on_list_revocation_queries(id, decode_as<ListRevocationQueries>(frame));
+            return;
+        case MsgType::AddValidationData:
+            on_add_validation_data(id, frame);
+            return;
+        case MsgType::PrepareDocTimestamp:
+            on_prepare_doc_timestamp(id, frame);
+            return;
         default:
             throw ProtocolError("not a request type");
         }
@@ -485,7 +494,116 @@ ipc::CertRow to_row(const crypto::CertInfo& c) {
     return row;
 }
 
+std::vector<ipc::RevocationRow> to_rows(const std::vector<crypto::RevocationCheck>& checks) {
+    std::vector<ipc::RevocationRow> out;
+    for (const crypto::RevocationCheck& c : checks) {
+        ipc::RevocationRow row;
+        row.subject = c.cert.common_name.empty() ? c.cert.subject : c.cert.common_name;
+        row.status = static_cast<std::uint8_t>(c.status);
+        row.source = c.source;
+        row.data_time = c.data_time;
+        row.revoked_at = c.revoked_at;
+        row.problem = c.problem;
+        out.push_back(std::move(row));
+    }
+    return out;
+}
+
+/// The viewer's trust store, as PEM. A damaged one is the viewer's problem,
+/// not this document's: carry on with what parsed.
+crypto::TrustStore trust_of(const std::string& pem) {
+    crypto::TrustStore trust;
+    if (!pem.empty()) {
+        try {
+            (void)trust.add_pem(pem);
+        } catch (const Error&) {
+        }
+    }
+    return trust;
+}
+
+std::vector<crypto::FetchedRevocation> from_rows(const std::vector<ipc::FetchedRow>& rows) {
+    std::vector<crypto::FetchedRevocation> out;
+    for (const ipc::FetchedRow& f : rows) {
+        crypto::FetchedRevocation x;
+        x.kind = f.kind == 0 ? crypto::RevocationQuery::Kind::Ocsp
+                             : crypto::RevocationQuery::Kind::Crl;
+        x.url = f.url;
+        x.body = f.body;
+        x.error = f.error;
+        out.push_back(std::move(x));
+    }
+    return out;
+}
+
+std::vector<crypto::Bytes> blobs_of(const std::vector<ops::SignatureInfo>& sigs) {
+    std::vector<crypto::Bytes> out;
+    for (const ops::SignatureInfo& s : sigs) {
+        if (s.range_ok) {
+            out.push_back(s.contents);
+        }
+    }
+    return out;
+}
+
 }  // namespace
+
+void Session::on_list_revocation_queries(std::uint64_t id,
+                                         const ipc::ListRevocationQueries& msg) {
+    if (!require_document(id)) {
+        return;
+    }
+    // The certificates come out of the document, so working out what to ask
+    // about them happens here; the viewer only sends the bytes.
+    const auto sigs = ops::list_signatures(ctx_, *doc_);
+    const auto queries = crypto::revocation_queries(blobs_of(sigs), trust_of(msg.trust_pem),
+                                                    ops::read_dss(ctx_, *doc_));
+    RevocationQueryList out;
+    for (const crypto::RevocationQuery& q : queries) {
+        out.queries.push_back(ipc::QueryRow{
+            static_cast<std::uint8_t>(q.kind == crypto::RevocationQuery::Kind::Ocsp ? 0 : 1),
+            q.url, q.request, q.subject});
+    }
+    channel_.send(id, out);
+}
+
+void Session::on_add_validation_data(std::uint64_t id, ipc::Frame& frame) {
+    const auto msg = decode_as<AddValidationData>(frame);
+    if (!require_document(id)) {
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to AddValidationData"});
+        return;
+    }
+    // What the viewer fetched is hostile until parsed, and it is parsed here.
+    const auto sigs = ops::list_signatures(ctx_, *doc_);
+    const crypto::RevocationData embedded = ops::read_dss(ctx_, *doc_);
+    const crypto::RevocationData data = crypto::validation_data(
+        blobs_of(sigs), trust_of(msg.trust_pem), from_rows(msg.fetched), embedded);
+    ValidationDataAdded out;
+    if (!data.empty()) {
+        ops::add_validation_data(ctx_, *doc_, data, frame.fd.get());
+        out.certs = static_cast<std::uint32_t>(data.certs.size());
+        out.ocsps = static_cast<std::uint32_t>(data.ocsps.size());
+        out.crls = static_cast<std::uint32_t>(data.crls.size());
+    }
+    channel_.send(id, out);
+}
+
+void Session::on_prepare_doc_timestamp(std::uint64_t id, ipc::Frame& frame) {
+    const auto msg = decode_as<PrepareDocTimestamp>(frame);
+    if (!require_document(id)) {
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to PrepareDocTimestamp"});
+        return;
+    }
+    const auto prepared =
+        ops::prepare_document_timestamp(ctx_, *doc_, msg.reserve, frame.fd.get());
+    channel_.send(id, SignaturePrepared{prepared.range, prepared.field});
+}
 
 void Session::on_prepare_signature(std::uint64_t id, ipc::Frame& frame) {
     const auto msg = decode_as<PrepareSignature>(frame);
@@ -507,17 +625,15 @@ void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& ms
     if (!require_document(id)) {
         return;
     }
-    crypto::TrustStore trust;
-    if (!msg.trust_pem.empty()) {
-        try {
-            (void)trust.add_pem(msg.trust_pem);
-        } catch (const Error&) {
-            // A damaged store is the viewer's problem, not this document's:
-            // carry on with what parsed, and report nothing as trusted.
-        }
+    const crypto::TrustStore trust = trust_of(msg.trust_pem);
+    const auto sigs = ops::list_signatures(ctx_, *doc_);
+    const crypto::RevocationData embedded = ops::read_dss(ctx_, *doc_);
+    crypto::RevocationData online;
+    if (!msg.online.empty()) {
+        online = crypto::validation_data(blobs_of(sigs), trust, from_rows(msg.online), {});
     }
     SignatureList out;
-    for (const ops::SignatureInfo& s : ops::list_signatures(ctx_, *doc_)) {
+    for (const ops::SignatureInfo& s : sigs) {
         ipc::SignatureRow row;
         row.field = s.field;
         row.page = s.page;
@@ -537,11 +653,29 @@ void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& ms
         row.changes_judged = s.changes_judged;
         row.changes_permitted = s.changes_permitted;
         row.change_problems = s.change_problems;
-        if (s.range_ok) {
+        row.document_timestamp = s.document_timestamp;
+        row.only_validation_data_after = s.only_validation_data_after;
+        if (s.range_ok && s.document_timestamp) {
+            // A document timestamp: a token, not a signature. It has an
+            // authority and a time, and no signer.
+            const crypto::TimestampReport t = crypto::verify_document_timestamp(
+                s.contents, ops::signed_bytes(ctx_, *doc_, s.range), trust, embedded, online);
+            row.checked = true;
+            row.intact = t.valid;
+            row.problem = t.problem;
+            row.trust = static_cast<std::uint8_t>(t.trust);
+            row.has_timestamp = true;
+            row.timestamp_valid = t.valid;
+            row.timestamp_time = t.time;
+            row.authority = to_row(t.authority);
+            row.timestamp_trust = static_cast<std::uint8_t>(t.trust);
+            row.timestamp_problem = t.problem;
+            row.revocation = to_rows(t.revocation);
+        } else if (s.range_ok) {
             // Hostile DER, parsed here rather than in the viewer. That is the
             // whole reason verification happens in the sandbox.
-            const crypto::CmsReport r =
-                crypto::verify_cms(s.contents, ops::signed_bytes(ctx_, *doc_, s.range), trust);
+            const crypto::CmsReport r = crypto::verify_cms(
+                s.contents, ops::signed_bytes(ctx_, *doc_, s.range), trust, 0, embedded, online);
             row.checked = true;
             row.intact = r.intact();
             row.problem = r.problem;
@@ -561,7 +695,9 @@ void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& ms
                 row.authority = to_row(r.timestamp->authority);
                 row.timestamp_trust = static_cast<std::uint8_t>(r.timestamp->trust);
                 row.timestamp_problem = r.timestamp->problem;
+                row.timestamp_revocation = to_rows(r.timestamp->revocation);
             }
+            row.revocation = to_rows(r.revocation);
         }
         out.rows.push_back(std::move(row));
     }

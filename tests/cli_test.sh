@@ -253,6 +253,18 @@ if command -v openssl >/dev/null 2>&1; then
     expect 0 "sign an encrypted document"    sign "$OUT/enc.pdf" -o "$OUT/encsig.pdf" --p12 "$OUT/id.p12" < "$OUT/pws"
     printf 'secret\nwrong\n' > "$OUT/pwsbad"
     expect 1 "with the wrong document password" sign "$OUT/enc.pdf" -o "$OUT/encbad.pdf" --p12 "$OUT/id.p12" < "$OUT/pwsbad"
+    printf 'docpw\n' > "$OUT/docpw"
+    expect 0 "verify an encrypted signed file" verify "$OUT/encsig.pdf" --trust "$OUT/ca.pem" --doc-password-fd 3 3<"$OUT/docpw"
+    expect 1 "verify it with the wrong password" verify "$OUT/encsig.pdf" --doc-password-fd 0 < "$OUT/badpw"
+
+    # Long-term validation (M4). The network half is tested against local
+    # servers in crypto/tests/test_pdf_ltv.cpp; here only what needs none.
+    expect 1 "sign --ltv without --tsa"      sign "$IN" -o "$OUT/ltv.pdf" --p12 "$OUT/id.p12" --ltv --password-fd 0 < "$OUT/pw"
+    grep -q "needs --tsa" "$OUT/stderr" || { echo "FAIL  sign --ltv did not say it needs --tsa"; failures=$((failures + 1)); }
+    expect 1 "ltv on an unsigned file"       ltv "$IN" -o "$OUT/ltv.pdf"
+    [[ -e "$OUT/ltv.pdf" ]] && { echo "FAIL  a refused ltv still wrote output"; failures=$((failures + 1)); }
+    expect 0 "verify says revocation was not checked" verify "$OUT/sig.pdf" --trust "$OUT/ca.pem"
+    grep -q "not checked: nothing embedded" "$OUT/stdout" || { echo "FAIL  verify did not say revocation was not checked"; failures=$((failures + 1)); }
 
     # Redacting a signed file warns that it breaks the signatures.
     expect 0 "redact a signed document"      redact "$OUT/sig.pdf" --rect "1:72,100,300,120" -o "$OUT/sigredact.pdf"

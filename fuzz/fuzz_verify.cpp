@@ -68,5 +68,34 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
         std::fprintf(stderr, "fuzz_verify: intact signature with no signer\n");
         std::abort();
     }
+
+    // Long-term validation: the same bytes as a document timestamp, as /DSS
+    // contents and as fetched OCSP and CRL replies -- each a parser reached
+    // with hostile input inside the worker.
+    leht::crypto::RevocationData dss;
+    dss.certs = {der};
+    dss.ocsps = {der};
+    dss.crls = {der};
+    pos = 0;
+    (void)leht::crypto::verify_document_timestamp(
+        der,
+        [&](std::uint8_t* buf, std::size_t want) {
+            return content_reader(data, size, buf, want, &pos);
+        },
+        trust, dss);
+    pos = 0;
+    (void)leht::crypto::verify_cms(
+        der,
+        [&](std::uint8_t* buf, std::size_t want) {
+            return content_reader(data, size, buf, want, &pos);
+        },
+        trust, 0, dss, dss);
+    (void)leht::crypto::revocation_queries({der}, trust, dss);
+    std::vector<leht::crypto::FetchedRevocation> fetched(2);
+    fetched[0].kind = leht::crypto::RevocationQuery::Kind::Ocsp;
+    fetched[0].body = der;
+    fetched[1].kind = leht::crypto::RevocationQuery::Kind::Crl;
+    fetched[1].body = der;
+    (void)leht::crypto::validation_data({der}, trust, fetched, {});
     return 0;
 }

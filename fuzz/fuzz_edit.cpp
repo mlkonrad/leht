@@ -156,6 +156,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     attempt(data, size, [&](leht::Document& doc) {
         (void)leht::ops::certification_level(ctx, doc);
         (void)leht::ops::list_signatures(ctx, doc);
+        (void)leht::ops::read_dss(ctx, doc);
     });
 
     // Forms: set every field to something plausible for its type, flatten.

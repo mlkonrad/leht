@@ -42,6 +42,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <string>
@@ -85,17 +86,22 @@ constexpr const char* kUsage =
     "            fill form fields; never runs the document's JavaScript\n"
     "  sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto)\n"
     "            [--field NAME | --box P:X0,Y0,X1,Y1] [--image IMG] [--name N]\n"
-    "            [--reason R] [--location L] [--tsa URL]\n"
+    "            [--reason R] [--location L] [--tsa URL [--ltv | --lta]]\n"
     "            sign with a key in a PKCS#12 file or on an ID card (PAdES); the\n"
     "            original bytes are kept and the signature appended, so earlier\n"
     "            signatures stay valid\n"
+    "  ltv       FILE -o OUT.pdf [--tsa URL] [--trust CA.pem]...\n"
+    "            long-term validation: embed the certificates, OCSP responses and\n"
+    "            CRLs every signature needs to be checked after its certificates\n"
+    "            expire (B-LT), fetched now over the network; with --tsa also a\n"
+    "            document timestamp over it all (B-LTA). Run again to renew\n"
     "  ocr       FILE -o OUT.pdf [-p RANGES] [--lang est+eng] [--dpi N] [--force]\n"
     "            make scanned pages searchable: an invisible text layer over the\n"
     "            picture, which is left as it was. Pages that already have text are\n"
     "            skipped unless --force. 'leht ocr --languages' lists what is installed\n"
     "  keys      [--pkcs11-module LIB]        list the signing keys on ID cards and\n"
     "            other PKCS#11 tokens, with the URI --pkcs11 takes\n"
-    "  verify    FILE [--trust CA.pem]... [--json]\n"
+    "  verify    FILE [--trust CA.pem]... [--online] [--json]\n"
     "            check every signature: exits 4 broken, 5 untrusted, 6 changed after\n"
     "            signing, 7 changed in a way a certification or field lock forbids\n"
     "\n"
@@ -154,6 +160,10 @@ constexpr const char* kUsage =
     "  --box P:BOX    place a new visible signature here; otherwise it is invisible\n"
     "  --image IMG    a picture for the signature to show (PNG or JPEG)\n"
     "  --tsa URL      timestamp the signature with this RFC 3161 authority (B-T)\n"
+    "  --ltv          sign: then embed validation data for it (B-LT); needs --tsa\n"
+    "  --lta          sign: that, and a document timestamp on top (B-LTA)\n"
+    "  --online       verify: also fetch current revocation data (OCSP, CRL) over\n"
+    "                 the network; only certificate hashes and serials are sent\n"
     "  --trust FILE   also trust the certificates in this PEM file, on top of the\n"
     "                 system's\n"
     "  --json         verify: machine-readable output\n"
@@ -894,6 +904,7 @@ std::string trust_word(leht::crypto::Trust t) {
         case leht::crypto::Trust::Expired:     return "certificate expired";
         case leht::crypto::Trust::NotYetValid: return "certificate not yet valid";
         case leht::crypto::Trust::Unknown:     return "not checked";
+        case leht::crypto::Trust::Revoked:     return "certificate revoked";
     }
     return "not checked";
 }
@@ -1043,6 +1054,235 @@ leht::crypto::Identity identity_from(const Args& args) {
         module);
 }
 
+/// Writes `output` the way every signing step does: into a new file beside
+/// it, filled by `fill`, flushed and then renamed over it, so the file never
+/// exists half-written -- a signature is filled in before anyone can see it.
+void write_beside(const std::string& output, const std::function<void(int fd)>& fill) {
+    const fs::path target{output};
+    const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path{"."};
+    std::string temp = (dir / ("." + target.filename().string() + ".leht-XXXXXX")).string();
+    const int fd = ::mkostemp(temp.data(), O_CLOEXEC);
+    if (fd < 0) {
+        throw leht::Error(0, "cannot create a file beside " + output + ": " +
+                                 std::strerror(errno));
+    }
+    try {
+        fill(fd);
+        // mkstemp creates 0600; give the file what a new file would get.
+        // umask(2) can only be read by setting it, which is safe here: the CLI
+        // is single-threaded and creates nothing else meanwhile.
+        const mode_t mask = ::umask(022);
+        (void)::umask(mask);
+        (void)::fchmod(fd, 0666 & ~mask);
+        if (::fsync(fd) != 0) {
+            throw leht::Error(0, std::string("cannot flush ") + output + ": " +
+                                     std::strerror(errno));
+        }
+    } catch (...) {
+        ::close(fd);
+        ::unlink(temp.c_str());
+        throw;
+    }
+    ::close(fd);
+    if (::rename(temp.c_str(), output.c_str()) != 0) {
+        const int err = errno;
+        ::unlink(temp.c_str());
+        throw leht::Error(0, "cannot write " + output + ": " + std::strerror(err));
+    }
+}
+
+/// The system's CA bundle plus every --trust file.
+leht::crypto::TrustStore trust_from(const Args& args) {
+    leht::crypto::TrustStore trust = leht::crypto::TrustStore::system();
+    for (const std::string& path : args.values("--trust")) {
+        const auto bytes = read_bytes(path, std::size_t{16} << 20);
+        trust.add_pem(std::string(bytes.begin(), bytes.end()));
+    }
+    return trust;
+}
+
+/// Opens `path`, asking for its password when it is encrypted
+/// (--doc-password-fd, else the terminal, else the next line of stdin).
+/// `password` gets it, for opening the file again later.
+leht::Document open_document(const leht::Context& ctx, const std::string& path,
+                             const Args& args, std::string* password = nullptr) {
+    leht::Document doc = leht::Document::open(ctx, path);
+    if (doc.needs_password()) {
+        const leht::crypto::Secret pw =
+            read_password(args, "Document password: ", "--doc-password-fd");
+        if (!doc.authenticate(pw.str())) {
+            throw leht::Error(0, "wrong password for the document");
+        }
+        if (password != nullptr) {
+            *password = pw.str();
+        }
+    }
+    return doc;
+}
+
+/// The host of an http(s) URL, for telling the user where the network goes.
+std::string host_of(const std::string& url) {
+    const std::size_t start = url.find("://");
+    if (start == std::string::npos) {
+        return url;
+    }
+    const std::size_t end = url.find_first_of(":/?", start + 3);
+    return url.substr(start + 3, end == std::string::npos ? std::string::npos : end - start - 3);
+}
+
+std::string join_hosts(const std::vector<leht::crypto::RevocationQuery>& queries) {
+    std::vector<std::string> hosts;
+    for (const auto& q : queries) {
+        const std::string h = host_of(q.url);
+        if (std::find(hosts.begin(), hosts.end(), h) == hosts.end()) {
+            hosts.push_back(h);
+        }
+    }
+    std::string out;
+    for (const std::string& h : hosts) {
+        out += (out.empty() ? "" : ", ") + h;
+    }
+    return out;
+}
+
+/// Every signature's and document timestamp's blob, for revocation_queries().
+std::vector<leht::crypto::Bytes> signature_blobs(const std::vector<leht::ops::SignatureInfo>& sigs) {
+    std::vector<leht::crypto::Bytes> out;
+    for (const auto& s : sigs) {
+        if (s.range_ok) {
+            out.push_back(s.contents);
+        }
+    }
+    return out;
+}
+
+/// Asks, fetches and keeps: the network half of long-term validation. The
+/// only step here that goes online, and it says where to.
+leht::crypto::RevocationData fetch_validation_data(
+    const std::vector<leht::crypto::Bytes>& blobs, const leht::crypto::TrustStore& trust,
+    const leht::crypto::RevocationData& embedded, const char* why) {
+    const auto queries = leht::crypto::revocation_queries(blobs, trust, embedded);
+    if (queries.empty()) {
+        std::fprintf(stderr, "leht: note: no certificate names an OCSP responder or a CRL; "
+                             "there is nothing to fetch\n");
+        return {};
+    }
+    std::fprintf(stderr, "leht: %s: contacting %s (certificate hashes and serials only)\n", why,
+                 join_hosts(queries).c_str());
+    const auto fetched = leht::crypto::fetch_revocation(queries);
+    for (const auto& f : fetched) {
+        if (f.body.empty()) {
+            std::fprintf(stderr, "leht: warning: %s\n", f.error.c_str());
+        }
+    }
+    return leht::crypto::validation_data(blobs, trust, fetched, embedded);
+}
+
+std::string count_of(std::size_t n, const char* one, const char* many) {
+    return std::to_string(n) + " " + (n == 1 ? one : many);
+}
+
+/// Adds validation data for every signature in `input`, written to
+/// `output` (which may be `input`). Returns what was added.
+leht::crypto::RevocationData add_validation(const leht::Context& ctx, const std::string& input,
+                                           const std::string& output,
+                                           const leht::crypto::TrustStore& trust,
+                                           const Args& args, std::string* password) {
+    leht::Document doc = leht::Document::open(ctx, input);
+    if (doc.needs_password()) {
+        if (password == nullptr || password->empty()) {
+            doc = open_document(ctx, input, args, password);
+        } else if (!doc.authenticate(*password)) {
+            throw leht::Error(0, "wrong password for the document");
+        }
+    }
+    const auto sigs = leht::ops::list_signatures(ctx, doc);
+    const auto blobs = signature_blobs(sigs);
+    if (blobs.empty()) {
+        throw leht::Error(0, input + " has no signatures to add validation data for");
+    }
+    const leht::crypto::RevocationData embedded = leht::ops::read_dss(ctx, doc);
+    const leht::crypto::RevocationData data =
+        fetch_validation_data(blobs, trust, embedded, "long-term validation");
+    if (data.empty()) {
+        if (!fs::exists(output) || !fs::equivalent(input, output)) {
+            fs::copy_file(input, output, fs::copy_options::overwrite_existing);
+        }
+        return data;
+    }
+    write_beside(output, [&](int fd) { leht::ops::add_validation_data(ctx, doc, data, fd); });
+    return data;
+}
+
+/// A document timestamp over all of `input`, written to `output`.
+leht::crypto::TimestampResult add_timestamp(const leht::Context& ctx, const std::string& input,
+                                            const std::string& output,
+                                            const leht::crypto::SignOptions& options,
+                                            const Args& args, std::string* password) {
+    leht::Document doc = leht::Document::open(ctx, input);
+    if (doc.needs_password()) {
+        if (password == nullptr || password->empty()) {
+            doc = open_document(ctx, input, args, password);
+        } else if (!doc.authenticate(*password)) {
+            throw leht::Error(0, "wrong password for the document");
+        }
+    }
+    leht::crypto::TimestampResult result;
+    write_beside(output, [&](int fd) {
+        const auto prepared = leht::ops::prepare_document_timestamp(
+            ctx, doc, leht::crypto::estimate_timestamp_size(), fd);
+        result = leht::crypto::timestamp_prepared(fd, prepared.range, options);
+    });
+    return result;
+}
+
+std::string revocation_words(const leht::crypto::RevocationCheck& c) {
+    using leht::crypto::RevocationStatus;
+    switch (c.status) {
+        case RevocationStatus::Good:
+            if (c.revoked_at != 0) {
+                return "good when signed; revoked later, on " + local_time(c.revoked_at) +
+                       " (" + c.source + ")";
+            }
+            return "good (" + c.source + ", issued " + local_time(c.data_time) + ")";
+        case RevocationStatus::Revoked:
+            return "REVOKED on " + local_time(c.revoked_at) + " (" + c.source + ")";
+        case RevocationStatus::Unknown:
+            return "unknown: " + c.problem;
+    }
+    return "unknown";
+}
+
+void print_revocation(const std::vector<leht::crypto::RevocationCheck>& checks,
+                      const char* label) {
+    if (checks.empty()) {
+        std::printf("  %-10s not checked: nothing embedded (leht ltv adds it; --online checks "
+                    "now)\n", label);
+        return;
+    }
+    for (const auto& c : checks) {
+        std::printf("  %-10s %s: %s\n", label,
+                    (c.cert.common_name.empty() ? c.cert.subject : c.cert.common_name).c_str(),
+                    revocation_words(c).c_str());
+    }
+}
+
+std::string revocation_json(const std::vector<leht::crypto::RevocationCheck>& checks) {
+    using leht::crypto::RevocationStatus;
+    std::string out;
+    for (const auto& c : checks) {
+        const char* status = c.status == RevocationStatus::Good      ? "good"
+                             : c.status == RevocationStatus::Revoked ? "revoked"
+                                                                     : "unknown";
+        out += std::string(out.empty() ? "" : ",") + "{\"subject\":" + json_string(c.cert.subject) +
+               ",\"status\":\"" + status + "\",\"source\":" + json_string(c.source) +
+               ",\"data_time\":" + std::to_string(c.data_time) +
+               ",\"revoked_at\":" + std::to_string(c.revoked_at) +
+               (c.problem.empty() ? "" : ",\"problem\":" + json_string(c.problem)) + "}";
+    }
+    return "[" + out + "]";
+}
+
 int cmd_sign(const leht::Context& ctx, const Args& args) {
     const std::string input = require_input(args);
     const std::string output = require_output(args);
@@ -1073,6 +1313,14 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
 
     leht::crypto::SignOptions options;
     options.tsa_url = args.flag("--tsa");
+    const bool lta = args.has_switch("--lta");
+    const bool ltv = lta || args.has_switch("--ltv");
+    if (ltv && options.tsa_url.empty()) {
+        // B-LT is defined on B-T: without a trusted time, revocation data
+        // proves only that the certificate is fine now.
+        throw leht::Error(0, std::string(lta ? "--lta" : "--ltv") +
+                                 " needs --tsa: long-term validation starts from a timestamp");
+    }
     if (const std::string c = args.flag("--certify"); !c.empty()) {
         if (c == "no-changes") {
             request.certify = 1;
@@ -1093,16 +1341,10 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
     }
     request.reserve = leht::crypto::estimate_signature_size(identity, options);
 
-    leht::Document doc = leht::Document::open(ctx, input);
-    if (doc.needs_password()) {
-        // Signed as it is, encrypted: the new revision is encrypted like the
-        // rest, except the signature itself, which must stay readable.
-        const leht::crypto::Secret pw =
-            read_password(args, "Document password: ", "--doc-password-fd");
-        if (!doc.authenticate(pw.str())) {
-            throw leht::Error(0, "wrong password for the document");
-        }
-    }
+    // Signed as it is when encrypted: the new revision is encrypted like the
+    // rest, except the signature itself, which must stay readable.
+    std::string doc_password;
+    leht::Document doc = open_document(ctx, input, args, &doc_password);
     if (!doc.can_save_incrementally()) {
         // A repaired file has no revision to append to, so there is nothing a
         // signature could keep intact. Rewrite it once, then sign that.
@@ -1112,43 +1354,15 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
         doc = leht::Document::open(ctx, output);
     }
 
-    // Write beside the target, then rename: the same atomic save the rest of
-    // leht does, with the signature filled in before the file appears.
-    const fs::path target{output};
-    const fs::path dir = target.has_parent_path() ? target.parent_path() : fs::path{"."};
-    std::string temp = (dir / ("." + target.filename().string() + ".leht-XXXXXX")).string();
-    const int fd = ::mkostemp(temp.data(), O_CLOEXEC);
-    if (fd < 0) {
-        throw leht::Error(0, "cannot create a file beside " + output + ": " +
-                                 std::strerror(errno));
-    }
+    // Written beside the target, then renamed: the signature is filled in
+    // before the file appears.
     leht::crypto::SignResult result;
     std::string field;
-    try {
+    write_beside(output, [&](int fd) {
         const auto prepared = leht::ops::prepare_signature(ctx, doc, request, fd);
         field = prepared.field;
         result = leht::crypto::sign_prepared(fd, prepared.range, identity, options);
-        // mkstemp creates 0600; give the signed file what a new file would get.
-        // umask(2) can only be read by setting it, which is safe here: the CLI
-        // is single-threaded and creates nothing else meanwhile.
-        const mode_t mask = ::umask(022);
-        (void)::umask(mask);
-        (void)::fchmod(fd, 0666 & ~mask);
-        if (::fsync(fd) != 0) {
-            throw leht::Error(0, std::string("cannot flush the signed file: ") +
-                                     std::strerror(errno));
-        }
-    } catch (...) {
-        ::close(fd);
-        ::unlink(temp.c_str());
-        throw;
-    }
-    ::close(fd);
-    if (::rename(temp.c_str(), output.c_str()) != 0) {
-        const int err = errno;
-        ::unlink(temp.c_str());
-        throw leht::Error(0, "cannot write " + output + ": " + std::strerror(err));
-    }
+    });
 
     std::printf("signed %s -> %s\n", input.c_str(), output.c_str());
     std::printf("  signer:    %s\n", cert.subject.c_str());
@@ -1171,7 +1385,75 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
         std::fprintf(stderr, "leht: warning: the signing certificate expired on %s\n",
                      local_time(cert.not_after).c_str());
     }
+    if (ltv) {
+        const leht::crypto::TrustStore trust = trust_from(args);
+        const auto added = add_validation(ctx, output, output, trust, args, &doc_password);
+        std::printf("  ltv:       %s, %s, %s embedded (PAdES B-LT)\n",
+                    count_of(added.certs.size(), "certificate", "certificates").c_str(),
+                    count_of(added.ocsps.size(), "OCSP response", "OCSP responses").c_str(),
+                    count_of(added.crls.size(), "CRL", "CRLs").c_str());
+        if (added.ocsps.empty() && added.crls.empty()) {
+            std::fprintf(stderr, "leht: warning: no revocation data could be fetched; the "
+                                 "signature is B-T, not B-LT\n");
+        }
+    }
+    if (lta) {
+        const auto stamped = add_timestamp(ctx, output, output, options, args, &doc_password);
+        std::printf("  archive:   document timestamp %s (PAdES B-LTA)\n",
+                    local_time(stamped.time).c_str());
+    }
     return 0;
+}
+
+int cmd_ltv(const leht::Context& ctx, const Args& args) {
+    const std::string input = require_input(args);
+    const std::string output = require_output(args);
+    std::error_code ec;
+    if (fs::exists(output, ec) && fs::equivalent(input, output, ec)) {
+        throw leht::Error(0, "ltv will not write over its input; give -o another path");
+    }
+    const leht::crypto::TrustStore trust = trust_from(args);
+    leht::crypto::SignOptions options;
+    options.tsa_url = args.flag("--tsa");
+    std::string password;
+    const auto added = add_validation(ctx, input, output, trust, args, &password);
+    std::printf("validation data %s -> %s\n", input.c_str(), output.c_str());
+    std::printf("  added:     %s, %s, %s\n",
+                count_of(added.certs.size(), "certificate", "certificates").c_str(),
+                count_of(added.ocsps.size(), "OCSP response", "OCSP responses").c_str(),
+                count_of(added.crls.size(), "CRL", "CRLs").c_str());
+    if (!options.tsa_url.empty()) {
+        const auto stamped = add_timestamp(ctx, output, output, options, args, &password);
+        std::printf("  archive:   document timestamp %s (%s)\n",
+                    local_time(stamped.time).c_str(), options.tsa_url.c_str());
+    } else {
+        std::printf("  archive:   no document timestamp; --tsa URL adds one (B-LTA), which\n"
+                    "             keeps it all checkable after the timestamp authority's\n"
+                    "             certificate expires\n");
+    }
+
+    // What the file now says, offline: the same check `leht verify` makes.
+    leht::Document doc = leht::Document::open(ctx, output);
+    if (doc.needs_password() && !doc.authenticate(password)) {
+        throw leht::Error(0, "cannot reopen " + output);
+    }
+    const leht::crypto::RevocationData dss = leht::ops::read_dss(ctx, doc);
+    int worst = 0;
+    for (const auto& s : leht::ops::list_signatures(ctx, doc)) {
+        if (!s.range_ok || s.document_timestamp) {
+            continue;
+        }
+        const auto r = leht::crypto::verify_cms(
+            s.contents, leht::ops::signed_bytes(ctx, doc, s.range), trust, 0, dss);
+        std::printf("  %s (%s):\n", s.field.c_str(),
+                    r.signer.common_name.empty() ? r.signer.subject.c_str()
+                                                 : r.signer.common_name.c_str());
+        print_revocation(r.revocation, "  status");
+        if (r.trust == leht::crypto::Trust::Revoked) {
+            worst = std::max(worst, kExitUntrusted);
+        }
+    }
+    return worst;
 }
 
 int cmd_ocr(const leht::Context& ctx, const Args& args) {
@@ -1244,21 +1526,96 @@ int cmd_ocr(const leht::Context& ctx, const Args& args) {
 #endif
 }
 
+void print_changes(const leht::ops::SignatureInfo& s) {
+    if (!s.changed_after_signing) {
+        return;
+    }
+    if (s.only_validation_data_after) {
+        std::printf("  %-10s validation data was added afterwards; it changes nothing signed\n",
+                    "ltv");
+        return;
+    }
+    std::printf("  %-10s the document was added to after this was signed%s\n", "CHANGED",
+                s.later_signature_covers_changes ? "; a later signature covers those bytes too"
+                                                 : "");
+}
+
+/// One document timestamp, for verify: printed or added to `rows`. Returns
+/// its exit code.
+int verify_timestamp_row(const leht::Context& ctx, leht::Document& doc,
+                         const leht::ops::SignatureInfo& s, std::size_t i, std::size_t count,
+                         const std::string& input, const leht::crypto::TrustStore& trust,
+                         const leht::crypto::RevocationData& embedded,
+                         const leht::crypto::RevocationData& online, bool changed, bool json,
+                         std::string& rows) {
+    leht::crypto::TimestampReport t;
+    if (s.range_ok) {
+        t = leht::crypto::verify_document_timestamp(
+            s.contents, leht::ops::signed_bytes(ctx, doc, s.range), trust, embedded, online);
+    } else {
+        t.problem = s.range_problem;
+    }
+    const int code = !t.valid                               ? kExitBroken
+                     : t.trust != leht::crypto::Trust::Trusted ? kExitUntrusted
+                     : changed                               ? kExitChanged
+                                                             : 0;
+    if (json) {
+        rows += std::string(rows.empty() ? "" : ",") + "{\"field\":" + json_string(s.field) +
+                ",\"document_timestamp\":true,\"intact\":" + (t.valid ? "true" : "false") +
+                ",\"time\":" + std::to_string(t.time) +
+                ",\"authority\":" + json_string(t.authority.subject) +
+                ",\"trust\":" + json_string(t.valid ? trust_word(t.trust) : "not checked") +
+                ",\"changed_after_signing\":" + (s.changed_after_signing ? "true" : "false") +
+                ",\"only_validation_data_after\":" +
+                (s.only_validation_data_after ? "true" : "false") +
+                ",\"revocation\":" + revocation_json(t.revocation) +
+                (t.problem.empty() ? "" : ",\"problem\":" + json_string(t.problem)) + "}";
+        return code;
+    }
+    std::printf("%s: document timestamp, %zu of %zu (field %s)\n", input.c_str(), i + 1, count,
+                s.field.c_str());
+    if (!t.valid) {
+        std::printf("  %-10s %s\n", "BROKEN", t.problem.c_str());
+        return code;
+    }
+    std::printf("  %-10s the file up to here existed at %s\n", "intact",
+                local_time(t.time).c_str());
+    // The report's problem names the authority already; the label says it here.
+    std::string why = t.problem;
+    if (const std::string prefix = "timestamp authority: "; why.rfind(prefix, 0) == 0) {
+        why.erase(0, prefix.size());
+    }
+    std::printf("  %-10s %s (%s)%s%s\n", "authority", t.authority.subject.c_str(),
+                trust_word(t.trust).c_str(), why.empty() ? "" : ": ", why.c_str());
+    print_revocation(t.revocation, "revocation");
+    const bool unknown = std::any_of(t.revocation.begin(), t.revocation.end(), [](const auto& c) {
+        return c.status == leht::crypto::RevocationStatus::Unknown;
+    });
+    if (unknown && !s.changed_after_signing) {
+        // Inherent in B-LTA, not a fault: data fetched now can only be
+        // embedded under the NEXT timestamp.
+        std::printf("  %-10s the newest document timestamp's own validation data comes with the\n"
+                    "             next renewal (leht ltv --tsa URL)\n", "note");
+    }
+    print_changes(s);
+    return code;
+}
+
 int cmd_verify(const leht::Context& ctx, const Args& args) {
     const std::string input = require_input(args);
     const bool json = args.has_switch("--json");
 
-    leht::crypto::TrustStore trust = leht::crypto::TrustStore::system();
-    for (const std::string& path : args.values("--trust")) {
-        const auto bytes = read_bytes(path, std::size_t{16} << 20);
-        trust.add_pem(std::string(bytes.begin(), bytes.end()));
-    }
-
-    leht::Document doc = leht::Document::open(ctx, input);
-    if (doc.needs_password()) {
-        throw leht::Error(0, "document is encrypted; decrypt it first");
-    }
+    const leht::crypto::TrustStore trust = trust_from(args);
+    leht::Document doc = open_document(ctx, input, args);
     const auto signatures = leht::ops::list_signatures(ctx, doc);
+    // Revocation: what the file carries (its /DSS), and with --online what
+    // the certificates' OCSP responders and CRLs say now.
+    const leht::crypto::RevocationData embedded = leht::ops::read_dss(ctx, doc);
+    leht::crypto::RevocationData online;
+    if (args.has_switch("--online") && !signatures.empty()) {
+        online = fetch_validation_data(signature_blobs(signatures), trust, {},
+                                       "checking revocation online");
+    }
     if (signatures.empty()) {
         if (json) {
             std::printf("{\"file\":%s,\"signatures\":[]}\n", json_string(input).c_str());
@@ -1272,14 +1629,21 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
     std::string rows;
     for (std::size_t i = 0; i < signatures.size(); ++i) {
         const leht::ops::SignatureInfo& s = signatures[i];
+        const bool changed = s.changed_after_signing && !s.later_signature_covers_changes &&
+                             !s.only_validation_data_after;
+        if (s.document_timestamp) {
+            worst = std::max(worst, verify_timestamp_row(ctx, doc, s, i, signatures.size(), input,
+                                                         trust, embedded, online, changed, json,
+                                                         rows));
+            continue;
+        }
         leht::crypto::CmsReport r;
         if (s.range_ok) {
             r = leht::crypto::verify_cms(s.contents, leht::ops::signed_bytes(ctx, doc, s.range),
-                                         trust);
+                                         trust, 0, embedded, online);
         }
         const bool intact = s.range_ok && r.intact();
         const bool trusted = intact && r.trust == leht::crypto::Trust::Trusted;
-        const bool changed = s.changed_after_signing && !s.later_signature_covers_changes;
         const bool forbidden = s.changes_judged && !s.changes_permitted;
         if (!intact) {
             worst = std::max(worst, kExitBroken);
@@ -1302,6 +1666,9 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                               ",\"changed_after_signing\":" + (s.changed_after_signing ? "true" : "false") +
                               ",\"later_signature_covers_changes\":" +
                               (s.later_signature_covers_changes ? "true" : "false") +
+                              ",\"only_validation_data_after\":" +
+                              (s.only_validation_data_after ? "true" : "false") +
+                              ",\"revocation\":" + revocation_json(r.revocation) +
                               ",\"certification\":" + std::to_string(s.certification) +
                               ",\"locks\":" + json_string(s.locks) +
                               ",\"page\":" + std::to_string(s.page + 1);
@@ -1317,7 +1684,8 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                 row += ",\"timestamp\":{\"valid\":" + std::string(r.timestamp->valid ? "true" : "false") +
                        ",\"time\":" + std::to_string(r.timestamp->time) +
                        ",\"authority\":" + json_string(r.timestamp->authority.subject) +
-                       ",\"trust\":" + json_string(trust_word(r.timestamp->trust)) + "}";
+                       ",\"trust\":" + json_string(trust_word(r.timestamp->trust)) +
+                       ",\"revocation\":" + revocation_json(r.timestamp->revocation) + "}";
             }
             const std::string problem = !s.range_ok ? s.range_problem : r.problem;
             if (!problem.empty()) {
@@ -1340,6 +1708,9 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
         std::printf("  %-10s %s\n", "signer", r.signer.subject.c_str());
         std::printf("  %-10s %s%s%s\n", "trust", trust_word(r.trust).c_str(),
                     r.trust_detail.empty() ? "" : ": ", r.trust_detail.c_str());
+        if (intact) {
+            print_revocation(r.revocation, "revocation");
+        }
         std::printf("  %-10s %s, %s\n", "algorithm", r.digest.c_str(), s.subfilter.c_str());
         if (!s.claimed_time.empty()) {
             std::printf("  %-10s %s (the signer's own clock)\n", "claimed",
@@ -1352,6 +1723,9 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                                            : r.timestamp->problem.c_str(),
                         r.timestamp->authority.common_name.c_str(),
                         trust_word(r.timestamp->trust).c_str());
+            if (r.timestamp->valid && !r.timestamp->revocation.empty()) {
+                print_revocation(r.timestamp->revocation, "tsa");
+            }
         } else if (intact) {
             std::printf("  %-10s none: nothing proves when this was signed\n", "timestamp");
         }
@@ -1367,12 +1741,7 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
         if (!s.locks.empty()) {
             std::printf("  %-10s %s\n", "locks", s.locks.c_str());
         }
-        if (s.changed_after_signing) {
-            std::printf("  %-10s the document was added to after this was signed%s\n", "CHANGED",
-                        s.later_signature_covers_changes
-                            ? "; a later signature covers those bytes too"
-                            : "");
-        }
+        print_changes(s);
         if (s.changes_judged) {
             if (s.changes_permitted) {
                 std::printf("  %-10s %s\n", "permitted",
@@ -1727,6 +2096,7 @@ int main(int argc, char** argv) {
         if (cmd == "fill")     { return cmd_fill(ctx, args); }
         if (cmd == "sign")     { return cmd_sign(ctx, args); }
         if (cmd == "verify")   { return cmd_verify(ctx, args); }
+        if (cmd == "ltv")      { return cmd_ltv(ctx, args); }
         if (cmd == "keys")     { return cmd_keys(args); }
         if (cmd == "ocr")      { return cmd_ocr(ctx, args); }
 

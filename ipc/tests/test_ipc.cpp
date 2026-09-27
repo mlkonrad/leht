@@ -326,6 +326,11 @@ SignatureList sample_signature_list() {
     row.changes_judged = true;
     row.changes_permitted = false;
     row.change_problems = {"the content of page 2 changed"};
+    row.document_timestamp = true;
+    row.only_validation_data_after = true;
+    row.revocation = {RevocationRow{"Kati Karu", 1, "OCSP, embedded", 1'789'000'000,
+                                    1'790'000'000, ""}};
+    row.timestamp_revocation = {RevocationRow{"TSA", 2, "", 0, 0, "no data"}};
     row.field = "Signature1";
     row.page = 0;
     row.rect = {1, 2, 3, 4};
@@ -385,6 +390,25 @@ void test_signature_messages_round_trip() {
     CHECK(l.rows[0].signer.not_after == 1'800'000'000);
     CHECK(l.rows[0].has_timestamp && l.rows[0].timestamp_time == 1'790'000'001);
     CHECK(l.rows[0].later_signature_covers_changes);
+    CHECK(l.rows[0].document_timestamp && l.rows[0].only_validation_data_after);
+    CHECK(l.rows[0].revocation.size() == 1 && l.rows[0].revocation[0].status == 1 &&
+          l.rows[0].revocation[0].revoked_at == 1'790'000'000 &&
+          l.rows[0].revocation[0].source == "OCSP, embedded");
+    CHECK(l.rows[0].timestamp_revocation.size() == 1 &&
+          l.rows[0].timestamp_revocation[0].problem == "no data");
+
+    // Long-term validation messages.
+    const auto q = round_trip(RevocationQueryList{{QueryRow{0, "http://ocsp.example/", {1, 2, 3}, "Kati Karu"},
+                                                   QueryRow{1, "https://crl.example/x.crl", {}, "CA"}}});
+    CHECK(q.queries.size() == 2 && q.queries[0].request.size() == 3 && q.queries[1].kind == 1);
+    const auto a = round_trip(AddValidationData{"pem", {FetchedRow{0, "http://ocsp.example/", {9, 9}, ""},
+                                                        FetchedRow{1, "https://crl.example/", {}, "down"}}});
+    CHECK(a.trust_pem == "pem" && a.fetched.size() == 2 && a.fetched[1].error == "down");
+    const auto online = round_trip(ListSignatures{"pem", {FetchedRow{1, "http://x/", {7}, ""}}});
+    CHECK(online.online.size() == 1 && online.online[0].body == std::vector<std::uint8_t>{7});
+    CHECK(round_trip(PrepareDocTimestamp{20000}).reserve == 20000);
+    const auto added = round_trip(ValidationDataAdded{3, 2, 1});
+    CHECK(added.certs == 3 && added.ocsps == 2 && added.crls == 1);
 }
 
 void test_signature_messages_reject_hostile_input() {
@@ -410,6 +434,35 @@ void test_signature_messages_reject_hostile_input() {
     check_truncations(sample_prepare());
     check_truncations(sample_signature_list());
     check_truncations(SignaturePrepared{});
+
+    // Long-term validation. The viewer sends what a worker asks it to fetch
+    // to the network, so a worker naming anything but http(s) is refused.
+    for (const char* url : {"ftp://example/crl", "file:///etc/passwd", "ldap://x/", ""}) {
+        CHECK(rejects<RevocationQueryList>(
+            make_frame(1, RevocationQueryList{{QueryRow{1, url, {}, "x"}}}).payload));
+    }
+    CHECK(rejects<RevocationQueryList>(
+        make_frame(1, RevocationQueryList{{QueryRow{2, "http://x/", {}, "x"}}}).payload));
+    CHECK(rejects<AddValidationData>(
+        make_frame(1, AddValidationData{"", {FetchedRow{7, "http://x/", {}, ""}}}).payload));
+    for (const std::uint32_t reserve : {0U, 1023U, (1U << 20) + 1}) {
+        CHECK(rejects<PrepareDocTimestamp>(make_frame(1, PrepareDocTimestamp{reserve}).payload));
+    }
+    {
+        SignatureList m = sample_signature_list();
+        m.rows[0].trust = 6;  // past crypto::Trust::Revoked
+        CHECK(rejects<SignatureList>(make_frame(1, m).payload));
+    }
+    {
+        SignatureList m = sample_signature_list();
+        m.rows[0].revocation[0].status = 3;
+        CHECK(rejects<SignatureList>(make_frame(1, m).payload));
+    }
+    CHECK(takes_fd(MsgType::AddValidationData) && takes_fd(MsgType::PrepareDocTimestamp));
+    CHECK(!takes_fd(MsgType::ListRevocationQueries));
+    check_truncations(RevocationQueryList{{QueryRow{0, "http://x/", {1}, "s"}}});
+    check_truncations(AddValidationData{"p", {FetchedRow{0, "http://x/", {1}, ""}}});
+    check_truncations(ValidationDataAdded{1, 2, 3});
 }
 
 
