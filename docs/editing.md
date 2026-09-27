@@ -164,7 +164,11 @@ value as a name after MuPDF sets it.
 
 ## In the viewer
 
-The Edit toolbar has Save, Undo, Redo and the tools:
+Every command is in the menu bar (File, Edit, View, Pages, Comment, Sign, Tools, Help), with
+its shortcut; Help → Keyboard Shortcuts lists them all. Above the page, the **mode bar** picks
+what you are doing and shows only that mode's tools: *Read*, *Comment* (Highlight, Note, Text
+Box, Draw, Move, Erase), *Fill & Sign*, *Pages* (Crop, Crop Margins, Watermark, Recognize
+Text, Split) and *Redact*. Picking a tool from a menu switches to its mode. The tools:
 
 | Tool | What it does |
 |---|---|
@@ -172,13 +176,18 @@ The Edit toolbar has Save, Undo, Redo and the tools:
 | Move | click an annotation to select it: drag to move, drag a handle to resize (a stamp keeps its shape unless Shift is held), arrow keys nudge 1 pt (Shift: 10), Delete removes it |
 | Highlight | drag across text; the selection becomes a highlight |
 | Note | click to place a sticky note; double-click one to change its text |
-| Text | drag a box (or click) and type on the page; Ctrl+Enter or clicking away writes it, Esc cancels. Clicking existing free text edits it in place; emptying it deletes it |
+| Text Box | drag a box (or click) and type on the page; Ctrl+Enter or clicking away writes it, Esc cancels. Clicking existing free text edits it in place; emptying it deletes it |
 | Draw | freehand ink |
-| Redact | drag a box: everything under it is **removed**, as for `leht redact` |
+| Redact Area | drag a box: everything under it is **removed**, as for `leht redact` |
 | Erase | click an annotation to delete it; erasable ones are outlined |
 | Crop | drag the box to keep, then choose this page, every page or a range. Hides, like `leht crop --box` |
 
-**More** holds Save As, Redact Text…, Watermark… and Crop Margins…. The Watermark dialog
+Comments carry the name set in *Edit → Preferences → Name on comments*, if any. The left
+sidebar has tabs for Pages, Outline, Comments (every annotation by page, with a filter; click
+one to go to it, double-click a note to edit it), Form and Signatures; a tab shows only when
+the document has something for it.
+
+*Tools → Redact Text…*, *Pages → Watermark…* and *Pages → Crop Margins…* open dialogs. The Watermark dialog
 has everything `leht watermark` has — pages, size or fit, opacity, angle, colour, under or
 over — with a preview on the current page; Crop Margins takes every edge alike or each on
 its own, on a page range. A Form panel appears

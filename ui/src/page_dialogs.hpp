@@ -97,6 +97,10 @@ private:
 /// QString when cancelled.
 QString askCropPages(QWidget* parent, int page, int pageCount);
 
+/// An OCR language code as a person would read it ("Estonian (est)"); the
+/// code itself when unknown.
+QString ocrLanguageName(const QString& code);
+
 /// True if `spec` is a page range valid for `pageCount` pages (empty is: all).
 /// Otherwise shows why and returns false.
 bool checkPages(QWidget* parent, const QString& spec, int pageCount);

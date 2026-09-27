@@ -736,12 +736,23 @@ void RenderWorker::applyEdit(const ipc::Edit& edit, bool fromRedo) {
     }
 }
 
+namespace {
+
+/// Preferences > General > Name on comments; empty leaves the annotation
+/// without an author, as before.
+std::string annotationAuthor() {
+    return QSettings().value(QStringLiteral("annotations/author")).toString().trimmed().toStdString();
+}
+
+}  // namespace
+
 void RenderWorker::addHighlight(int page, QVector<QRectF> boxes, QColor color) {
     if (boxes.isEmpty()) {
         return;
     }
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::AddAnnot;
+    e.annot.author = annotationAuthor();
     e.page = page;
     e.annot.kind = leht::ops::AnnotKind::Highlight;
     e.annot.quads = toQuads(boxes);
@@ -752,6 +763,7 @@ void RenderWorker::addHighlight(int page, QVector<QRectF> boxes, QColor color) {
 void RenderWorker::addNote(int page, QPointF at, QString text) {
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::AddAnnot;
+    e.annot.author = annotationAuthor();
     e.page = page;
     e.annot.kind = leht::ops::AnnotKind::Note;
     e.annot.rect = {static_cast<float>(at.x()), static_cast<float>(at.y()),
@@ -763,6 +775,7 @@ void RenderWorker::addNote(int page, QPointF at, QString text) {
 void RenderWorker::addInk(int page, QVector<QPolygonF> strokes, QColor color) {
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::AddAnnot;
+    e.annot.author = annotationAuthor();
     e.page = page;
     e.annot.kind = leht::ops::AnnotKind::Ink;
     setColor(e.annot.color, color);
@@ -836,6 +849,7 @@ void RenderWorker::addFreeText(int page, QRectF box, QString text, double size, 
     }
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::AddAnnot;
+    e.annot.author = annotationAuthor();
     e.page = page;
     e.annot.kind = leht::ops::AnnotKind::FreeText;
     e.annot.rect = toRect(box);

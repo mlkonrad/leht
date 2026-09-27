@@ -10,7 +10,7 @@ leht ocr FILE -o OUT.pdf [-p RANGES] [--lang est+eng] [--dpi 300] [--force]
 leht ocr --languages
 ```
 
-In the viewer: **More → Recognize Text (OCR)…**, with the languages installed on the
+In the viewer: **Tools → Recognize Text (OCR)…** (also in the *Pages* mode, and a task on the start screen), with the languages installed on the
 machine, the pages, and the resolution; a progress dialog reads page by page and can be
 cancelled.
 

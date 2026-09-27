@@ -33,7 +33,6 @@
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMessageBox>
-#include <QDockWidget>
 #include <QHeaderView>
 #include <QShortcut>
 #include <QSpinBox>
@@ -54,8 +53,23 @@
 #include <QVBoxLayout>
 #include <QPushButton>
 
+#include "actions.hpp"
+#include "comments_panel.hpp"
+#include "icons.hpp"
+#include "mode_bar.hpp"
 #include "outline_model.hpp"
+#include "preferences.hpp"
+#include "recent_files.hpp"
+#include "sidebar.hpp"
 #include "thumbnail_bar.hpp"
+#include "welcome_view.hpp"
+
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QSplitter>
+#include <QStackedWidget>
+#include <QTimer>
 
 MainWindow::MainWindow() {
     // Types that cross the worker-thread boundary in queued signals.
@@ -67,10 +81,13 @@ MainWindow::MainWindow() {
     qRegisterMetaType<QVector<int>>();
 
     setWindowTitle(tr("Leht"));
-    resize(1000, 800);
+    resize(1180, 860);
+    setAcceptDrops(true);  // files dropped anywhere on the window (see dropEvent)
 
+    // Placed by buildLayout(); made first because everything below wires to it.
     view_ = new PageView(this);
-    setCentralWidget(view_);
+    sidebar_ = new Sidebar(this);
+    actions_ = new ActionRegistry(this);
 
     // The worker lives on its own thread; everything MuPDF happens there.
     worker_ = new RenderWorker();
@@ -137,6 +154,11 @@ MainWindow::MainWindow() {
         });
     });
     connect(worker_, &RenderWorker::annotationsReady, view_, &PageView::setAnnotations);
+    connect(worker_, &RenderWorker::annotationsReady, this, [this](const QVector<AnnotRow>& rows) {
+        if (comments_ != nullptr) {
+            comments_->setAnnotations(rows);
+        }
+    });
     connect(worker_, &RenderWorker::fieldsReady, this, &MainWindow::onFieldsReady);
     connect(worker_, &RenderWorker::editStateChanged, this, &MainWindow::onEditStateChanged);
     connect(worker_, &RenderWorker::saved, this, &MainWindow::onSaved);
@@ -238,96 +260,13 @@ MainWindow::MainWindow() {
 
     buildActions();
     buildEditActions();
-    buildSignaturePanel();
     buildFileTools();
-
-    pageLabel_ = new QLabel(this);
-    zoomLabel_ = new QLabel(this);
-    statusBar()->addPermanentWidget(pageLabel_);
-    statusBar()->addPermanentWidget(zoomLabel_);
-    updateZoomLabel();
-
-    // Find bar: a hidden toolbar with a query field, match counter, and
-    // next/prev. Shown by Ctrl+F, dismissed by Escape.
-    findBar_ = new QToolBar(tr("Find"), this);
-    findBar_->setMovable(false);
-    findEdit_ = new QLineEdit(findBar_);
-    findEdit_->setPlaceholderText(tr("Find in document"));
-    findEdit_->setClearButtonEnabled(true);
-    findEdit_->setMaximumWidth(280);
-    findBar_->addWidget(findEdit_);
-    QAction* prev = findBar_->addAction(tr("Previous"));
-    prev->setShortcut(QKeySequence::FindPrevious);
-    QAction* next = findBar_->addAction(tr("Next"));
-    next->setShortcut(QKeySequence::FindNext);
-    findLabel_ = new QLabel(findBar_);
-    findLabel_->setMinimumWidth(90);
-    findBar_->addWidget(findLabel_);
-    addToolBar(Qt::BottomToolBarArea, findBar_);
-    findBar_->hide();
-
-    connect(findEdit_, &QLineEdit::returnPressed, this, &MainWindow::runSearch);
-    connect(next, &QAction::triggered, view_, &PageView::nextMatch);
-    connect(prev, &QAction::triggered, view_, &PageView::prevMatch);
-
-    auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
-    connect(esc, &QShortcut::activated, this, &MainWindow::hideFindBar);
-
-    // Outline sidebar: a dockable tree, hidden until a document with an outline
-    // is opened.
-    auto* dock = new QDockWidget(tr("Outline"), this);
-    dock->setObjectName(QStringLiteral("outlineDock"));
-    outlineTree_ = new QTreeWidget(dock);
-    outlineTree_->setHeaderHidden(true);
-    outlineTree_->setColumnCount(1);
-    dock->setWidget(outlineTree_);
-    addDockWidget(Qt::LeftDockWidgetArea, dock);
-    dock->hide();
-    connect(outlineTree_, &QTreeWidget::itemClicked, this,
-            &MainWindow::onOutlineClicked);
-
-    // Thumbnail sidebar, tabbed with the outline on the left.
-    auto* thumbDock = new QDockWidget(tr("Thumbnails"), this);
-    thumbDock->setObjectName(QStringLiteral("thumbnailDock"));
-    thumbnails_ = new ThumbnailBar(thumbDock);
-    thumbDock->setWidget(thumbnails_);
-    addDockWidget(Qt::LeftDockWidgetArea, thumbDock);
-    tabifyDockWidget(dock, thumbDock);
-    thumbDock->raise();  // thumbnails visible by default
-    connect(thumbnails_, &ThumbnailBar::needThumbnail, worker_,
-            &RenderWorker::renderThumbnail);
-    connect(thumbnails_, &ThumbnailBar::pageChosen, this,
-            [this](int page) { view_->goToPage(page); });
-
-    // Go-to-page: a spin box in the status bar, kept in sync with the view.
-    pageSpin_ = new QSpinBox(this);
-    pageSpin_->setMinimum(1);
-    pageSpin_->setMaximum(1);
-    pageSpin_->setEnabled(false);
-    pageSpin_->setKeyboardTracking(false);
-    pageSpin_->setPrefix(tr("Page "));
-    statusBar()->addPermanentWidget(pageSpin_);
-    connect(pageSpin_, &QSpinBox::editingFinished, this,
-            &MainWindow::goToPageFromSpin);
-
-    // Form panel: one row per field, the value editable in place.
-    auto* formDock = new QDockWidget(tr("Form"), this);
-    formDock->setObjectName(QStringLiteral("formDock"));
-    fields_ = new QTableWidget(0, 2, formDock);
-    fields_->setHorizontalHeaderLabels({tr("Field"), tr("Value")});
-    fields_->horizontalHeader()->setStretchLastSection(true);
-    fields_->verticalHeader()->hide();
-    formDock->setWidget(fields_);
-    addDockWidget(Qt::RightDockWidgetArea, formDock);
-    formDock->hide();
-    connect(fields_, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* item) {
-        if (populatingFields_ || item->column() != 1) {
-            return;
-        }
-        const QString name = fields_->item(item->row(), 0)->text();
-        const QString value = item->text();
-        onWorker([=](RenderWorker* w) { w->setFieldValue(name, value); });
-    });
+    buildMainToolbar();
+    buildSignaturePanel();
+    buildLayout();
+    buildMenus();
+    applyAppearance();
+    showWelcome();
 }
 
 void MainWindow::recognizeText() {
@@ -405,266 +344,306 @@ MainWindow::~MainWindow() {
     fileToolsThread_.wait();
 }
 
+bool MainWindow::certAllows(int needs) const {
+    return needs == 0 || certLevel_ == 0 || certLevel_ >= needs;
+}
+
 void MainWindow::buildActions() {
-    QToolBar* bar = addToolBar(tr("Main"));
-    bar->setObjectName(QStringLiteral("mainBar"));
-    bar->setMovable(false);
+    using Spec = ActionRegistry::Spec;
+    const auto open = [this] { return pageCount_ > 0; };
+    const auto add = [this](Spec spec, auto&& slot) {
+        QAction* a = actions_->add(spec);
+        connect(a, &QAction::triggered, this, std::forward<decltype(slot)>(slot));
+        return a;
+    };
+    const QString file = tr("File");
+    const QString edit = tr("Edit");
+    const QString view = tr("View");
+    const QString help = tr("Help");
 
-    QAction* open = bar->addAction(tr("Open"));
-    open->setShortcut(QKeySequence::Open);
-    connect(open, &QAction::triggered, this, &MainWindow::openDialog);
+    // File.
+    add({.id = QStringLiteral("open"), .text = tr("&Open…"), .icon = QStringLiteral("folder-open"),
+         .themeIcon = QStringLiteral("document-open"), .shortcuts = {QKeySequence::Open},
+         .tip = tr("Open a PDF"), .group = file},
+        &MainWindow::openDialog);
+    add({.id = QStringLiteral("close"), .text = tr("&Close"), .icon = QStringLiteral("x"),
+         .themeIcon = QStringLiteral("window-close"), .shortcuts = {QKeySequence::Close},
+         .tip = tr("Close the document"), .enabledWhen = open, .group = file},
+        &MainWindow::closeDocument);
+    saveAction_ = add({.id = QStringLiteral("save"), .text = tr("&Save"), .icon = QStringLiteral("save"),
+                       .themeIcon = QStringLiteral("document-save"), .shortcuts = {QKeySequence::Save},
+                       .tip = tr("Save your changes to this file"), .enabledWhen = open, .group = file},
+                      [this] { (void)save(); });
+    add({.id = QStringLiteral("saveAs"), .text = tr("Save &As…"), .icon = QStringLiteral("save-all"),
+         .themeIcon = QStringLiteral("document-save-as"), .shortcuts = {QKeySequence::SaveAs},
+         .tip = tr("Save a copy under another name"), .enabledWhen = open, .group = file},
+        [this] { (void)saveAs(); });
+    add({.id = QStringLiteral("print"), .text = tr("&Print…"), .icon = QStringLiteral("printer"),
+         .themeIcon = QStringLiteral("document-print"), .shortcuts = {QKeySequence::Print},
+         .enabledWhen = open, .group = file},
+        &MainWindow::printDialog);
+    // Through close(), so unsaved edits are asked about.
+    add({.id = QStringLiteral("quit"), .text = tr("&Quit"), .icon = QStringLiteral("log-out"),
+         .themeIcon = QStringLiteral("application-exit"), .shortcuts = {QKeySequence::Quit}, .group = file},
+        [this] { close(); });
 
-    QAction* print = bar->addAction(tr("Print"));
-    print->setShortcut(QKeySequence::Print);
-    connect(print, &QAction::triggered, this, &MainWindow::printDialog);
+    // Edit.
+    undoAction_ = add({.id = QStringLiteral("undo"), .text = tr("&Undo"), .icon = QStringLiteral("undo-2"),
+                       .themeIcon = QStringLiteral("edit-undo"), .shortcuts = {QKeySequence::Undo},
+                       .group = edit},
+                      [this] { onWorker([](RenderWorker* w) { w->undo(); }); });
+    redoAction_ = add({.id = QStringLiteral("redo"), .text = tr("&Redo"), .icon = QStringLiteral("redo-2"),
+                       .themeIcon = QStringLiteral("edit-redo"), .shortcuts = {QKeySequence::Redo},
+                       .group = edit},
+                      [this] { onWorker([](RenderWorker* w) { w->redo(); }); });
+    undoAction_->setEnabled(false);
+    redoAction_->setEnabled(false);
+    add({.id = QStringLiteral("copy"), .text = tr("&Copy"), .icon = QStringLiteral("copy"),
+         .themeIcon = QStringLiteral("edit-copy"), .shortcuts = {QKeySequence::Copy},
+         .tip = tr("Copy the selected text"), .enabledWhen = open, .group = edit},
+        [this] { view_->copySelection(); });
+    add({.id = QStringLiteral("find"), .text = tr("&Find…"), .icon = QStringLiteral("search"),
+         .themeIcon = QStringLiteral("edit-find"), .shortcuts = {QKeySequence::Find},
+         .tip = tr("Find text in the document"), .enabledWhen = open, .group = edit},
+        &MainWindow::showFindBar);
+    add({.id = QStringLiteral("findNext"), .text = tr("Find &Next"), .icon = QStringLiteral("chevron-down"),
+         .shortcuts = {QKeySequence::FindNext}, .enabledWhen = open, .group = edit},
+        [this] { view_->nextMatch(); });
+    add({.id = QStringLiteral("findPrevious"), .text = tr("Find Pre&vious"), .icon = QStringLiteral("chevron-up"),
+         .shortcuts = {QKeySequence::FindPrevious}, .enabledWhen = open, .group = edit},
+        [this] { view_->prevMatch(); });
+    add({.id = QStringLiteral("preferences"), .text = tr("Pre&ferences…"), .icon = QStringLiteral("settings"),
+         .themeIcon = QStringLiteral("preferences-system"),
+         .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_Comma)}, .group = edit},
+        [this] { openPreferences(); });
 
-    bar->addSeparator();
+    // View.
+    add({.id = QStringLiteral("zoomIn"), .text = tr("Zoom &In"), .icon = QStringLiteral("zoom-in"),
+         .themeIcon = QStringLiteral("zoom-in"), .shortcuts = {QKeySequence::ZoomIn},
+         .enabledWhen = open, .group = view},
+        [this] {
+            view_->zoomBy(1.25);
+            updateZoomLabel();
+        });
+    add({.id = QStringLiteral("zoomOut"), .text = tr("Zoom &Out"), .icon = QStringLiteral("zoom-out"),
+         .themeIcon = QStringLiteral("zoom-out"), .shortcuts = {QKeySequence::ZoomOut},
+         .enabledWhen = open, .group = view},
+        [this] {
+            view_->zoomBy(0.8);
+            updateZoomLabel();
+        });
+    add({.id = QStringLiteral("actualSize"), .text = tr("&Actual Size"), .icon = QStringLiteral("scan"),
+         .themeIcon = QStringLiteral("zoom-original"), .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_1)},
+         .enabledWhen = open, .group = view},
+        [this] {
+            view_->setZoom(1.0);
+            updateZoomLabel();
+        });
+    add({.id = QStringLiteral("fitWidth"), .text = tr("Fit &Width"), .icon = QStringLiteral("arrow-left-right"),
+         .themeIcon = QStringLiteral("zoom-fit-width"), .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_0)},
+         .enabledWhen = open, .group = view},
+        [this] {
+            view_->fitWidth();
+            updateZoomLabel();
+        });
+    add({.id = QStringLiteral("fitPage"), .text = tr("Fit &Page"), .icon = QStringLiteral("maximize"),
+         .themeIcon = QStringLiteral("zoom-fit-best"), .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_9)},
+         .enabledWhen = open, .group = view},
+        [this] {
+            view_->fitPage();
+            updateZoomLabel();
+        });
+    add({.id = QStringLiteral("rotateView"), .text = tr("&Rotate View"), .icon = QStringLiteral("rotate-cw"),
+         .themeIcon = QStringLiteral("object-rotate-right"), .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_R)},
+         .tip = tr("Turn the pages on screen; the file is not changed"), .enabledWhen = open, .group = view},
+        [this] { view_->rotateBy(90); });
+    QAction* sidebar = add({.id = QStringLiteral("toggleSidebar"), .text = tr("&Sidebar"),
+                            .icon = QStringLiteral("panel-left"), .shortcuts = {QKeySequence(Qt::Key_F9)},
+                            .tip = tr("Show or hide the sidebar"), .checkable = true,
+                            .enabledWhen = open, .group = view},
+                           [this](bool on) { sidebar_->setExpanded(on); });
+    sidebar->setChecked(true);
+    connect(sidebar_, &Sidebar::expandedChanged, sidebar, &QAction::setChecked);
+    add({.id = QStringLiteral("fullScreen"), .text = tr("F&ull Screen"), .icon = QStringLiteral("maximize"),
+         .themeIcon = QStringLiteral("view-fullscreen"), .shortcuts = {QKeySequence::FullScreen},
+         .checkable = true, .group = view},
+        [this](bool on) { on ? showFullScreen() : showNormal(); });
 
-    QAction* zoomIn = bar->addAction(tr("Zoom In"));
-    zoomIn->setShortcut(QKeySequence::ZoomIn);
-    connect(zoomIn, &QAction::triggered, this, [this] {
-        view_->zoomBy(1.25);
-        updateZoomLabel();
-    });
-
-    QAction* zoomOut = bar->addAction(tr("Zoom Out"));
-    zoomOut->setShortcut(QKeySequence::ZoomOut);
-    connect(zoomOut, &QAction::triggered, this, [this] {
-        view_->zoomBy(0.8);
-        updateZoomLabel();
-    });
-
-    QAction* fit = bar->addAction(tr("Fit Width"));
-    fit->setShortcut(Qt::CTRL | Qt::Key_0);
-    connect(fit, &QAction::triggered, this, [this] {
-        view_->fitWidth();
-        updateZoomLabel();
-    });
-
-    QAction* fitPage = bar->addAction(tr("Fit Page"));
-    fitPage->setShortcut(Qt::CTRL | Qt::Key_9);
-    connect(fitPage, &QAction::triggered, this, [this] {
-        view_->fitPage();
-        updateZoomLabel();
-    });
-
-    QAction* rotate = bar->addAction(tr("Rotate"));
-    rotate->setShortcut(Qt::CTRL | Qt::Key_R);
-    connect(rotate, &QAction::triggered, this, [this] {
-        view_->rotateBy(90);
-    });
-
-
-    bar->addSeparator();
-    QAction* find = bar->addAction(tr("Find"));
-    find->setShortcut(QKeySequence::Find);
-    connect(find, &QAction::triggered, this, &MainWindow::showFindBar);
-
-    QAction* copy = new QAction(tr("Copy"), this);
-    copy->setShortcut(QKeySequence::Copy);
-    connect(copy, &QAction::triggered, this,
-            [this] { view_->copySelection(); });
-    addAction(copy);
-
-    QAction* quit = new QAction(tr("Quit"), this);
-    quit->setShortcut(QKeySequence::Quit);
-    connect(quit, &QAction::triggered, qApp, &QApplication::quit);
-    addAction(quit);
+    // Help.
+    add({.id = QStringLiteral("shortcuts"), .text = tr("&Keyboard Shortcuts"), .icon = QStringLiteral("keyboard"),
+         .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_Question), QKeySequence(Qt::Key_F1)}, .group = help},
+        [this] { showShortcutSheet(this, *actions_); });
+    add({.id = QStringLiteral("about"), .text = tr("&About Leht"), .icon = QStringLiteral("info"),
+         .themeIcon = QStringLiteral("help-about"), .group = help},
+        &MainWindow::showAbout);
 }
 
 void MainWindow::buildEditActions() {
-    QToolBar* bar = addToolBar(tr("Edit"));
-    bar->setObjectName(QStringLiteral("editBar"));
-    bar->setMovable(false);
-
-    saveAction_ = bar->addAction(tr("Save"));
-    saveAction_->setShortcut(QKeySequence::Save);
-    saveAction_->setEnabled(false);
-    connect(saveAction_, &QAction::triggered, this, [this] { (void)save(); });
-
-    auto* saveAsAction = new QAction(tr("Save As…"), this);
-    saveAsAction->setShortcut(QKeySequence::SaveAs);
-    connect(saveAsAction, &QAction::triggered, this, [this] { (void)saveAs(); });
-    addAction(saveAsAction);
-
-    undoAction_ = bar->addAction(tr("Undo"));
-    undoAction_->setShortcut(QKeySequence::Undo);
-    undoAction_->setEnabled(false);
-    connect(undoAction_, &QAction::triggered, this,
-            [this] { onWorker([](RenderWorker* w) { w->undo(); }); });
-    redoAction_ = bar->addAction(tr("Redo"));
-    redoAction_->setShortcut(QKeySequence::Redo);
-    redoAction_->setEnabled(false);
-    connect(redoAction_, &QAction::triggered, this,
-            [this] { onWorker([](RenderWorker* w) { w->redo(); }); });
-
-    bar->addSeparator();
+    using Spec = ActionRegistry::Spec;
+    const QString comment = tr("Comment");
     tools_ = new QActionGroup(this);
     tools_->setExclusive(true);
-    const struct {
-        const char* label;
-        const char* tip;
-        PageView::Tool tool;
-    } kTools[] = {
-        {"Select", "Select and copy text; double-click text you added to edit it",
-         PageView::Tool::Select},
-        {"Move", "Click an annotation to select it: drag it to move, drag a handle to "
-                 "resize, arrows to nudge, Delete to remove", PageView::Tool::Move},
-        {"Highlight", "Drag across text to highlight it", PageView::Tool::Highlight},
-        {"Note", "Click to add a sticky note", PageView::Tool::Note},
-        {"Text", "Drag a box (or click) and type; Ctrl+Enter or click away to finish, "
-                 "Esc to cancel", PageView::Tool::Text},
-        {"Draw", "Draw freehand", PageView::Tool::Ink},
-        {"Redact", "Drag a box: everything under it is removed from the file, "
-                   "not just covered", PageView::Tool::Redact},
-        {"Erase", "Click an annotation to delete it", PageView::Tool::Erase},
-        {"Crop", "Drag the box to keep: the rest of the page is hidden, not removed",
-         PageView::Tool::Crop},
-        {"Sign", "Drag a box to place a signature there", PageView::Tool::Sign},
-    };
     // The certification level from which each tool is allowed (see
     // applyCertification): 2 signing, 3 annotations, 4 never.
-    const auto certNeeds = [](PageView::Tool tool) {
-        switch (tool) {
-            case PageView::Tool::Select: return 0;
-            case PageView::Tool::Sign:   return 2;
-            case PageView::Tool::Redact:
-            case PageView::Tool::Crop:   return 4;
-            default:                     return 3;
-        }
+    const struct {
+        const char* id;
+        const char* label;
+        const char* icon;
+        const char* tip;
+        PageView::Tool tool;
+        int certNeeds;
+    } kTools[] = {
+        {"toolSelect", QT_TR_NOOP("Select"), "text-cursor",
+         QT_TR_NOOP("Select and copy text; double-click text you added to edit it"), PageView::Tool::Select, 0},
+        {"toolHighlight", QT_TR_NOOP("Highlight"), "highlighter", QT_TR_NOOP("Drag across text to highlight it"),
+         PageView::Tool::Highlight, 3},
+        {"toolNote", QT_TR_NOOP("Note"), "sticky-note", QT_TR_NOOP("Click to add a sticky note"),
+         PageView::Tool::Note, 3},
+        {"toolText", QT_TR_NOOP("Text Box"), "type",
+         QT_TR_NOOP("Drag a box (or click) and type; Ctrl+Enter or click away to finish, Esc to cancel"),
+         PageView::Tool::Text, 3},
+        {"toolDraw", QT_TR_NOOP("Draw"), "pen-line", QT_TR_NOOP("Draw freehand"), PageView::Tool::Ink, 3},
+        {"toolMove", QT_TR_NOOP("Move"), "move",
+         QT_TR_NOOP("Click an annotation to select it: drag it to move, drag a handle to resize, arrows to "
+                    "nudge, Delete to remove"),
+         PageView::Tool::Move, 3},
+        {"toolErase", QT_TR_NOOP("Erase"), "eraser", QT_TR_NOOP("Click an annotation to delete it"),
+         PageView::Tool::Erase, 3},
+        {"toolSign", QT_TR_NOOP("Sign"), "signature", QT_TR_NOOP("Drag a box to place a signature there"),
+         PageView::Tool::Sign, 2},
+        {"toolRedact", QT_TR_NOOP("Redact Area"), "square-dashed",
+         QT_TR_NOOP("Drag a box: everything under it is removed from the file, not just covered"),
+         PageView::Tool::Redact, 4},
+        {"toolCrop", QT_TR_NOOP("Crop"), "crop",
+         QT_TR_NOOP("Drag the box to keep: the rest of the page is hidden, not removed"), PageView::Tool::Crop, 4},
     };
     for (const auto& t : kTools) {
-        QAction* a = bar->addAction(tr(t.label));
-        a->setToolTip(tr(t.tip));
-        a->setProperty("baseTip", tr(t.tip));
-        a->setProperty("certNeeds", certNeeds(t.tool));
-        a->setCheckable(true);
+        const int needs = t.certNeeds;
+        QAction* a = actions_->add({.id = QLatin1String(t.id), .text = tr(t.label), .icon = QLatin1String(t.icon),
+                                    .tip = tr(t.tip), .certNeeds = needs, .checkable = true,
+                                    .enabledWhen = [this, needs] { return pageCount_ > 0 && certAllows(needs); },
+                                    .group = comment});
+        a->setProperty("certNeeds", needs);  // also for Select (0), which applyCertification skips
         tools_->addAction(a);
         const PageView::Tool tool = t.tool;
         connect(a, &QAction::triggered, this, [this, tool] { (void)view_->setTool(tool); });
     }
     tools_->actions().first()->setChecked(true);
 
-    auto* more = new QToolButton(bar);
-    more->setText(tr("More"));
-    more->setPopupMode(QToolButton::InstantPopup);
-    auto* menu = new QMenu(more);
-    menu->addAction(saveAsAction);
-    menu->addSeparator();
-    QAction* redactText = menu->addAction(tr("Redact Text…"));
-    redactText->setProperty("certMenu", true);
-    redactText->setProperty("certNeeds", 4);
-    redactText->setProperty("baseTip", redactText->toolTip());
-    connect(redactText, &QAction::triggered, this, [this] {
-        bool ok = false;
-        const QString needle = QInputDialog::getText(
-            this, tr("Redact text"),
-            tr("Remove every occurrence of (case-insensitive):"), QLineEdit::Normal, QString(), &ok);
-        if (ok && !needle.isEmpty() && confirmBreakingSignatures(tr("A redaction"))) {
-            onWorker([=](RenderWorker* w) { w->redactText(needle); });
+    const auto add = [this](Spec spec, auto&& slot) {
+        const int needs = spec.certNeeds;
+        if (!spec.enabledWhen) {
+            spec.enabledWhen = [this, needs] { return pageCount_ > 0 && certAllows(needs); };
         }
-    });
-    QAction* watermark = menu->addAction(tr("Watermark…"));
-    watermark->setProperty("certMenu", true);
-    watermark->setProperty("certNeeds", 4);
-    watermark->setProperty("baseTip", watermark->toolTip());
-    connect(watermark, &QAction::triggered, this, [this] {
-        const int page = std::max(0, view_->currentPage());
-        WatermarkDialog dialog(this, view_->pageImage(page), view_->pageSizePoints(page),
-                               view_->pageCount());
-        if (dialog.exec() == QDialog::Accepted) {
-            const QString pages = dialog.pages();
-            const leht::ops::WatermarkOptions options = dialog.options();
-            onWorker([=](RenderWorker* w) { w->addWatermark(pages, options); });
-        }
-    });
-    QAction* ocr = menu->addAction(tr("Recognize Text (OCR)…"));
-    ocr->setProperty("certMenu", true);
-    ocr->setProperty("certNeeds", 4);
-    ocr->setProperty("baseTip", ocr->toolTip());
-    ocr->setToolTip(tr("Make scanned pages searchable"));
-    connect(ocr, &QAction::triggered, this, &MainWindow::recognizeText);
-    menu->addSeparator();
-    QAction* signInvisibly = menu->addAction(tr("Sign Invisibly…"));
-    signInvisibly->setProperty("certMenu", true);
-    signInvisibly->setProperty("certNeeds", 2);
-    signInvisibly->setProperty("baseTip", signInvisibly->toolTip());
-    signInvisibly->setToolTip(tr("Sign the document without marking a page"));
-    connect(signInvisibly, &QAction::triggered, this, [this] { startSigning(0, QRectF()); });
-    QAction* ltv = menu->addAction(tr("Add Long-Term Validation…"));
-    ltv->setObjectName(QStringLiteral("addLongTermValidation"));
-    ltv->setToolTip(tr("Embed what every signature needs to be checked after its certificates "
-                       "expire (PAdES B-LT), and a document timestamp over it (B-LTA)"));
-    ltv->setEnabled(false);  // until the document has signatures
-    connect(ltv, &QAction::triggered, this, &MainWindow::addLongTermValidation);
-    QAction* trustCert = menu->addAction(tr("Trust a Certificate…"));
-    connect(trustCert, &QAction::triggered, this, [this] {
-        const QString path = QFileDialog::getOpenFileName(
-            this, tr("Trust a certificate"), QString(),
-            tr("Certificates (*.pem *.crt *.cer);;All files (*)"));
-        if (!path.isEmpty()) {
-            onWorker([=](RenderWorker* w) { w->addTrustedCertificate(path); });
-        }
-    });
-    menu->addSeparator();
-    QAction* crop = menu->addAction(tr("Crop Margins…"));
-    crop->setProperty("certMenu", true);
-    crop->setProperty("certNeeds", 4);
-    crop->setProperty("baseTip", crop->toolTip());
-    connect(crop, &QAction::triggered, this, [this] {
-        CropMarginsDialog dialog(this, view_->pageCount());
-        if (dialog.exec() == QDialog::Accepted) {
-            const QString pages = dialog.pages();
-            const leht::ops::Margins margins = dialog.margins();
-            onWorker([=](RenderWorker* w) { w->cropMargins(pages, margins); });
-        }
-    });
-    more->setMenu(menu);
-    bar->addWidget(more);
-
-    for (QAction* a : bar->actions()) {
-        a->setEnabled(false);
-    }
-    more->setEnabled(false);
+        QAction* a = actions_->add(spec);
+        connect(a, &QAction::triggered, this, std::forward<decltype(slot)>(slot));
+        return a;
+    };
+    const QString sign = tr("Sign");
+    const QString tools = tr("Tools");
+    add({.id = QStringLiteral("redactText"), .text = tr("Redact &Text…"), .icon = QStringLiteral("eye-off"),
+         .tip = tr("Remove every occurrence of a word or phrase from the file"), .certNeeds = 4, .group = tools},
+        [this] {
+            bool ok = false;
+            const QString needle = QInputDialog::getText(
+                this, tr("Redact text"), tr("Remove every occurrence of (case-insensitive):"),
+                QLineEdit::Normal, QString(), &ok);
+            if (ok && !needle.isEmpty() && confirmBreakingSignatures(tr("A redaction"))) {
+                onWorker([=](RenderWorker* w) { w->redactText(needle); });
+            }
+        });
+    add({.id = QStringLiteral("watermark"), .text = tr("&Watermark…"), .icon = QStringLiteral("droplets"),
+         .tip = tr("Put text such as DRAFT across the pages"), .certNeeds = 4, .group = tools},
+        [this] {
+            const int page = std::max(0, view_->currentPage());
+            WatermarkDialog dialog(this, view_->pageImage(page), view_->pageSizePoints(page),
+                                   view_->pageCount());
+            if (dialog.exec() == QDialog::Accepted) {
+                const QString pages = dialog.pages();
+                const leht::ops::WatermarkOptions options = dialog.options();
+                onWorker([=](RenderWorker* w) { w->addWatermark(pages, options); });
+            }
+        });
+    add({.id = QStringLiteral("recognizeText"), .text = tr("&Recognize Text (OCR)…"),
+         .icon = QStringLiteral("scan-text"), .tip = tr("Make scanned pages searchable"), .certNeeds = 4,
+         .group = tools},
+        &MainWindow::recognizeText);
+    add({.id = QStringLiteral("cropMargins"), .text = tr("Crop &Margins…"), .icon = QStringLiteral("crop"),
+         .tip = tr("Trim the same margins from many pages"), .certNeeds = 4, .group = tools},
+        [this] {
+            CropMarginsDialog dialog(this, view_->pageCount());
+            if (dialog.exec() == QDialog::Accepted) {
+                const QString pages = dialog.pages();
+                const leht::ops::Margins margins = dialog.margins();
+                onWorker([=](RenderWorker* w) { w->cropMargins(pages, margins); });
+            }
+        });
+    add({.id = QStringLiteral("signInvisibly"), .text = tr("Sign &Invisibly…"), .icon = QStringLiteral("file-pen-line"),
+         .tip = tr("Sign the document without marking a page"), .certNeeds = 2, .group = sign},
+        [this] { startSigning(0, QRectF()); });
+    add({.id = QStringLiteral("addLongTermValidation"), .text = tr("Add &Long-Term Validation…"),
+         .icon = QStringLiteral("history"),
+         .tip = tr("Embed what every signature needs to be checked after its certificates expire "
+                   "(PAdES B-LT), and a document timestamp over it (B-LTA)"),
+         .enabledWhen = [this] { return pageCount_ > 0 && signatureCount_ > 0; }, .group = sign},
+        &MainWindow::addLongTermValidation);
+    add({.id = QStringLiteral("checkRevocation"), .text = tr("Check &Revocation Online"),
+         .icon = QStringLiteral("globe"),
+         .tip = tr("Ask the certificates' revocation services now whether they were revoked. Only "
+                   "certificate identifiers are sent, never the document."),
+         .enabledWhen = [this] { return pageCount_ > 0 && signatureCount_ > 0; }, .group = sign},
+        [this] {
+            statusBar()->showMessage(tr("Checking revocation online…"));
+            onWorker([](RenderWorker* w) { w->checkRevocationOnline(); });
+        });
+    add({.id = QStringLiteral("trustedCertificates"), .text = tr("&Trusted Certificates…"),
+         .icon = QStringLiteral("key-round"), .tip = tr("Certificates you trust besides your system's"),
+         .enabledWhen = [] { return true; }, .group = sign},
+        [this] { openPreferences(static_cast<int>(PreferencesDialog::Page::Trust)); });
 }
 
 void MainWindow::buildSignaturePanel() {
     // A banner rather than a dialog: a document's signatures are a standing
     // fact about it, not an event, and the one thing a reader must not have to
-    // go looking for.
+    // go looking for. On a row of its own, under the main toolbar.
+    addToolBarBreak(Qt::TopToolBarArea);
     signatureBanner_ = new QToolBar(tr("Signatures"), this);
     signatureBanner_->setObjectName(QStringLiteral("signatureBanner"));
     signatureBanner_->setMovable(false);
+    signatureBanner_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    signatureBannerIcon_ = new QLabel(signatureBanner_);
+    signatureBannerIcon_->setContentsMargins(6, 0, 2, 0);
+    signatureBanner_->addWidget(signatureBannerIcon_);
     signatureBannerLabel_ = new QLabel(signatureBanner_);
     signatureBannerLabel_->setTextFormat(Qt::PlainText);
     signatureBanner_->addWidget(signatureBannerLabel_);
-    QAction* details = signatureBanner_->addAction(tr("Details"));
+    auto* bannerSpacer = new QWidget(signatureBanner_);
+    bannerSpacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    signatureBanner_->addWidget(bannerSpacer);
+    QAction* details = signatureBanner_->addAction(icons::named(QStringLiteral("shield-check")),
+                                                   tr("Details"));
     addToolBar(Qt::TopToolBarArea, signatureBanner_);
     signatureBanner_->hide();
 
-    auto* dock = new QDockWidget(tr("Signatures"), this);
-    dock->setObjectName(QStringLiteral("signatureDock"));
-    auto* panel = new QWidget(dock);
-    auto* column = new QVBoxLayout(panel);
-    column->setContentsMargins(0, 0, 0, 0);
-    auto* online = new QPushButton(tr("Check Revocation Online"), panel);
+    signaturePanel_ = new QWidget(this);
+    signaturePanel_->setObjectName(QStringLiteral("signaturePanel"));
+    auto* column = new QVBoxLayout(signaturePanel_);
+    column->setContentsMargins(4, 0, 4, 4);
+    auto* online = new QPushButton(icons::named(QStringLiteral("globe")), tr("Check Revocation Online"),
+                                   signaturePanel_);
     online->setObjectName(QStringLiteral("checkRevocationOnline"));
     online->setToolTip(tr("Ask the certificates' revocation services (OCSP, CRL) now whether "
                           "they were revoked. Only certificate identifiers are sent, never the "
                           "document, and nothing is added to it."));
-    connect(online, &QPushButton::clicked, this, [this] {
-        statusBar()->showMessage(tr("Checking revocation online…"));
-        onWorker([](RenderWorker* w) { w->checkRevocationOnline(); });
-    });
-    signatures_ = new QTreeWidget(panel);
+    connect(online, &QPushButton::clicked, actions_->find(QStringLiteral("checkRevocation")),
+            &QAction::trigger);
+    signatures_ = new QTreeWidget(signaturePanel_);
+    signatures_->setObjectName(QStringLiteral("signatureTree"));
     signatures_->setHeaderLabels({tr("Signature"), tr("Details")});
-    signatures_->setColumnWidth(0, 180);
+    signatures_->setColumnWidth(0, 150);
     column->addWidget(online);
     column->addWidget(signatures_);
-    dock->setWidget(panel);
-    addDockWidget(Qt::RightDockWidgetArea, dock);
-    dock->hide();
-    connect(details, &QAction::triggered, dock, &QWidget::show);
+    connect(details, &QAction::triggered, this, [this] { sidebar_->showPanel(QStringLiteral("signatures")); });
 
     // Clicking a signature goes to the page it is on.
     connect(signatures_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item, int) {
@@ -733,15 +712,14 @@ QString localTime(qint64 unix_seconds) {
 void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     signatureCount_ = static_cast<int>(rows.size());
     signatures_->clear();
-    auto* dock = findChild<QDockWidget*>(QStringLiteral("signatureDock"));
-    if (auto* ltv = findChild<QAction*>(QStringLiteral("addLongTermValidation"))) {
-        ltv->setEnabled(!rows.isEmpty());
-    }
+    sidebar_->setPanelAvailable(QStringLiteral("signatures"), !rows.isEmpty());
+    const bool verifyAsked = std::exchange(verifyPending_, false);
     if (rows.isEmpty()) {
-        applyCertification(0);
+        applyCertification(0);  // also refreshes the actions that need a signature
         signatureBanner_->hide();
-        if (dock != nullptr) {
-            dock->hide();
+        if (verifyAsked) {
+            QMessageBox::information(this, tr("Check signatures"),
+                                     tr("“%1” is not signed.").arg(currentTitle_));
         }
         return;
     }
@@ -853,9 +831,9 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     signatures_->expandAll();
 
     const QString summary =
-        worst == 2 ? tr("⚠ This document has a broken signature.")
+        worst == 2 ? tr("This document has a broken signature.")
         : worst == 1 ? tr("This document is signed, with something worth checking.")
-                     : tr("✓ Signed and verified.");
+                     : tr("Signed and verified.");
     int certified = 0;
     for (const SigRow& row : rows) {
         certified = row.certification != 0 ? row.certification : certified;
@@ -871,51 +849,58 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
         tr(" %1  (%2) ").arg(summary, counted) +
         (certified != 0 ? tr(" Certified: %1. ").arg(certificationWords(certified)) : QString()));
     applyCertification(certified);
-    QPalette pal = signatureBannerLabel_->palette();
-    pal.setColor(QPalette::WindowText, worst == 2 ? QColor(170, 20, 20)
-                                       : worst == 1 ? QColor(140, 90, 0)
-                                                    : QColor(20, 110, 40));
-    signatureBannerLabel_->setPalette(pal);
+    // The verdict in a coloured mark and a faint wash of the same colour; the
+    // text keeps the palette's, so it reads in light and dark themes alike.
+    const QColor colour = worst == 2 ? QColor(200, 30, 30) : worst == 1 ? QColor(210, 130, 0) : QColor(30, 150, 60);
+    signatureBannerIcon_->setPixmap(icons::tinted(
+        worst == 2 ? QStringLiteral("shield-x") : worst == 1 ? QStringLiteral("shield-alert")
+                                                             : QStringLiteral("shield-check"),
+        colour, 18, devicePixelRatioF()));
+    signatureBanner_->setStyleSheet(
+        QStringLiteral("QToolBar#signatureBanner { background: rgba(%1, %2, %3, 38); border: none;"
+                       " border-bottom: 1px solid rgba(%1, %2, %3, 110); padding: 2px; }")
+            .arg(colour.red()).arg(colour.green()).arg(colour.blue()));
     signatureBanner_->show();
-    if (dock != nullptr && worst > 0) {
-        dock->show();
+    if (worst > 0 || verifyAsked) {
+        sidebar_->showPanel(QStringLiteral("signatures"));
     }
 }
 
 void MainWindow::applyCertification(int level) {
-    // What a certified document still lets one do, in the tools: each tool
-    // and menu entry carries the level from which it is allowed (2 form
-    // filling and signing, 3 annotations, 4 never -- page content is fixed at
-    // every level). Leht does not break a certification by a click.
-    const auto gate = [level](QAction* a) {
+    // What a certified document still lets one do: each tool and command
+    // carries the level from which it is allowed (2 form filling and signing,
+    // 3 annotations, 4 never -- page content is fixed at every level), and the
+    // registry's enabledWhen asks certAllows(). Leht does not break a
+    // certification by a click.
+    certLevel_ = level;
+    for (QAction* a : findChildren<QAction*>()) {
         const int needs = a->property("certNeeds").toInt();
         if (needs == 0) {
-            return;
+            continue;
         }
-        const bool allowed = level == 0 || level >= needs;
-        a->setEnabled(allowed);
         const QString base = a->property("baseTip").toString();
-        a->setToolTip(allowed ? base
-                              : tr("%1\n\nNot available: the document is certified, %2.")
-                                    .arg(base, certificationWords(level)));
-    };
-    if (tools_ != nullptr) {
-        for (QAction* a : tools_->actions()) {
-            gate(a);
-        }
+        a->setToolTip(certAllows(needs) ? base
+                                        : tr("%1\n\nNot available: the document is certified, %2.")
+                                              .arg(base, certificationWords(level)));
     }
-    for (QAction* a : findChildren<QAction*>()) {
-        if (a->property("certMenu").toBool()) {
-            gate(a);
-        }
-    }
+    actions_->refresh();
     // Filling fields is the one change level 2 and 3 allow and 1 does not.
     if (fields_ != nullptr) {
         fields_->setEnabled(level != 1);
     }
-    if (level != 0 && tools_ != nullptr) {
+    if (comments_ != nullptr) {
+        comments_->setEditable(certAllows(3));
+    }
+    if (modes_ != nullptr) {
+        const QString why = tr("Not available: the document is certified, %1.").arg(certificationWords(level));
+        modes_->setModeEnabled(QStringLiteral("comment"), certAllows(3), why);
+        modes_->setModeEnabled(QStringLiteral("sign"), certAllows(2), why);
+        modes_->setModeEnabled(QStringLiteral("pages"), certAllows(4), why);
+        modes_->setModeEnabled(QStringLiteral("redact"), certAllows(4), why);
+    }
+    if (tools_ != nullptr) {
         QAction* current = tools_->checkedAction();
-        if (current != nullptr && !current->isEnabled()) {
+        if (current != nullptr && !current->isEnabled() && pageCount_ > 0) {
             tools_->actions().first()->trigger();  // back to Select
         }
     }
@@ -995,7 +980,7 @@ void MainWindow::onEditStateChanged(bool canUndo, bool canRedo, bool modified) {
     undoAction_->setEnabled(canUndo);
     redoAction_->setEnabled(canRedo);
     modified_ = modified;
-    saveAction_->setEnabled(pageCount_ > 0);
+    actions_->refresh();
     updateTitle();
 }
 
@@ -1008,7 +993,6 @@ void MainWindow::updateTitle() {
 }
 
 void MainWindow::onFieldsReady(const QVector<FieldRow>& rows) {
-    auto* dock = findChild<QDockWidget*>(QStringLiteral("formDock"));
     populatingFields_ = true;
     fields_->setRowCount(0);
     fields_->setRowCount(static_cast<int>(rows.size()));
@@ -1045,8 +1029,10 @@ void MainWindow::onFieldsReady(const QVector<FieldRow>& rows) {
         }
     }
     populatingFields_ = false;
-    if (dock != nullptr) {
-        dock->setVisible(!rows.isEmpty());
+    sidebar_->setPanelAvailable(QStringLiteral("form"), !rows.isEmpty());
+    // A form opens on its fields, once: after that the sidebar is the user's.
+    if (!rows.isEmpty() && !std::exchange(formShown_, true)) {
+        sidebar_->showPanel(QStringLiteral("form"));
     }
 }
 
@@ -1120,10 +1106,14 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     }
 }
 
+QString MainWindow::askOpenPath() {
+    return QFileDialog::getOpenFileName(this, tr("Open PDF"),
+                                        currentPath_.isEmpty() ? QString() : QFileInfo(currentPath_).absolutePath(),
+                                        tr("PDF documents (*.pdf);;All files (*)"));
+}
+
 void MainWindow::openDialog() {
-    const QString path = QFileDialog::getOpenFileName(
-        this, tr("Open PDF"), QString(),
-        tr("PDF documents (*.pdf);;All files (*)"));
+    const QString path = askOpenPath();
     if (!path.isEmpty()) {
         openPath(path);
     }
@@ -1134,53 +1124,83 @@ void MainWindow::openPath(const QString& path) {
         return;
     }
     modified_ = false;
+    pageCount_ = 0;  // nothing to act on until it opens
+    signatureCount_ = 0;
+    formShown_ = false;
     currentPath_ = QFileInfo(path).absoluteFilePath();
     currentTitle_ = QFileInfo(path).fileName();
     (void)view_->setTool(PageView::Tool::Select);
     if (tools_ != nullptr) {
         tools_->actions().first()->setChecked(true);
     }
+    if (modes_ != nullptr && pendingTask_.isEmpty()) {
+        modes_->setMode(QStringLiteral("read"));
+    }
     statusBar()->showMessage(tr("Opening %1…").arg(currentTitle_));
     view_->clear();
     if (thumbnails_ != nullptr) {
         thumbnails_->clearThumbnails();
     }
+    outlineTree_->clear();
+    comments_->setAnnotations({});
+    for (const char* panel : {"outline", "form", "signatures"}) {
+        sidebar_->setPanelAvailable(QLatin1String(panel), false);
+    }
+    signatureBanner_->hide();
+    certLevel_ = 0;
+    actions_->refresh();
+    stack_->setCurrentWidget(documentPage_);
     emit requestOpen(path);
 }
 
 void MainWindow::onOpened(int pageCount, QVector<QSize> baseSizes) {
     pageCount_ = pageCount;
     updateTitle();
-    if (auto* bar = findChild<QToolBar*>(QStringLiteral("editBar"))) {
-        for (QAction* a : bar->actions()) {
-            a->setEnabled(true);
-        }
-        for (QWidget* w : bar->findChildren<QToolButton*>()) {
-            w->setEnabled(true);
-        }
-    }
     undoAction_->setEnabled(false);
     redoAction_->setEnabled(false);
     signatureCount_ = 0;
+    applyCertification(0);  // refreshes every action for the open document
     onWorker([](RenderWorker* w) {
         w->listAnnotations();
         w->listFields();
         w->listSignatures();
     });
     statusBar()->clearMessage();
+    stack_->setCurrentWidget(documentPage_);
     view_->setPages(baseSizes);
-    view_->fitWidth();
+    const QString zoom = QSettings().value(QLatin1String(prefs::kDefaultZoom), QStringLiteral("width")).toString();
+    if (zoom == QLatin1String("page")) {
+        view_->fitPage();
+    } else if (zoom == QLatin1String("actual")) {
+        view_->setZoom(1.0);
+    } else {
+        view_->fitWidth();
+    }
     pageSpin_->setMaximum(qMax(1, pageCount));
     pageSpin_->setEnabled(pageCount > 0);
     thumbnails_->setPageCount(pageCount);
     view_->setFocus();
     onCurrentPageChanged(view_->currentPage());
     updateZoomLabel();
+    if (!currentPath_.isEmpty()) {
+        recent::add(currentPath_);
+    }
+    if (!pendingTask_.isEmpty()) {
+        QTimer::singleShot(0, this, &MainWindow::runPendingTask);
+    }
 }
 
 void MainWindow::onFailed(const QString& message) {
     statusBar()->clearMessage();
+    pendingTask_.clear();
+    verifyPending_ = false;
     QMessageBox::warning(this, tr("Could not open document"), message);
+    if (pageCount_ == 0) {
+        currentPath_.clear();
+        currentTitle_.clear();
+        updateTitle();
+        showWelcome();
+    }
 }
 
 void MainWindow::onCurrentPageChanged(int page) {
@@ -1232,12 +1252,8 @@ void MainWindow::onMatchNavigated(int index, int total) {
 
 void MainWindow::onOutlineReady(const QVector<OutlineRow>& rows) {
     outlineTree_->clear();
-    auto* dock = findChild<QDockWidget*>(QStringLiteral("outlineDock"));
-
+    sidebar_->setPanelAvailable(QStringLiteral("outline"), !rows.isEmpty());
     if (rows.isEmpty()) {
-        if (dock != nullptr) {
-            dock->hide();
-        }
         return;
     }
 
@@ -1261,9 +1277,6 @@ void MainWindow::onOutlineReady(const QVector<OutlineRow>& rows) {
         stack.push_back(item);
     }
     outlineTree_->expandToDepth(1);
-    if (dock != nullptr) {
-        dock->show();
-    }
 }
 
 void MainWindow::onOutlineClicked(QTreeWidgetItem* item, int /*column*/) {
@@ -1295,8 +1308,13 @@ void MainWindow::onPasswordRequired(bool retry) {
         this, tr("Password required"), prompt, QLineEdit::Password, QString(), &ok);
 
     if (!ok) {
-        // User cancelled: leave the viewer as it was.
+        // User cancelled: nothing is open, so back to the start.
         statusBar()->showMessage(tr("Opening cancelled."), 3000);
+        pendingTask_.clear();
+        currentPath_.clear();
+        currentTitle_.clear();
+        updateTitle();
+        showWelcome();
         return;
     }
     statusBar()->showMessage(tr("Unlocking…"));
@@ -1374,50 +1392,25 @@ void MainWindow::buildFileTools() {
     connect(&fileToolsThread_, &QThread::finished, fileTools_, &QObject::deleteLater);
     fileToolsThread_.start();
 
-    auto* bar = findChild<QToolBar*>(QStringLiteral("mainBar"));
-    bar->addSeparator();
-    fileToolsButton_ = new QToolButton(bar);
-    fileToolsButton_->setObjectName(QStringLiteral("fileTools"));
-    fileToolsButton_->setText(tr("Files"));
-    fileToolsButton_->setPopupMode(QToolButton::InstantPopup);
-    auto* menu = new QMenu(fileToolsButton_);
-
-    QAction* combine = menu->addAction(tr("Combine Files…"));
-    combine->setObjectName(QStringLiteral("combineFiles"));
-    combine->setToolTip(tr("Put PDFs and images together into one new PDF"));
-    QAction* reduce = menu->addAction(tr("Reduce File Size…"));
-    reduce->setObjectName(QStringLiteral("reduceFileSize"));
-    reduce->setToolTip(tr("Make a smaller copy of this document"));
-    QAction* split = menu->addAction(tr("Split Document…"));
-    split->setObjectName(QStringLiteral("splitDocument"));
-    split->setToolTip(tr("Write this document's pages into separate files"));
-    reduce->setEnabled(false);  // until a document is open
-    split->setEnabled(false);
-    fileToolsButton_->setMenu(menu);
-    bar->addWidget(fileToolsButton_);
-
-    connect(worker_, &RenderWorker::opened, this,
-            [reduce, split](int pageCount, const QVector<QSize>&) {
-                reduce->setEnabled(pageCount > 0);
-                split->setEnabled(pageCount > 0);
-            });
+    // One job at a time: all three wait while one runs.
+    const QString file = tr("File");
+    QAction* combine = actions_->add({.id = QStringLiteral("combineFiles"), .text = tr("Co&mbine Files…"),
+                                      .icon = QStringLiteral("combine"),
+                                      .tip = tr("Put PDFs and images together into one new PDF"),
+                                      .enabledWhen = [this] { return !fileToolBusy_; }, .group = file});
+    QAction* reduce = actions_->add({.id = QStringLiteral("reduceFileSize"), .text = tr("Re&duce File Size…"),
+                                     .icon = QStringLiteral("minimize-2"),
+                                     .tip = tr("Make a smaller copy of this document"),
+                                     .enabledWhen = [this] { return pageCount_ > 0 && !fileToolBusy_; },
+                                     .group = file});
+    QAction* split = actions_->add({.id = QStringLiteral("splitDocument"), .text = tr("Sp&lit Document…"),
+                                    .icon = QStringLiteral("scissors"),
+                                    .tip = tr("Write this document's pages into separate files"),
+                                    .enabledWhen = [this] { return pageCount_ > 0 && !fileToolBusy_; },
+                                    .group = file});
 
     connect(combine, &QAction::triggered, this, [this] {
-        CombineDialog dialog(this, pageCount_ > 0 ? currentPath_ : QString());
-        if (dialog.exec() != QDialog::Accepted) {
-            return;
-        }
-        const QStringList inputs = dialog.inputs();
-        const QString output = dialog.output();
-        const auto go = [this, inputs, output] {
-            runFileTool(tr("Combining files…"), [inputs, output](FileTools* t, const QString&) {
-                t->combine(inputs, output, false);
-            });
-        };
-        // The open document goes in as it is on disk.
-        if (!inputs.contains(currentPath_) || resolveUnsaved(go)) {
-            go();
-        }
+        combineFiles(pageCount_ > 0 ? QStringList{currentPath_} : QStringList{});
     });
 
     // Reduce and Split read the file on disk, so unsaved edits are settled
@@ -1510,7 +1503,8 @@ void MainWindow::buildFileTools() {
 void MainWindow::runFileTool(const QString& title, std::function<void(FileTools*, QString)> job) {
     fileToolTitle_ = QString(title).remove(QStringLiteral("…"));
     fileToolJob_ = std::move(job);
-    fileToolsButton_->setEnabled(false);  // one job at a time
+    fileToolBusy_ = true;
+    actions_->refresh();
 
     fileToolsProgress_ = new QProgressDialog(title, tr("Cancel"), 0, 0, this);
     fileToolsProgress_->setObjectName(QStringLiteral("fileToolsProgress"));
@@ -1537,5 +1531,6 @@ void MainWindow::endFileTool() {
         fileToolsProgress_ = nullptr;
     }
     fileToolJob_ = nullptr;
-    fileToolsButton_->setEnabled(true);
+    fileToolBusy_ = false;
+    actions_->refresh();
 }

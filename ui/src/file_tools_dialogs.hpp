@@ -28,9 +28,12 @@ public:
     /// The file-dialog filter for everything Combine accepts.
     [[nodiscard]] static QString inputFilter();
 
+    /// Adds files to the list, as if chosen with Add Files (files dropped on
+    /// the window, say).
+    void addPaths(const QStringList& paths);
+
 private:
     void addFiles();
-    void addPaths(const QStringList& paths);
     void move(int by);
     void updateButtons();
     void chooseOutputAndAccept();

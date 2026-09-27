@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #pragma once
 
+#include <QHash>
+#include <QList>
 #include <QMainWindow>
 #include <QThread>
 #include <QVector>
@@ -10,10 +12,19 @@
 #include "edit_model.hpp"
 #include "outline_model.hpp"
 
+class ActionRegistry;
+class CommentsPanel;
+class ModeBar;
 class PageView;
 class QAction;
+class QMenu;
+class QStackedWidget;
+class Sidebar;
+class WelcomeView;
 class QActionGroup;
 class QCloseEvent;
+class QDragEnterEvent;
+class QDropEvent;
 class QTableWidget;
 class RenderWorker;
 class QLabel;
@@ -27,8 +38,12 @@ class QTreeWidgetItem;
 class QSpinBox;
 class ThumbnailBar;
 
-/// The application window. Owns the render thread, wires it to the view, and
-/// provides open / zoom / fit actions.
+/// The application window. Owns the render thread and wires it to the view.
+///
+/// Every command is registered once in an ActionRegistry (actions.hpp), and
+/// the menu bar, the toolbar and the mode bar are built from it. With no
+/// document open the window shows the WelcomeView; with one, a mode bar over
+/// the sidebar (pages, outline, comments, form, signatures) and the page.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -43,6 +58,18 @@ public:
     [[nodiscard]] PageView* view() const { return view_; }
     [[nodiscard]] RenderWorker* worker() const { return worker_; }
     [[nodiscard]] FileTools* fileTools() const { return fileTools_; }
+    [[nodiscard]] ActionRegistry* actions() const { return actions_; }
+    [[nodiscard]] Sidebar* sidebar() const { return sidebar_; }
+    [[nodiscard]] ModeBar* modeBar() const { return modes_; }
+    /// Whether the welcome view is showing (no document open).
+    [[nodiscard]] bool isShowingWelcome() const;
+
+    /// Opens one dropped file, or offers to combine several.
+    void handleDroppedFiles(const QStringList& paths);
+    /// A welcome-view task: "sign", "fill", "combine", "ocr", "reduce", "verify".
+    void startTask(const QString& task);
+    /// File > Close: back to the welcome view (asks about unsaved edits).
+    void closeDocument();
 
 private slots:
     void openDialog();
@@ -83,6 +110,8 @@ signals:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 public slots:
     /// More -> Recognize Text (OCR)...
@@ -95,7 +124,24 @@ public slots:
 private:
     void buildActions();
     void buildEditActions();
+    void buildMainToolbar();
     void buildSignaturePanel();
+    void buildLayout();
+    void buildMenus();
+    /// Toolbar text and icons, from Preferences.
+    void applyAppearance();
+    void openPreferences(int page = 0);
+    void showAbout();
+    void showWelcome();
+    /// Asks for a file to open; empty if cancelled.
+    [[nodiscard]] QString askOpenPath();
+    /// Combine Files, starting with `initial` in the list.
+    void combineFiles(const QStringList& initial);
+    /// Runs what a welcome task asked for, once its document is open.
+    void runPendingTask();
+    /// Whether the current certification level allows what needs `needs`
+    /// (see applyCertification).
+    [[nodiscard]] bool certAllows(int needs) const;
     /// Opens the Sign dialog for a box on `page` (an empty box signs
     /// invisibly), then signs -- which saves, so it asks where to when the
     /// document has no path yet.
@@ -139,9 +185,26 @@ private:
     QTreeWidget* signatures_ = nullptr;
     QToolBar* signatureBanner_ = nullptr;
     QLabel* signatureBannerLabel_ = nullptr;
+    QLabel* signatureBannerIcon_ = nullptr;
     int signatureCount_ = 0;
     bool populatingFields_ = false;
     std::function<void()> afterSave_;  ///< what an unsaved-changes prompt was waiting for
+
+    // Structure (see the class comment).
+    ActionRegistry* actions_ = nullptr;
+    QStackedWidget* stack_ = nullptr;
+    WelcomeView* welcome_ = nullptr;
+    QWidget* documentPage_ = nullptr;
+    ModeBar* modes_ = nullptr;
+    QHash<QString, QList<QAction*>> modeTools_;
+    Sidebar* sidebar_ = nullptr;
+    CommentsPanel* comments_ = nullptr;
+    QWidget* signaturePanel_ = nullptr;
+    QMenu* recentMenu_ = nullptr;
+    int certLevel_ = 0;
+    QString pendingTask_;   ///< a welcome task waiting for its document to open
+    bool verifyPending_ = false;
+    bool formShown_ = false;  ///< the Form tab was opened for this document already
 
     // File tools: Combine Files, Reduce File Size, Split Document. Jobs run on
     // their own thread, each in a worker of its own (see file_tools.hpp).
@@ -153,7 +216,7 @@ private:
     void endFileTool();
     QThread fileToolsThread_;
     FileTools* fileTools_ = nullptr;
-    QToolButton* fileToolsButton_ = nullptr;
+    bool fileToolBusy_ = false;  ///< one job at a time
     QProgressDialog* fileToolsProgress_ = nullptr;
     QString fileToolTitle_;
     std::function<void(FileTools*, QString)> fileToolJob_;

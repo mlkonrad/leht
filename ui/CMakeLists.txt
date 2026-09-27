@@ -5,17 +5,37 @@ qt_standard_project_setup()
 # The window, view and worker as a library, so both the viewer binary and the
 # headless smoke test link the exact same code.
 qt_add_library(leht_viewer_lib STATIC
+    src/actions.cpp
+    src/comments_panel.cpp
     src/file_tools.cpp
     src/file_tools_dialogs.cpp
+    src/icons.cpp
     src/main_window.cpp
+    src/main_window_layout.cpp
+    src/mode_bar.cpp
     src/page_dialogs.cpp
     src/page_view.cpp
+    src/preferences.cpp
+    src/recent_files.cpp
     src/render_worker.cpp
+    src/sidebar.cpp
     src/sign_dialog.cpp
     src/thumbnail_bar.cpp
+    src/welcome_view.cpp
     src/worker_files.cpp
 )
 target_include_directories(leht_viewer_lib PUBLIC src)
+target_compile_definitions(leht_viewer_lib PRIVATE LEHT_VERSION="${PROJECT_VERSION}")
+
+# The interface icons (ui/icons/lucide, see its README), compiled in and drawn
+# in the palette's colour by src/icons.cpp. The app icon itself is below.
+file(GLOB LEHT_UI_ICONS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/icons/lucide"
+     CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/icons/lucide/*.svg")
+list(TRANSFORM LEHT_UI_ICONS PREPEND "icons/lucide/" OUTPUT_VARIABLE LEHT_UI_ICON_FILES)
+qt_add_resources(leht_viewer_lib "ui_icons"
+    PREFIX "/leht/icons"
+    BASE "icons/lucide"
+    FILES ${LEHT_UI_ICON_FILES})
 # leht::warnings is deliberately not applied: Qt's moc output and headers do not
 # pass our -Werror pedantic set, and they are not ours to fix. core/ stays strict.
 # leht::crypto: the viewer is the trusted process. It holds the signing key,

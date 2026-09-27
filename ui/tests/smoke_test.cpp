@@ -7,6 +7,15 @@
 
 #include "main_window.hpp"
 #include "page_view.hpp"
+#include "actions.hpp"
+#include "comments_panel.hpp"
+#include "mode_bar.hpp"
+#include "preferences.hpp"
+#include "recent_files.hpp"
+#include "sidebar.hpp"
+#include "welcome_view.hpp"
+#include <QListWidget>
+#include <QMenuBar>
 
 #include <QApplication>
 #include <QClipboard>
@@ -164,7 +173,7 @@ QString writeSlowPageTree(const QString& path, int pages) {
     return path;
 }
 
-QImage grabView(MainWindow& w) { return w.centralWidget()->grab().toImage(); }
+QImage grabView(MainWindow& w) { return w.view()->grab().toImage(); }
 
 /// With LEHT_SMOKE_SHOTS=DIR, saves what the test sees as DIR/NAME.png: a way
 /// to look at new UI without a display. Does nothing otherwise.
@@ -289,7 +298,7 @@ int main(int argc, char** argv) {
     window.openPath(QString::fromStdString(outlined));
     pump(1500);
 
-    auto* tree = window.findChild<QTreeWidget*>();
+    auto* tree = window.findChild<QTreeWidget*>(QStringLiteral("outlineTree"));
     check(tree != nullptr, "outline tree exists");
     if (tree != nullptr) {
         check(tree->topLevelItemCount() == 3, "outline has 3 top-level entries");
@@ -306,9 +315,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    auto* dock = window.findChild<QDockWidget*>(QStringLiteral("outlineDock"));
-    check(dock != nullptr && dock->isVisible(),
-          "outline dock shows for a document with an outline");
+    check(window.sidebar()->isPanelAvailable(QStringLiteral("outline")),
+          "the sidebar offers an Outline tab for a document with an outline");
 
     // Go-to-page: jump back to page 1.
     view->goToPage(0);
@@ -1132,6 +1140,110 @@ int main(int argc, char** argv) {
     }
 #endif
 
+    // --- The window's structure: welcome, menus, modes, close ---------------
+    {
+        MainWindow fresh;
+        fresh.resize(1000, 800);
+        fresh.show();
+        pump(200);
+        check(fresh.isShowingWelcome(), "a window with no document shows the welcome view");
+        check(fresh.findChild<WelcomeView*>() != nullptr &&
+                  fresh.findChild<QWidget*>(QStringLiteral("task_sign")) != nullptr,
+              "the welcome view offers task cards");
+        QStringList menus;
+        for (QAction* m : fresh.menuBar()->actions()) {
+            menus << m->text().remove(QLatin1Char('&'));
+        }
+        check(menus == QStringList{QStringLiteral("File"), QStringLiteral("Edit"), QStringLiteral("View"),
+                                   QStringLiteral("Pages"), QStringLiteral("Comment"), QStringLiteral("Sign"),
+                                   QStringLiteral("Tools"), QStringLiteral("Help")},
+              "the menu bar has File, Edit, View, Pages, Comment, Sign, Tools, Help");
+        // Every command is somewhere in the menus, not only on a toolbar.
+        QSet<QAction*> inMenus;
+        const std::function<void(QMenu*)> collect = [&](QMenu* menu) {
+            for (QAction* a : menu->actions()) {
+                inMenus.insert(a);
+                if (a->menu() != nullptr) {
+                    collect(a->menu());
+                }
+            }
+        };
+        for (QAction* m : fresh.menuBar()->actions()) {
+            collect(m->menu());
+        }
+        for (const char* id : {"open", "save", "saveAs", "print", "combineFiles", "reduceFileSize",
+                               "splitDocument", "undo", "find", "preferences", "zoomIn", "fitWidth",
+                               "toolHighlight", "toolSign", "signInvisibly", "addLongTermValidation",
+                               "toolRedact", "redactText", "watermark", "cropMargins", "shortcuts"}) {
+            QAction* a = fresh.actions()->find(QLatin1String(id));
+            check(a != nullptr && inMenus.contains(a), (std::string("the menus hold ") + id).c_str());
+        }
+        // One key, one command: a shortcut given twice fires neither.
+        QHash<QString, QString> keys;
+        bool unique = true;
+        for (QAction* a : fresh.findChildren<QAction*>()) {
+            for (const QKeySequence& k : a->shortcuts()) {
+                const QString key = k.toString();
+                if (keys.contains(key) && keys.value(key) != a->objectName()) {
+                    std::printf("      shortcut %s on both %s and %s\n", qPrintable(key),
+                                qPrintable(keys.value(key)), qPrintable(a->objectName()));
+                    unique = false;
+                }
+                keys.insert(key, a->objectName());
+            }
+        }
+        check(unique, "no shortcut is given to two commands");
+        check(!fresh.actions()->find(QStringLiteral("save"))->isEnabled() &&
+                  !fresh.actions()->find(QStringLiteral("toolHighlight"))->isEnabled() &&
+                  fresh.actions()->find(QStringLiteral("combineFiles"))->isEnabled(),
+              "with nothing open, only what needs no document is enabled");
+        {
+            PreferencesDialog prefs(&fresh, {QStringLiteral("est"), QStringLiteral("eng")});
+            prefs.show();
+            pump(50);
+            check(prefs.findChild<QListWidget*>(QStringLiteral("preferenceSections"))->count() == 5,
+                  "Preferences has five sections");
+            shot(&prefs, "ux-preferences");
+        }
+        shot(&fresh, "ux-welcome");
+
+        fresh.handleDroppedFiles({QString::fromStdString(doc)});
+        pump(1500);
+        check(!fresh.isShowingWelcome() && fresh.view()->pageCount() == 10,
+              "a file dropped on the window opens");
+        check(fresh.actions()->find(QStringLiteral("save"))->isEnabled() &&
+                  fresh.actions()->find(QStringLiteral("toolHighlight"))->isEnabled(),
+              "an open document enables the tools");
+        check(recent::files().value(0) == QFileInfo(QString::fromStdString(doc)).absoluteFilePath(),
+              "an opened file heads the recent list");
+
+        // Modes: the tool row follows the mode, and a tool picked from a
+        // menu brings its mode along.
+        ModeBar* modes = fresh.modeBar();
+        check(modes->mode() == QStringLiteral("read"), "a document opens in Read mode");
+        auto* modeTools = fresh.findChild<QToolBar*>(QStringLiteral("modeTools"));
+        modes->setMode(QStringLiteral("comment"));
+        pump(50);
+        check(modeTools->actions().contains(fresh.actions()->find(QStringLiteral("toolHighlight"))),
+              "Comment mode shows the highlighter");
+        fresh.actions()->find(QStringLiteral("toolRedact"))->trigger();
+        pump(50);
+        check(modes->mode() == QStringLiteral("redact"), "picking Redact Area switches to Redact mode");
+        modes->setMode(QStringLiteral("read"));
+        pump(50);
+        check(fresh.actions()->find(QStringLiteral("toolSelect"))->isChecked(),
+              "leaving a mode puts its tool down");
+        fresh.sidebar()->showPanel(QStringLiteral("comments"));
+        pump(100);
+        check(fresh.sidebar()->currentPanel() == QStringLiteral("comments"), "the sidebar opens a tab");
+        shot(&fresh, "ux-document");
+
+        fresh.closeDocument();
+        pump(200);
+        check(fresh.isShowingWelcome(), "Close returns to the welcome view");
+        check(!fresh.actions()->find(QStringLiteral("save"))->isEnabled(), "and disables Save again");
+    }
+
     // --- Editing (M4b) -----------------------------------------------------
     {
         QTemporaryDir tmp;
@@ -1156,6 +1268,7 @@ int main(int argc, char** argv) {
         }
 
         const QImage beforeEdit = grabView(window);
+        QSettings().setValue(QLatin1String(prefs::kAuthor), QStringLiteral("Mari Maasikas"));
         emit view->highlightRequested(0, boxes);
         pump(1200);
         check(window.isModified(), "a highlight marks the document modified");
@@ -1199,6 +1312,9 @@ int main(int argc, char** argv) {
         check(window.save(), "save starts");
         pump(2000);
         check(!window.isModified(), "saving clears the modified mark");
+        QSettings().remove(QLatin1String(prefs::kAuthor));
+        check(window.findChild<CommentsPanel*>() != nullptr && window.findChild<CommentsPanel*>()->count() == 2,
+              "the Comments tab lists the highlight and the drawing");
         try {
             leht::Document saved = leht::Document::open(ctx, copy.toStdString());
             const auto annots = leht::ops::list_annotations(ctx, saved);
@@ -1211,6 +1327,9 @@ int main(int argc, char** argv) {
                 ink = ink || a.type == "Ink";
             }
             check(highlight && ink, "the saved file has the highlight and the drawing");
+            check(std::all_of(annots.begin(), annots.end(),
+                              [](const auto& a) { return a.author == "Mari Maasikas"; }),
+                  "comments carry the name from Preferences");
         } catch (const leht::Error& e) {
             check(false, "the saved file opens");
             std::printf("      open error: %s\n", e.what());

@@ -282,10 +282,7 @@ QString CropMarginsDialog::pages() const { return pages_->text().trimmed(); }
 
 // --- OCR -----------------------------------------------------------------------------
 
-namespace {
-
-/// A language code as a person would read it; the code itself when unknown.
-QString languageName(const QString& code) {
+QString ocrLanguageName(const QString& code) {
     static const QHash<QString, const char*> names = {
         {QStringLiteral("est"), QT_TR_NOOP("Estonian")},
         {QStringLiteral("eng"), QT_TR_NOOP("English")},
@@ -301,8 +298,6 @@ QString languageName(const QString& code) {
     return it == names.constEnd() ? code
                                   : QStringLiteral("%1 (%2)").arg(QObject::tr(*it), code);
 }
-
-}  // namespace
 
 OcrDialog::OcrDialog(QWidget* parent, int pageCount, const QStringList& installed)
     : QDialog(parent), pageCount_(pageCount) {
@@ -329,7 +324,7 @@ OcrDialog::OcrDialog(QWidget* parent, int pageCount, const QStringList& installe
     auto* langLayout = new QVBoxLayout(langBox);
     langLayout->setContentsMargins(0, 0, 0, 0);
     for (const QString& code : installed) {
-        auto* box = new QCheckBox(languageName(code), langBox);
+        auto* box = new QCheckBox(ocrLanguageName(code), langBox);
         box->setProperty("code", code);
         box->setChecked(wanted.contains(code));
         langLayout->addWidget(box);
