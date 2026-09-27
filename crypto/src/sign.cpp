@@ -339,8 +339,10 @@ SignResult sign_prepared(int fd, const ops::ByteRange& range, const Identity& id
         // attribute id-aa-signatureTimeStampToken.
         const ASN1_OCTET_STRING* value = CMS_SignerInfo_get0_signature(si);
         const detail::TimestampToken token = detail::request_timestamp(
-            options.tsa_url, ASN1_STRING_get0_data(value),
-            static_cast<std::size_t>(ASN1_STRING_length(value)), options.tsa_timeout_seconds);
+            options.tsa_url,
+            detail::sha256(ASN1_STRING_get0_data(value),
+                           static_cast<std::size_t>(ASN1_STRING_length(value))),
+            options.tsa_timeout_seconds);
         if (CMS_unsigned_add1_attr_by_NID(si, NID_id_smime_aa_timeStampToken, V_ASN1_SEQUENCE,
                                           token.der.data(),
                                           static_cast<int>(token.der.size())) != 1) {
@@ -363,6 +365,37 @@ SignResult sign_prepared(int fd, const ops::ByteRange& range, const Identity& id
                            " bytes but its hole holds " + std::to_string(result.hole_size));
     }
     const std::string hex = detail::hex(blob.data(), blob.size());
+    pwrite_all(fd, hex.data(), hex.size(), range.hole_begin() + 1);
+    return result;
+}
+
+std::size_t estimate_timestamp_size() {
+    // A token is a CMS SignedData over a small TSTInfo, carrying the TSA's
+    // certificate and often its chain: rarely over 8 KB. The same headroom a
+    // B-T signature leaves for one.
+    return 16384;
+}
+
+TimestampResult timestamp_prepared(int fd, const ops::ByteRange& range,
+                                   const SignOptions& options) {
+    init();
+    if (options.tsa_url.empty()) {
+        throw Error(0, "a document timestamp needs a timestamp authority");
+    }
+    TimestampResult result;
+    result.hole_size = check_hole(fd, range);
+    // PAdES: the token's imprint is the digest of the byte ranges, exactly as
+    // a signature's message-digest attribute would be.
+    const Bytes digest = digest_ranges(fd, range, EVP_sha256());
+    const detail::TimestampToken token =
+        detail::request_timestamp(options.tsa_url, digest, options.tsa_timeout_seconds);
+    result.der_size = token.der.size();
+    result.time = token.time;
+    if (token.der.size() > result.hole_size) {
+        throw Error(0, "the timestamp token is " + std::to_string(token.der.size()) +
+                           " bytes but its hole holds " + std::to_string(result.hole_size));
+    }
+    const std::string hex = detail::hex(token.der.data(), token.der.size());
     pwrite_all(fd, hex.data(), hex.size(), range.hole_begin() + 1);
     return result;
 }

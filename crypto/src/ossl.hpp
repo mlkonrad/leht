@@ -62,13 +62,52 @@ struct TimestampToken {
     std::int64_t time = 0;  ///< its genTime
 };
 
-/// RFC 3161: asks the TSA at `url` to timestamp `data` (SHA-256 imprint, a
-/// random nonce, the TSA certificate requested). Checks the reply's status,
-/// imprint and nonce, and the token's signature against the certificate it
-/// carries. Whether that TSA is trusted is decided at verification, like any
-/// other signer. Throws leht::Error on any failure.
-TimestampToken request_timestamp(const std::string& url, const unsigned char* data,
-                                 std::size_t size, int timeout_seconds);
+/// SHA-256 of `n` bytes.
+Bytes sha256(const unsigned char* p, std::size_t n);
+
+/// RFC 3161: asks the TSA at `url` to timestamp `imprint`, a SHA-256 digest
+/// (with a random nonce, the TSA certificate requested). Checks the reply's
+/// status, imprint and nonce, and the token's signature against the
+/// certificate it carries. Whether that TSA is trusted is decided at
+/// verification, like any other signer. Throws leht::Error on any failure.
+TimestampToken request_timestamp(const std::string& url, const Bytes& imprint,
+                                 int timeout_seconds);
+
+struct HttpRequest {
+    std::string url;
+    std::string what;                  ///< "the timestamp authority", for messages
+    const Bytes* post = nullptr;       ///< the body to POST; null means GET
+    const char* content_type = nullptr;
+    const char* expected_type = nullptr;  ///< null: any
+    bool expect_asn1 = false;
+    std::size_t max_size = std::size_t{1} << 20;
+    int timeout_seconds = 20;
+};
+
+/// One HTTP(S) exchange (http.cpp). Throws leht::Error when the URL is not
+/// http(s), the server does not answer, or the reply is empty or too large.
+Bytes http_transfer(const HttpRequest& request);
+
+/// The host part of a URL; empty when it does not parse.
+std::string url_host(const std::string& url);
+
+/// Builds a chain for `leaf` against `trust` at `when`, with `untrusted` as
+/// extra intermediates (verify.cpp). `chain` gets it signer first -- partial
+/// when no chain to a trust anchor could be built -- and `detail` OpenSSL's
+/// reason when the result is not Trusted.
+Trust evaluate_chain(X509* leaf, STACK_OF(X509)* untrusted, const TrustStore& trust,
+                     std::int64_t when, X509StackPtr* chain, std::string* detail);
+
+/// Each certificate of `chain` (signer first) but a self-signed last one,
+/// checked for revocation at `when` against `embedded` and `online`
+/// (revocation.cpp). Empty when both are empty.
+std::vector<RevocationCheck> check_revocation(STACK_OF(X509)* chain, std::int64_t when,
+                                              const RevocationData& embedded,
+                                              const RevocationData& online);
+
+/// The certificates of `data` parsed, those that do not parse skipped, pushed
+/// onto `to` (which owns them).
+void add_certs(const RevocationData& data, STACK_OF(X509)* to);
 
 /// A logged-in session on a PKCS#11 token, holding one private key. Defined
 /// in pkcs11.cpp; the rest of leht::crypto only asks it to sign.

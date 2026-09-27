@@ -92,6 +92,28 @@ struct SignatureRequest {
     bool override_certification = false;
 };
 
+/// Long-term validation data (PAdES B-LT), each item DER: what a document's
+/// /DSS holds. leht::crypto calls it RevocationData.
+struct ValidationData {
+    std::vector<std::vector<std::uint8_t>> certs;
+    std::vector<std::vector<std::uint8_t>> ocsps;  ///< OCSPResponse
+    std::vector<std::vector<std::uint8_t>> crls;   ///< CertificateList
+
+    [[nodiscard]] bool empty() const { return certs.empty() && ocsps.empty() && crls.empty(); }
+};
+
+/// Everything in the document's /DSS: its /Certs, /OCSPs and /CRLs, and those
+/// under /VRI (which other tools write; Leht does not). Empty when there is
+/// none. Capped (count and bytes), since the document is untrusted.
+ValidationData read_dss(const Context& ctx, Document& doc);
+
+/// Appends a revision to the document, into `fd` (empty, read-write), that
+/// adds `data` to its /DSS -- merging with what is there, each item once. It
+/// changes nothing a signature covers, so every signature stays intact and a
+/// certification allows it at any level. Like any incremental save, `doc`
+/// cannot save again afterwards: reopen the file.
+void add_validation_data(const Context& ctx, Document& doc, const ValidationData& data, int fd);
+
 /// The document's certification level (see SignatureRequest::certify): 0 when
 /// it is not certified. What editing it may do without breaking the
 /// certification follows from this.
@@ -107,11 +129,11 @@ struct PreparedSignature {
 /// Any edits made to `doc` before are saved in the same revision, so the
 /// signature covers them.
 ///
-/// The dictionary is PAdES-shaped: /SubFilter /ETSI.CAdES.detached, and no
-/// FieldMDP transform -- M5 signs a document, it does not lock its fields, and
-/// a transform that locks nothing is a claim a validator has to read. A field's
-/// existing /Lock is likewise not enacted. The hole is filled later by
-/// crypto::sign_prepared(); until then the file carries an invalid signature.
+/// The dictionary is PAdES-shaped: /SubFilter /ETSI.CAdES.detached. It gets a
+/// FieldMDP transform only to enact a /Lock the field's author put there, and
+/// a DocMDP one only for a certification; signing never locks fields on its
+/// own. The hole is filled later by crypto::sign_prepared(); until then the
+/// file carries an invalid signature.
 ///
 /// Like any incremental save, this leaves `doc` unable to save again: reopen
 /// the file. Throws leht::Error on a non-PDF, a document that cannot be saved
@@ -119,6 +141,14 @@ struct PreparedSignature {
 /// an unknown or already signed field, or a bad page or box.
 PreparedSignature prepare_signature(const Context& ctx, Document& doc,
                                     const SignatureRequest& request, int fd);
+
+/// Like prepare_signature(), for a document timestamp (PAdES B-LTA): an
+/// invisible signature field whose value is /Type /DocTimeStamp, /SubFilter
+/// /ETSI.RFC3161, and whose hole crypto::timestamp_prepared() fills with an
+/// RFC 3161 token over the whole file. It signs nobody's name; it proves the
+/// file, validation data included, existed at that time.
+PreparedSignature prepare_document_timestamp(const Context& ctx, Document& doc,
+                                             std::size_t reserve, int fd);
 
 /// A signature as the document states it. None of this is verified: the
 /// cryptography is crypto::verify_cms() over `contents` and the bytes
@@ -173,6 +203,15 @@ struct SignatureInfo {
     /// Why not, in words: "the content of page 2 changed", "field 'name' was
     /// changed, but a signature locks it".
     std::vector<std::string> change_problems;
+
+    /// A document timestamp (/Type /DocTimeStamp, /SubFilter /ETSI.RFC3161):
+    /// `contents` is an RFC 3161 token, not a CMS signature -- verify it with
+    /// crypto::verify_document_timestamp().
+    bool document_timestamp = false;
+    /// changed_after_signing, but all that was added is validation data and
+    /// document timestamps: nothing the signature covers, nor anything shown,
+    /// was changed. Callers report it as unchanged.
+    bool only_validation_data_after = false;
 };
 
 /// Every signed signature field, in field order. Unsigned signature fields are

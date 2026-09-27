@@ -11,8 +11,10 @@ pkg_check_modules(P11KIT REQUIRED IMPORTED_TARGET GLOBAL p11-kit-1)
 
 add_library(lehtcrypto
     src/common.cpp
+    src/http.cpp
     src/identity.cpp
     src/pkcs11.cpp
+    src/revocation.cpp
     src/sign.cpp
     src/tsa.cpp
     src/verify.cpp
@@ -40,6 +42,16 @@ if(LEHT_BUILD_TESTS)
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
     add_test(NAME test_crypto COMMAND test_crypto)
 
+    # Revocation (OCSP, CRL) and document timestamps: PAdES B-LT and B-LTA,
+    # against servers on localhost.
+    add_executable(test_revocation tests/test_revocation.cpp)
+    target_link_libraries(test_revocation PRIVATE leht::crypto OpenSSL::Crypto leht::warnings)
+    target_include_directories(test_revocation PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_compile_definitions(test_revocation PRIVATE
+        LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
+    add_test(NAME test_revocation COMMAND test_revocation)
+
     # Both halves of signing on real PDFs, checked by pdfsig and qpdf too.
     add_executable(test_pdf_sign tests/test_pdf_sign.cpp)
     target_link_libraries(test_pdf_sign PRIVATE leht::crypto OpenSSL::Crypto leht::warnings)
@@ -48,6 +60,21 @@ if(LEHT_BUILD_TESTS)
     target_compile_definitions(test_pdf_sign PRIVATE
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
     add_test(NAME test_pdf_sign COMMAND test_pdf_sign)
+
+    # Long-term validation on real PDFs: /DSS and document timestamps.
+    add_executable(test_pdf_ltv tests/test_pdf_ltv.cpp)
+    target_link_libraries(test_pdf_ltv PRIVATE leht::crypto OpenSSL::Crypto leht::warnings)
+    target_include_directories(test_pdf_ltv PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_compile_definitions(test_pdf_ltv PRIVATE
+        LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
+    if(LEHT_BUILD_CLI)
+        # `leht sign --lta`, `leht ltv` and `leht verify --online`, against the
+        # same servers.
+        target_compile_definitions(test_pdf_ltv PRIVATE LEHT_CLI="$<TARGET_FILE:leht_cli>")
+        add_dependencies(test_pdf_ltv leht_cli)
+    endif()
+    add_test(NAME test_pdf_ltv COMMAND test_pdf_ltv)
 
     # Keys on a PKCS#11 token, with SoftHSM2 standing in for the ID card.
     # Skipped (77) where SoftHSM is not installed.
@@ -66,7 +93,7 @@ if(LEHT_BUILD_TESTS)
     set_tests_properties(test_pkcs11 PROPERTIES SKIP_RETURN_CODE 77)
 
     if(LEHT_SANITIZE)
-        set_tests_properties(test_crypto test_pdf_sign test_pkcs11 PROPERTIES
+        set_tests_properties(test_crypto test_revocation test_pdf_sign test_pdf_ltv test_pkcs11 PROPERTIES
             ENVIRONMENT "${LEHT_SANITIZER_ENV}")
     endif()
 endif()

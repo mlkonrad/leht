@@ -223,6 +223,35 @@ enum class Trust {
     Expired,      ///< the signer's (or a chain) certificate had expired by then
     NotYetValid,
     Unknown,      ///< not evaluated: the signature itself did not verify
+    Revoked,      ///< a certificate in the chain was revoked before the signing time
+};
+
+// --- long-term validation (PAdES B-LT) ---------------------------------------
+
+/// Validation data, all DER: what a PDF's /DSS holds (ops::read_dss), or what
+/// was fetched. The same type core writes, so nothing converts between them.
+using RevocationData = ops::ValidationData;
+
+enum class RevocationStatus {
+    Good,     ///< revocation data valid at the time that matters says "not revoked"
+    Revoked,  ///< revoked before that time
+    Unknown,  ///< no usable data: none about it, too old, or not signed by its issuer
+};
+
+/// One certificate of a chain, checked for revocation at the trusted time: the
+/// signature's timestamp when it has a valid one, else the verification time.
+struct RevocationCheck {
+    CertInfo cert;
+    RevocationStatus status = RevocationStatus::Unknown;
+    /// Where the answer came from: "OCSP" or "CRL", then "embedded" (the
+    /// document's /DSS) or "fetched now".
+    std::string source;
+    /// When the data used was issued (OCSP thisUpdate, CRL lastUpdate).
+    std::int64_t data_time = 0;
+    /// When it was revoked: before the trusted time for Revoked; for Good, a
+    /// revocation AFTER that time, which does not undo the signature.
+    std::int64_t revoked_at = 0;
+    std::string problem;  ///< for Unknown: why no data could be used
 };
 
 struct TimestampReport {
@@ -231,6 +260,9 @@ struct TimestampReport {
     CertInfo authority;
     Trust trust = Trust::Unknown;
     std::string problem;        ///< why it is not valid or not trusted
+    /// The authority's chain, checked at genTime. Empty when no revocation
+    /// data at all was given to the verification.
+    std::vector<RevocationCheck> revocation;
 };
 
 struct CmsReport {
@@ -252,6 +284,10 @@ struct CmsReport {
     bool has_signing_certificate_v2 = false;
     bool has_signing_time_attribute = false;
     std::optional<TimestampReport> timestamp;
+    /// The signer's chain (the trust anchor left out), checked for revocation
+    /// at the trusted time. Empty when no revocation data at all was given:
+    /// then revocation was not checked, which is not the same as Unknown.
+    std::vector<RevocationCheck> revocation;
 
     /// Integrity: the bytes are what was signed, by the key in the certificate.
     [[nodiscard]] bool intact() const { return parsed && digest_matches && signature_valid; }
@@ -267,12 +303,89 @@ using ContentReader = std::function<std::size_t(std::uint8_t* buffer, std::size_
 /// reported in the result, never thrown; this only throws if `content` does.
 /// The trust decision is made at the verified timestamp's time when there is
 /// one, else at `now` (Unix seconds; 0 means the current time), and OpenSSL
-/// is only asked about chains -- revocation (OCSP/CRL) is not checked: that is
-/// PAdES B-LT, outside M5.
+/// is asked about chains.
+///
+/// Revocation is checked only against the data given: `embedded` (the
+/// document's /DSS) and `online` (fetched now, see fetch_revocation()). Their
+/// certificates also help build the chain. With neither, `revocation` in the
+/// report stays empty: not checked. A certificate revoked before the trusted
+/// time makes the trust Revoked; one revoked after it does not.
 [[nodiscard]] CmsReport verify_cms(const Bytes& der, const ContentReader& content,
-                                   const TrustStore& trust, std::int64_t now = 0);
+                                   const TrustStore& trust, std::int64_t now = 0,
+                                   const RevocationData& embedded = {},
+                                   const RevocationData& online = {});
+
+/// Verifies a document timestamp (/SubFilter /ETSI.RFC3161): `der` is an RFC
+/// 3161 TimeStampToken whose imprint must be the digest of the bytes `content`
+/// yields. Attacker-controlled like verify_cms(), and likewise reports rather
+/// than throws. The authority is trusted at the token's own time.
+[[nodiscard]] TimestampReport verify_document_timestamp(const Bytes& der,
+                                                        const ContentReader& content,
+                                                        const TrustStore& trust,
+                                                        const RevocationData& embedded = {},
+                                                        const RevocationData& online = {});
 
 /// Certificates as seen in a DER blob, for the details view.
 [[nodiscard]] CertInfo describe_certificate(const Bytes& der);
+
+// --- gathering validation data ------------------------------------------------
+//
+// Three steps, split so that the viewer's sandboxed worker does the parsing and
+// the viewer only moves bytes: revocation_queries() (worker) says what to fetch,
+// fetch_revocation() (trusted side, the only step with network) fetches it
+// without looking inside, and validation_data() (worker) picks what to embed.
+
+struct RevocationQuery {
+    enum class Kind : std::uint8_t { Ocsp, Crl };
+    Kind kind = Kind::Ocsp;
+    std::string url;   ///< http:// or https://, from the certificate itself
+    Bytes request;     ///< the OCSP request (POSTed); empty for a CRL (GET)
+    std::string subject;  ///< whose status this asks, for display
+};
+
+/// What to fetch to check every certificate in the chains of `signatures`
+/// (each a CMS signature or a timestamp token, as DER), the trust anchors left
+/// out: an OCSP request for each certificate whose issuer is known and that
+/// names a responder (AIA), and its CRL distribution points. A signature's own
+/// timestamp authority is included. Hostile DER in, never throws on it.
+[[nodiscard]] std::vector<RevocationQuery> revocation_queries(
+    const std::vector<Bytes>& signatures, const TrustStore& trust,
+    const RevocationData& embedded = {});
+
+struct FetchedRevocation {
+    RevocationQuery::Kind kind = RevocationQuery::Kind::Ocsp;
+    std::string url;
+    Bytes body;         ///< empty when the fetch failed
+    std::string error;  ///< why it failed
+};
+
+/// Network: POSTs each OCSP request and GETs each CRL, one at a time, with no
+/// redirects, http(s) only, and a size cap (1 MB for OCSP, 16 MB for a CRL).
+/// Never looks inside what it fetches. A failure is reported per query.
+[[nodiscard]] std::vector<FetchedRevocation> fetch_revocation(
+    const std::vector<RevocationQuery>& queries, int timeout_seconds = 20);
+
+/// What to embed for `signatures`: their chain certificates (and any OCSP
+/// responder's) and every fetched response that parses -- an OCSP response
+/// with status successful, or a CRL -- leaving out what `embedded` has already.
+[[nodiscard]] RevocationData validation_data(const std::vector<Bytes>& signatures,
+                                             const TrustStore& trust,
+                                             const std::vector<FetchedRevocation>& fetched,
+                                             const RevocationData& embedded = {});
+
+/// Hole size for a document timestamp: a token with the TSA's chain.
+[[nodiscard]] std::size_t estimate_timestamp_size();
+
+struct TimestampResult {
+    std::size_t der_size = 0;
+    std::size_t hole_size = 0;
+    std::int64_t time = 0;  ///< the TSA's
+};
+
+/// Fills a prepared document timestamp's hole (ops::prepare_document_timestamp)
+/// with a token from `options.tsa_url` over the SHA-256 of everything but the
+/// hole. The same check of the hole against the file's bytes as sign_prepared.
+TimestampResult timestamp_prepared(int fd, const ops::ByteRange& range,
+                                   const SignOptions& options);
 
 }  // namespace leht::crypto

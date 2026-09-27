@@ -13,6 +13,7 @@
 #include "mupdf_c.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -324,10 +325,10 @@ FoundWidget find_signature_widget(fz_context* c, Document& doc, const std::strin
     throw Error(0, "no signature field named \"" + name + "\"");
 }
 
-/// A field name not in use: Signature1, Signature2, ...
-std::string unused_name(fz_context* c, pdf_document* pdf) {
+/// A field name not in use: Signature1, Signature2, ... (or Timestamp1, ...)
+std::string unused_name(fz_context* c, pdf_document* pdf, const char* prefix = "Signature") {
     for (int n = 1;; ++n) {
-        const std::string name = "Signature" + std::to_string(n);
+        const std::string name = prefix + std::to_string(n);
         const char* cname = name.c_str();
         bool taken = false;
         guarded(c, [&](fz_context* g) {
@@ -517,6 +518,97 @@ void check_range(fz_context* c, pdf_document* pdf, pdf_obj* br, SignatureInfo& s
 
 }  // namespace
 
+namespace {
+
+/// The end of preparing any signature -- an approval, a certification or a
+/// document timestamp: the hand-written signature dictionary as `wobj`'s /V,
+/// its hole, and the incremental save into `fd`. `more` adds keys after the
+/// ones that must come first. Returns the /ByteRange MuPDF wrote.
+ByteRange write_with_hole(fz_context* c, pdf_document* pdf, Document& doc, pdf_obj* wobj,
+                          std::size_t reserve, const char* subfilter, const char* type,
+                          const std::function<void(fz_context*, pdf_obj*, int)>& more, int fd) {
+    // The signer that leaves a hole.
+    detail::Owned<pdf_pkcs7_signer, release_signer> signer{c};
+    guarded(c, [&](fz_context* g) {
+        auto* h = static_cast<HoleSigner*>(fz_calloc(g, 1, sizeof(HoleSigner)));
+        h->base.keep = hole_keep;
+        h->base.drop = hole_drop;
+        h->base.get_signing_name = hole_name;
+        h->base.max_digest_size = hole_size;
+        h->base.create_digest = hole_digest;
+        h->refs = 1;
+        h->size = reserve;
+        *signer.slot() = &h->base;
+    });
+
+    guarded(c, [&](fz_context* g) {
+        // The document now has signatures, and must only ever be appended to.
+        pdf_obj* form = pdf_dict_getp(g, pdf_trailer(g, pdf), "Root/AcroForm");
+        if (form == nullptr) {
+            pdf_obj* root = pdf_dict_get(g, pdf_trailer(g, pdf), PDF_NAME(Root));
+            form = pdf_dict_put_dict(g, root, PDF_NAME(AcroForm), 1);
+        }
+        const int flags = pdf_dict_get_int(g, form, PDF_NAME(SigFlags));
+        pdf_dict_put_int(g, form, PDF_NAME(SigFlags), flags | 1 | 2);
+
+        // The signature dictionary, written by hand rather than through
+        // pdf_signature_set_value(), for two reasons. It hard-codes
+        // /SubFilter /adbe.pkcs7.detached and adds a FieldMDP /Reference that
+        // locks nothing; and once it has run, every further change to the
+        // document opens a NEW incremental section, which would put the
+        // signature's own revision before the end of the file and leave its
+        // /ByteRange covering only part of it.
+        //
+        // /ByteRange, /Contents and /Filter must be written in that order and
+        // close together: MuPDF finds them by name in the saved bytes to fill
+        // the hole in. Every other key is added after them.
+        pdf_obj* v = nullptr;
+        const int num = pdf_create_object(g, pdf);
+        pdf_dict_put_drop(g, wobj, PDF_NAME(V), pdf_new_indirect(g, pdf, num, 0));
+        v = pdf_new_dict(g, pdf, 8);
+        pdf_update_object(g, pdf, num, v);
+        pdf_drop_obj(g, v);
+        v = pdf_load_object(g, pdf, num);
+        pdf_drop_obj(g, v);  // the xref keeps it
+
+        pdf_dict_put_array(g, v, PDF_NAME(ByteRange), 4);
+        auto* hole = static_cast<char*>(fz_calloc(g, reserve, 1));
+        pdf_dict_put_string(g, v, PDF_NAME(Contents), hole, reserve);
+        fz_free(g, hole);
+        pdf_dict_put(g, v, PDF_NAME(Filter), PDF_NAME(Adobe_PPKLite));
+        pdf_dict_put_name(g, v, PDF_NAME(SubFilter), subfilter);
+        pdf_dict_put_name(g, v, PDF_NAME(Type), type);
+        more(g, v, num);
+        // From here MuPDF owns the completion: at save time it rewrites
+        // /ByteRange with the real offsets and asks the signer for the blob.
+        pdf_xref_store_unsaved_signature(g, pdf, wobj, signer.get());
+    });
+
+    SaveOptions opts;
+    opts.mode = SaveOptions::Mode::Incremental;
+    doc.save_fd(fd, opts);
+
+    // MuPDF rewrote /ByteRange with the real offsets while saving.
+    std::int64_t r[4] = {0, 0, 0, 0};
+    int len = 0;
+    guarded(c, [&](fz_context* g) {
+        pdf_obj* br = pdf_dict_getl(g, pdf_dict_get_inheritable(g, wobj, PDF_NAME(V)),
+                                    PDF_NAME(ByteRange), nullptr);
+        len = pdf_array_len(g, br);
+        for (int i = 0; i < 4 && i < len; ++i) {
+            r[i] = pdf_array_get_int(g, br, i);
+        }
+    });
+    if (len != 4) {
+        throw Error(0, "MuPDF did not write a two-span byte range");
+    }
+    ByteRange out;
+    out.v = {r[0], r[1], r[2], r[3]};
+    return out;
+}
+
+}  // namespace
+
 PreparedSignature prepare_signature(const Context& ctx, Document& doc,
                                     const SignatureRequest& request, int fd) {
     fz_context* c = ctx.raw();
@@ -603,20 +695,6 @@ PreparedSignature prepare_signature(const Context& ctx, Document& doc,
         list = build_appearance(c, rect, appearance);
     }
 
-    // The signer that leaves a hole.
-    detail::Owned<pdf_pkcs7_signer, release_signer> signer{c};
-    const std::size_t reserve = request.reserve;
-    guarded(c, [&](fz_context* g) {
-        auto* h = static_cast<HoleSigner*>(fz_calloc(g, 1, sizeof(HoleSigner)));
-        h->base.keep = hole_keep;
-        h->base.drop = hole_drop;
-        h->base.get_signing_name = hole_name;
-        h->base.max_digest_size = hole_size;
-        h->base.create_digest = hole_digest;
-        h->refs = 1;
-        h->size = reserve;
-        *signer.slot() = &h->base;
-    });
 
     // The field's own /Lock, set by the form's author: enacted with this
     // signature (FieldMDP), and its fields made read-only.
@@ -650,121 +728,115 @@ PreparedSignature prepare_signature(const Context& ctx, Document& doc,
     const char* reason = request.reason.empty() ? nullptr : request.reason.c_str();
     const char* location = request.location.empty() ? nullptr : request.location.c_str();
     fz_display_list* appearance_list = list.get();
+    pdf_obj* wobj = nullptr;
     guarded(c, [&](fz_context* g) {
-        pdf_obj* wobj = pdf_annot_obj(g, target.widget.get());
+        wobj = pdf_annot_obj(g, target.widget.get());
         pdf_dirty_annot(g, target.widget.get());
         if (appearance_list != nullptr) {
             pdf_set_annot_appearance_from_display_list(g, target.widget.get(), "N", nullptr,
                                                        fz_identity, appearance_list);
         }
-        // The document now has signatures, and must only ever be appended to.
-        pdf_obj* form = pdf_dict_getp(g, pdf_trailer(g, pdf), "Root/AcroForm");
-        if (form == nullptr) {
-            pdf_obj* root = pdf_dict_get(g, pdf_trailer(g, pdf), PDF_NAME(Root));
-            form = pdf_dict_put_dict(g, root, PDF_NAME(AcroForm), 1);
-        }
-        const int flags = pdf_dict_get_int(g, form, PDF_NAME(SigFlags));
-        pdf_dict_put_int(g, form, PDF_NAME(SigFlags), flags | 1 | 2);
-
-        // The signature dictionary, written by hand rather than through
-        // pdf_signature_set_value(), for two reasons. It hard-codes
-        // /SubFilter /adbe.pkcs7.detached and adds a FieldMDP /Reference that
-        // locks nothing; and once it has run, every further change to the
-        // document opens a NEW incremental section, which would put the
-        // signature's own revision before the end of the file and leave its
-        // /ByteRange covering only part of it.
-        //
-        // /ByteRange, /Contents and /Filter must be written in that order and
-        // close together: MuPDF finds them by name in the saved bytes to fill
-        // the hole in. Every other key is added after them.
-        pdf_obj* v = nullptr;
-        const int num = pdf_create_object(g, pdf);
-        pdf_dict_put_drop(g, wobj, PDF_NAME(V), pdf_new_indirect(g, pdf, num, 0));
-        v = pdf_new_dict(g, pdf, 8);
-        pdf_update_object(g, pdf, num, v);
-        pdf_drop_obj(g, v);
-        v = pdf_load_object(g, pdf, num);
-        pdf_drop_obj(g, v);  // the xref keeps it
-
-        pdf_dict_put_array(g, v, PDF_NAME(ByteRange), 4);
-        auto* hole = static_cast<char*>(fz_calloc(g, reserve, 1));
-        pdf_dict_put_string(g, v, PDF_NAME(Contents), hole, reserve);
-        fz_free(g, hole);
-        pdf_dict_put(g, v, PDF_NAME(Filter), PDF_NAME(Adobe_PPKLite));
-        pdf_dict_put_name(g, v, PDF_NAME(SubFilter), "ETSI.CAdES.detached");
-        pdf_dict_put(g, v, PDF_NAME(Type), PDF_NAME(Sig));
-        pdf_dict_put_date(g, v, PDF_NAME(M), when);
-        if (sig_name != nullptr) {
-            pdf_dict_put_text_string(g, v, PDF_NAME(Name), sig_name);
-        }
-        if (reason != nullptr) {
-            pdf_dict_put_text_string(g, v, PDF_NAME(Reason), reason);
-        }
-        if (location != nullptr) {
-            pdf_dict_put_text_string(g, v, PDF_NAME(Location), location);
-        }
-        // What this signature certifies (DocMDP) and locks (FieldMDP), as
-        // signature references: what validators read.
-        if (certify > 0 || enact_lock) {
-            pdf_obj* refs = pdf_dict_put_array(g, v, PDF_NAME(Reference), 2);
-            if (certify > 0) {
-                pdf_obj* r = pdf_array_push_dict(g, refs, 3);
-                pdf_dict_put(g, r, PDF_NAME(Type), PDF_NAME(SigRef));
-                pdf_dict_put(g, r, PDF_NAME(TransformMethod), PDF_NAME(DocMDP));
-                pdf_obj* tp = pdf_dict_put_dict(g, r, PDF_NAME(TransformParams), 3);
-                pdf_dict_put(g, tp, PDF_NAME(Type), PDF_NAME(TransformParams));
-                pdf_dict_put_int(g, tp, PDF_NAME(P), certify);
-                pdf_dict_put_name(g, tp, PDF_NAME(V), "1.2");
-                // The catalog names the certifying signature.
-                pdf_obj* root = pdf_dict_get(g, pdf_trailer(g, pdf), PDF_NAME(Root));
-                pdf_obj* perms = pdf_dict_get(g, root, PDF_NAME(Perms));
-                if (perms == nullptr) {
-                    perms = pdf_dict_put_dict(g, root, PDF_NAME(Perms), 1);
-                }
-                pdf_dict_put_drop(g, perms, PDF_NAME(DocMDP), pdf_new_indirect(g, pdf, num, 0));
-            }
-            if (enact_lock) {
-                pdf_obj* r = pdf_array_push_dict(g, refs, 3);
-                pdf_dict_put(g, r, PDF_NAME(Type), PDF_NAME(SigRef));
-                pdf_dict_put(g, r, PDF_NAME(TransformMethod), PDF_NAME(FieldMDP));
-                pdf_obj* tp = pdf_dict_put_dict(g, r, PDF_NAME(TransformParams), 4);
-                pdf_dict_put(g, tp, PDF_NAME(Type), PDF_NAME(TransformParams));
-                pdf_dict_put(g, tp, PDF_NAME(Action), pdf_dict_get(g, lock_spec, PDF_NAME(Action)));
-                if (pdf_obj* fields = pdf_dict_get(g, lock_spec, PDF_NAME(Fields))) {
-                    pdf_dict_put(g, tp, PDF_NAME(Fields), fields);
-                }
-                pdf_dict_put_name(g, tp, PDF_NAME(V), "1.2");
-            }
-        }
-        // From here MuPDF owns the completion: at save time it rewrites
-        // /ByteRange with the real offsets and asks the signer for the blob.
-        pdf_xref_store_unsaved_signature(g, pdf, wobj, signer.get());
     });
-
-    pdf_obj* wobj = nullptr;
-    guarded(c, [&](fz_context* g) { wobj = pdf_annot_obj(g, target.widget.get()); });
     PreparedSignature out;
     out.field = field_name(c, wobj);
+    out.range = write_with_hole(
+        c, pdf, doc, wobj, request.reserve, "ETSI.CAdES.detached", "Sig",
+        [&](fz_context* g, pdf_obj* v, int num) {
+            pdf_dict_put_date(g, v, PDF_NAME(M), when);
+            if (sig_name != nullptr) {
+                pdf_dict_put_text_string(g, v, PDF_NAME(Name), sig_name);
+            }
+            if (reason != nullptr) {
+                pdf_dict_put_text_string(g, v, PDF_NAME(Reason), reason);
+            }
+            if (location != nullptr) {
+                pdf_dict_put_text_string(g, v, PDF_NAME(Location), location);
+            }
+            // What this signature certifies (DocMDP) and locks (FieldMDP), as
+            // signature references: what validators read.
+            if (certify > 0 || enact_lock) {
+                pdf_obj* refs = pdf_dict_put_array(g, v, PDF_NAME(Reference), 2);
+                if (certify > 0) {
+                    pdf_obj* r = pdf_array_push_dict(g, refs, 3);
+                    pdf_dict_put(g, r, PDF_NAME(Type), PDF_NAME(SigRef));
+                    pdf_dict_put(g, r, PDF_NAME(TransformMethod), PDF_NAME(DocMDP));
+                    pdf_obj* tp = pdf_dict_put_dict(g, r, PDF_NAME(TransformParams), 3);
+                    pdf_dict_put(g, tp, PDF_NAME(Type), PDF_NAME(TransformParams));
+                    pdf_dict_put_int(g, tp, PDF_NAME(P), certify);
+                    pdf_dict_put_name(g, tp, PDF_NAME(V), "1.2");
+                    // The catalog names the certifying signature.
+                    pdf_obj* root = pdf_dict_get(g, pdf_trailer(g, pdf), PDF_NAME(Root));
+                    pdf_obj* perms = pdf_dict_get(g, root, PDF_NAME(Perms));
+                    if (perms == nullptr) {
+                        perms = pdf_dict_put_dict(g, root, PDF_NAME(Perms), 1);
+                    }
+                    pdf_dict_put_drop(g, perms, PDF_NAME(DocMDP),
+                                      pdf_new_indirect(g, pdf, num, 0));
+                }
+                if (enact_lock) {
+                    pdf_obj* r = pdf_array_push_dict(g, refs, 3);
+                    pdf_dict_put(g, r, PDF_NAME(Type), PDF_NAME(SigRef));
+                    pdf_dict_put(g, r, PDF_NAME(TransformMethod), PDF_NAME(FieldMDP));
+                    pdf_obj* tp = pdf_dict_put_dict(g, r, PDF_NAME(TransformParams), 4);
+                    pdf_dict_put(g, tp, PDF_NAME(Type), PDF_NAME(TransformParams));
+                    pdf_dict_put(g, tp, PDF_NAME(Action),
+                                 pdf_dict_get(g, lock_spec, PDF_NAME(Action)));
+                    if (pdf_obj* fields = pdf_dict_get(g, lock_spec, PDF_NAME(Fields))) {
+                        pdf_dict_put(g, tp, PDF_NAME(Fields), fields);
+                    }
+                    pdf_dict_put_name(g, tp, PDF_NAME(V), "1.2");
+                }
+            }
+        },
+        fd);
+    return out;
+}
 
-    SaveOptions opts;
-    opts.mode = SaveOptions::Mode::Incremental;
-    doc.save_fd(fd, opts);
-
-    // MuPDF rewrote /ByteRange with the real offsets while saving.
-    std::int64_t r[4] = {0, 0, 0, 0};
-    int len = 0;
-    guarded(c, [&](fz_context* g) {
-        pdf_obj* br = pdf_dict_getl(g, pdf_dict_get_inheritable(g, wobj, PDF_NAME(V)),
-                                    PDF_NAME(ByteRange), nullptr);
-        len = pdf_array_len(g, br);
-        for (int i = 0; i < 4 && i < len; ++i) {
-            r[i] = pdf_array_get_int(g, br, i);
-        }
-    });
-    if (len != 4) {
-        throw Error(0, "MuPDF did not write a two-span byte range");
+PreparedSignature prepare_document_timestamp(const Context& ctx, Document& doc,
+                                             std::size_t reserve, int fd) {
+    fz_context* c = ctx.raw();
+    pdf_document* pdf = detail::require_pdf(c, doc);
+    if (!doc.can_save_incrementally()) {
+        throw Error(0, "this document was repaired when opened or redacted; save it in full "
+                       "first -- though that would break any signatures it has");
     }
-    out.range.v = {r[0], r[1], r[2], r[3]};
+    if (reserve < 1024 || reserve > kMaxReserve) {
+        throw Error(0, "the timestamp reserve must be between 1 KB and 1 MB");
+    }
+    if (doc.page_count() < 1) {
+        throw Error(0, "the document has no pages");
+    }
+    // An invisible field on the first page, like an invisible signature.
+    detail::OwnedPage page = detail::load_pdf_page(c, doc, 0);
+    pdf_page* p = detail::as_pdf_page(c, page);
+    std::string name = unused_name(c, pdf, "Timestamp");
+    char* cname = name.data();
+    OwnedAnnot widget{c};
+    pdf_obj* wobj = nullptr;
+    guarded(c, [&](fz_context* g) {
+        *widget.slot() = pdf_create_signature_widget(g, p, cname);
+        wobj = pdf_annot_obj(g, widget.get());
+        pdf_set_annot_rect(g, widget.get(), fz_make_rect(0, 0, 0, 0));
+        pdf_dict_del(g, wobj, PDF_NAME(Lock));
+        pdf_dict_put_int(g, wobj, PDF_NAME(F), PDF_ANNOT_IS_HIDDEN | PDF_ANNOT_IS_LOCKED);
+        // An explicit, empty appearance. Without one MuPDF, which does not
+        // count a /DocTimeStamp value as signed, draws an "unsigned
+        // signature" look for the field while saving -- after the hole is
+        // written, in a second incremental section the byte range then
+        // leaves out.
+        fz_display_list* empty = fz_new_display_list(g, fz_make_rect(0, 0, 0, 0));
+        fz_try(g) {
+            pdf_set_annot_appearance_from_display_list(g, widget.get(), "N", nullptr, fz_identity,
+                                                       empty);
+        }
+        fz_always(g) { fz_drop_display_list(g, empty); }
+        fz_catch(g) { fz_rethrow(g); }
+    });
+    PreparedSignature out;
+    out.field = field_name(c, wobj);
+    // No /M, /Name or /Reason: the token carries the time, and nobody signs.
+    out.range = write_with_hole(c, pdf, doc, wobj, reserve, "ETSI.RFC3161", "DocTimeStamp",
+                                [](fz_context*, pdf_obj*, int) {}, fd);
     return out;
 }
 
@@ -868,6 +940,8 @@ std::vector<SignatureInfo> list_signatures(const Context& ctx, Document& doc) {
         }
         s.filter = name_of(c, v, PDF_NAME(Filter));
         s.subfilter = name_of(c, v, PDF_NAME(SubFilter));
+        s.document_timestamp =
+            s.subfilter == "ETSI.RFC3161" || name_of(c, v, PDF_NAME(Type)) == "DocTimeStamp";
         s.name = text_of(c, v, PDF_NAME(Name));
         s.reason = text_of(c, v, PDF_NAME(Reason));
         s.location = text_of(c, v, PDF_NAME(Location));
@@ -911,16 +985,29 @@ std::vector<SignatureInfo> list_signatures(const Context& ctx, Document& doc) {
         dicts.push_back(v);
         field_locks.push_back(std::move(lock));
     }
-    // Which signatures' later bytes another signature signs as well.
+    // Which signatures' later bytes another signature signs as well. A
+    // document timestamp covers them too, but vouches for nothing but the
+    // time: it is not somebody signing for the changes.
     for (SignatureInfo& s : out) {
         if (!s.range_ok || !s.changed_after_signing) {
             continue;
         }
         for (const SignatureInfo& other : out) {
-            if (other.range_ok && other.range.end() > s.range.end()) {
+            if (other.range_ok && !other.document_timestamp && other.range.end() > s.range.end()) {
                 s.later_signature_covers_changes = true;
                 break;
             }
+        }
+    }
+
+    // Whether all that came after is long-term validation data: a /DSS and
+    // document timestamps. Judged as a no-changes certification would judge
+    // it, which allows exactly those.
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        SignatureInfo& s = out[i];
+        if (s.range_ok && s.changed_after_signing) {
+            s.only_validation_data_after =
+                mdp::judge_changes_after(c, pdf, dicts[i], 1, {}).problems.empty();
         }
     }
 

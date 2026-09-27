@@ -135,6 +135,45 @@ std::string field_name(fz_context* c, pdf_obj* obj) {
     return out;
 }
 
+/// Whether `field`'s value is a document timestamp (PAdES B-LTA), which a
+/// certification allows at every level, like the /DSS it protects.
+bool is_document_timestamp(fz_context* g, pdf_obj* field) {
+    pdf_obj* v = pdf_dict_get_inheritable(g, field, PDF_NAME(V));
+    const char* type = pdf_to_name(g, pdf_dict_get(g, v, PDF_NAME(Type)));
+    const char* sub = pdf_to_name(g, pdf_dict_get(g, v, PDF_NAME(SubFilter)));
+    return (type != nullptr && std::strcmp(type, "DocTimeStamp") == 0) ||
+           (sub != nullptr && std::strcmp(sub, "ETSI.RFC3161") == 0);
+}
+
+/// Object numbers that belong to the document's /DSS: the dictionary itself
+/// and any indirect arrays or /VRI entries in it. Recognised by the catalog's
+/// reference, not by /Type, which other tools leave out.
+std::set<int> dss_objects(fz_context* g, pdf_document* pdf) {
+    std::set<int> out;
+    pdf_obj* dss = pdf_dict_getp(g, pdf_trailer(g, pdf), "Root/DSS");
+    if (dss == nullptr) {
+        return out;
+    }
+    const auto note = [&](pdf_obj* o) {
+        if (pdf_is_indirect(g, o)) {
+            out.insert(pdf_to_num(g, o));
+        }
+    };
+    note(dss);
+    for (const char* key : {"Certs", "OCSPs", "CRLs", "VRI"}) {
+        note(pdf_dict_gets(g, dss, key));
+    }
+    pdf_obj* vri = pdf_dict_gets(g, dss, "VRI");
+    for (int i = 0; i < pdf_dict_len(g, vri) && i < 10000; ++i) {
+        pdf_obj* entry = pdf_dict_get_val(g, vri, i);
+        note(entry);
+        for (const char* key : {"Cert", "OCSP", "CRL"}) {
+            note(pdf_dict_gets(g, entry, key));
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 bool Lock::covers(const std::string& field) const {
@@ -259,8 +298,10 @@ Judgement judge_changes_after(fz_context* c, pdf_document* pdf, pdf_obj* sig, in
         std::map<int, int> appearance_of;  // stream -> annotation object
         std::set<int> annots;
         std::set<int> widgets;
+        std::set<int> dss;
         guarded(c, [&](fz_context* g) {
             pdf->xref_base = 0;
+            dss = dss_objects(g, pdf);
             const int pages = pdf_count_pages(g, pdf);
             for (int i = 0; i < pages; ++i) {
                 pdf_obj* page = pdf_lookup_page_obj(g, pdf, i);
@@ -356,6 +397,8 @@ Judgement judge_changes_after(fz_context* c, pdf_document* pdf, pdf_obj* sig, in
             if (num == info || num == encrypt || type == "XRef" || type == "ObjStm" ||
                 type == "Metadata") {
                 ch.role = Role::Ignored;
+            } else if (dss.count(num) != 0) {
+                ch.role = Role::Dss;
             } else if (num == catalog) {
                 ch.role = Role::Catalog;
             } else if (num == acroform) {
@@ -372,7 +415,8 @@ Judgement judge_changes_after(fz_context* c, pdf_document* pdf, pdf_obj* sig, in
                 ch.role = Role::Annotation;
             } else if (field) {
                 ch.role = Role::Field;
-            } else if (type == "DSS" || type == "VRI" || type == "DocTimeStamp") {
+            } else if (dss.count(num) != 0 || type == "DSS" || type == "VRI" ||
+                       type == "DocTimeStamp") {
                 ch.role = Role::Dss;
             }
             changes.push_back(std::move(ch));
@@ -396,7 +440,12 @@ Judgement judge_changes_after(fz_context* c, pdf_document* pdf, pdf_obj* sig, in
                 forbid(what + ", which the certification does not allow");
             }
         };
-        const auto signature_added = [&](const std::string& field) {
+        const auto signature_added = [&](const std::string& field, pdf_obj* obj) {
+            bool timestamp = false;
+            guarded(c, [&](fz_context* g) { timestamp = is_document_timestamp(g, obj); });
+            if (timestamp) {
+                return;  // validation data: allowed at every level
+            }
             if (level == 1) {
                 forbid("signature '" + field +
                        "' was added, and the certification allows no changes");
@@ -407,7 +456,7 @@ Judgement judge_changes_after(fz_context* c, pdf_document* pdf, pdf_obj* sig, in
             std::string type;
             guarded(c, [&](fz_context* g) { type = field_type(g, obj); });
             if (type == "Sig") {
-                signature_added(name);
+                signature_added(name, obj);
                 return;
             }
             if (level == 1) {
@@ -458,10 +507,12 @@ Judgement judge_changes_after(fz_context* c, pdf_document* pdf, pdf_obj* sig, in
                                 type = field_type(g, added);
                             });
                             const std::string name = field_name(c, added);
+                            const bool is_sig = type == "Sig";
+                            if (is_sig) {
+                                signature_added(name, added);
+                            }
                             guarded(c, [&](fz_context* g) { pdf_drop_obj(g, added); });
-                            if (type == "Sig") {
-                                signature_added(name);
-                            } else {
+                            if (!is_sig) {
                                 forbid("form field '" + name + "' was added");
                             }
                         }
@@ -510,10 +561,12 @@ Judgement judge_changes_after(fz_context* c, pdf_document* pdf, pdf_obj* sig, in
                                 type = field_type(g, w);
                             });
                             const std::string name = field_name(c, w);
+                            const bool is_sig = type == "Sig";
+                            if (is_sig) {
+                                signature_added(name, w);
+                            }
                             guarded(c, [&](fz_context* g) { pdf_drop_obj(g, w); });
-                            if (type == "Sig") {
-                                signature_added(name);
-                            } else {
+                            if (!is_sig) {
                                 forbid("a form field was added on " + where);
                             }
                         } else {

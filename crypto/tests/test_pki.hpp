@@ -3,8 +3,9 @@
 // A throwaway PKI for tests, generated fresh on every run through OpenSSL
 // directly, so no private key is ever committed: a root CA, signer
 // certificates with RSA and ECDSA keys, deliberately broken ones, and a
-// timestamp authority -- plus a TSA server on localhost that answers RFC 3161
-// requests, so B-T signing is tested without the network.
+// timestamp authority -- plus servers on localhost that answer RFC 3161
+// timestamp requests, OCSP requests and CRL downloads, so B-T and B-LT signing
+// are tested without the network.
 #pragma once
 
 #include "leht/crypto/crypto.hpp"
@@ -13,6 +14,7 @@
 #include <openssl/ec.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/ocsp.h>
 #include <openssl/pem.h>
 #include <openssl/pkcs12.h>
 #include <openssl/rand.h>
@@ -30,7 +32,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -96,6 +100,8 @@ struct CertSpec {
     long valid_to_days = 365;
     const char* key_usage = "critical,digitalSignature,nonRepudiation";
     const char* ext_key_usage = nullptr;
+    std::string ocsp_url{};  ///< authorityInfoAccess OCSP, when set
+    std::string crl_url{};   ///< crlDistributionPoints, when set
 };
 
 /// Issues a certificate for `key` from `issuer` (self-signed when null).
@@ -134,6 +140,12 @@ inline Cert issue(const Key& key, const CertSpec& spec, const Cert* issuer = nul
         add(NID_ext_key_usage, spec.ext_key_usage);
     }
     add(NID_subject_key_identifier, "hash");
+    if (!spec.ocsp_url.empty()) {
+        add(NID_info_access, ("OCSP;URI:" + spec.ocsp_url).c_str());
+    }
+    if (!spec.crl_url.empty()) {
+        add(NID_crl_distribution_points, ("URI:" + spec.crl_url).c_str());
+    }
     if (X509_sign(c, issuer_key != nullptr ? issuer_key->p : key.p, EVP_sha256()) == 0) {
         die("X509_sign");
     }
@@ -187,47 +199,61 @@ struct Pki {
     }
 };
 
-/// An RFC 3161 timestamp authority on 127.0.0.1, one request per connection,
-/// in a background thread. Good enough for tests; not a server.
-class LocalTsa {
+/// A one-request-per-connection HTTP server on 127.0.0.1, in a background
+/// thread. Good enough for tests; not a server.
+class LocalHttp {
 public:
-    LocalTsa(const Key& key, const Cert& cert, const Cert& ca) : key_(key), cert_(cert), ca_(ca) {
+    LocalHttp() {
         fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         socklen_t len = sizeof(addr);
         if (fd_ < 0 || ::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
-            ::listen(fd_, 4) != 0 ||
+            ::listen(fd_, 8) != 0 ||
             ::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-            die("TSA socket");
+            die("HTTP socket");
         }
         port_ = ntohs(addr.sin_port);
-        thread_ = std::thread([this] { serve(); });
     }
-    LocalTsa(const LocalTsa&) = delete;
-    LocalTsa& operator=(const LocalTsa&) = delete;
-    ~LocalTsa() {
-        stop_ = true;
-        ::shutdown(fd_, SHUT_RDWR);
-        ::close(fd_);
-        thread_.join();
+    LocalHttp(const LocalHttp&) = delete;
+    LocalHttp& operator=(const LocalHttp&) = delete;
+    virtual ~LocalHttp() { stop(); }
+
+    [[nodiscard]] std::string base() const {
+        return "http://127.0.0.1:" + std::to_string(port_);
+    }
+    /// Requests served so far.
+    [[nodiscard]] int served() const { return served_; }
+    /// From now on, hang up on every request without a word: a server that is
+    /// down. Unlike stop(), the port stays taken -- a freed port can be bound
+    /// by another test's server at once, which would then answer instead.
+    void hang_up() { hang_up_ = true; }
+    /// Stop answering: what a responder that has gone away looks like.
+    void stop() {
+        if (fd_ >= 0) {
+            stop_ = true;
+            ::shutdown(fd_, SHUT_RDWR);
+            ::close(fd_);
+            fd_ = -1;
+        }
+        if (thread_.joinable()) {
+            thread_.join();
+        }
     }
 
-    [[nodiscard]] std::string url() const {
-        return "http://127.0.0.1:" + std::to_string(port_) + "/tsa";
-    }
-    /// Answer with a wrong nonce from now on: a replayed reply.
-    void corrupt_nonce() { corrupt_nonce_ = true; }
+protected:
+    /// Derived classes call this once they are fully constructed.
+    void start() { thread_ = std::thread([this] { serve(); }); }
+
+    struct Reply {
+        std::string type;
+        std::string body;  ///< empty: answer 404
+    };
+    virtual Reply answer(const std::string& method, const std::string& path,
+                         const std::string& body) = 0;
 
 private:
-    static ASN1_INTEGER* serial_cb(TS_RESP_CTX*, void*) {
-        static std::atomic<long> n{1};
-        ASN1_INTEGER* i = ASN1_INTEGER_new();
-        ASN1_INTEGER_set(i, n++);
-        return i;
-    }
-
     void serve() {
         while (!stop_) {
             const int c = ::accept4(fd_, nullptr, nullptr, SOCK_CLOEXEC);
@@ -254,17 +280,63 @@ private:
                 const std::size_t cl = in.find("Content-Length:");
                 const std::size_t cl2 = in.find("content-length:");
                 const std::size_t at = cl != std::string::npos ? cl : cl2;
-                if (at == std::string::npos) {
-                    return;
-                }
-                want = head + 4 + std::strtoul(in.c_str() + at + 15, nullptr, 10);
+                // No body announced: a GET.
+                want = at == std::string::npos
+                           ? head + 4
+                           : head + 4 + std::strtoul(in.c_str() + at + 15, nullptr, 10);
             }
             if (want != std::string::npos && in.size() >= want) {
                 break;
             }
         }
-        const std::string body = in.substr(in.find("\r\n\r\n") + 4);
+        if (hang_up_) {
+            return;
+        }
+        const std::size_t sp = in.find(' ');
+        const std::size_t sp2 = in.find(' ', sp + 1);
+        const std::string method = in.substr(0, sp);
+        const std::string path = in.substr(sp + 1, sp2 - sp - 1);
+        const Reply r = answer(method, path, in.substr(in.find("\r\n\r\n") + 4));
+        ++served_;
+        const std::string head =
+            r.body.empty() ? std::string("HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                           : "HTTP/1.0 200 OK\r\nContent-Type: " + r.type +
+                                 "\r\nContent-Length: " + std::to_string(r.body.size()) +
+                                 "\r\n\r\n";
+        (void)!::write(c, head.data(), head.size());
+        (void)!::write(c, r.body.data(), r.body.size());
+    }
 
+    int fd_ = -1;
+    int port_ = 0;
+    std::atomic<bool> stop_{false};
+    std::atomic<int> served_{0};
+    std::atomic<bool> hang_up_{false};
+    std::thread thread_;
+};
+
+/// An RFC 3161 timestamp authority on 127.0.0.1.
+class LocalTsa : public LocalHttp {
+public:
+    LocalTsa(const Key& key, const Cert& cert, const Cert& ca) : key_(key), cert_(cert), ca_(ca) {
+        start();
+    }
+    ~LocalTsa() override { stop(); }
+
+    [[nodiscard]] std::string url() const { return base() + "/tsa"; }
+    /// Answer with a wrong nonce from now on: a replayed reply.
+    void corrupt_nonce() { corrupt_nonce_ = true; }
+
+private:
+    static ASN1_INTEGER* serial_cb(TS_RESP_CTX*, void*) {
+        static std::atomic<long> n{1};
+        ASN1_INTEGER* i = ASN1_INTEGER_new();
+        ASN1_INTEGER_set(i, n++);
+        return i;
+    }
+
+    Reply answer(const std::string& /*method*/, const std::string& /*path*/,
+                 const std::string& body) override {
         TS_RESP_CTX* ctx = TS_RESP_CTX_new();
         TS_RESP_CTX_set_signer_cert(ctx, cert_.p);
         TS_RESP_CTX_set_signer_key(ctx, key_.p);
@@ -304,23 +376,209 @@ private:
         TS_RESP_free(resp);
         TS_RESP_CTX_free(ctx);
         if (n <= 0) {
-            return;
+            return {};
         }
-        const std::string head = "HTTP/1.0 200 OK\r\nContent-Type: application/timestamp-reply\r\n"
-                                 "Content-Length: " + std::to_string(n) + "\r\n\r\n";
-        (void)!::write(c, head.data(), head.size());
-        (void)!::write(c, der, static_cast<std::size_t>(n));
+        Reply out{"application/timestamp-reply",
+                  std::string(reinterpret_cast<char*>(der), static_cast<std::size_t>(n))};
         OPENSSL_free(der);
+        return out;
     }
 
     const Key& key_;
     const Cert& cert_;
     const Cert& ca_;
-    int fd_ = -1;
-    int port_ = 0;
-    std::atomic<bool> stop_{false};
     std::atomic<bool> corrupt_nonce_{false};
-    std::thread thread_;
+};
+
+/// A CA's revocation services on 127.0.0.1: an OCSP responder (POST /ocsp)
+/// and a CRL (GET /crl), for the certificates `ca` issued. Certificates are
+/// revoked by serial, at a chosen time; how the responder signs, and how old
+/// its answers are, can be set to test what a verifier must refuse.
+class LocalRevocation : public LocalHttp {
+public:
+    /// Who signs the OCSP responses.
+    enum class Signer {
+        Issuer,         ///< the CA itself
+        Delegated,      ///< a certificate the CA issued with id-kp-OCSPSigning
+        DelegatedNoEku, ///< the same, without that purpose: must be refused
+        Stranger,       ///< a key the CA never certified: must be refused
+    };
+
+    LocalRevocation(const Key& ca_key, const Cert& ca) : ca_key_(ca_key), ca_(ca) { start(); }
+    ~LocalRevocation() override { stop(); }
+
+    [[nodiscard]] std::string ocsp_url() const { return base() + "/ocsp"; }
+    [[nodiscard]] std::string crl_url() const { return base() + "/crl"; }
+
+    /// Revoke `cert` as of `at` (Unix seconds).
+    void revoke(const Cert& cert, std::int64_t at) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        revoked_[serial(cert)] = at;
+    }
+    void sign_as(Signer s) { signer_ = s; }
+    /// Answers issued `age` seconds ago, valid for `validity` seconds.
+    void answers(long age, long validity) {
+        age_ = age;
+        validity_ = validity;
+    }
+    /// Answer OCSP requests with nothing (a responder that is down); CRLs
+    /// are still served.
+    void ocsp_down(bool down) { ocsp_down_ = down; }
+
+    /// A CRL as the server would serve it now, as DER.
+    [[nodiscard]] crypto::Bytes crl() const {
+        const std::string s = make_crl();
+        return {s.begin(), s.end()};
+    }
+
+private:
+    static long serial(const Cert& c) { return ASN1_INTEGER_get(X509_get0_serialNumber(c.p)); }
+
+    Reply answer(const std::string& method, const std::string& path,
+                 const std::string& body) override {
+        if (method == "GET" && path == "/crl") {
+            return {"application/pkix-crl", make_crl()};
+        }
+        if (method == "POST" && path == "/ocsp" && !ocsp_down_) {
+            return {"application/ocsp-response", make_ocsp(body)};
+        }
+        return {};
+    }
+
+    std::string make_crl() const {
+        X509_CRL* crl = X509_CRL_new();
+        X509_CRL_set_version(crl, 1);
+        X509_CRL_set_issuer_name(crl, X509_get_subject_name(ca_.p));
+        ASN1_TIME* t = ASN1_TIME_new();
+        X509_gmtime_adj(t, -age_);
+        X509_CRL_set1_lastUpdate(crl, t);
+        X509_gmtime_adj(t, validity_ - age_);
+        X509_CRL_set1_nextUpdate(crl, t);
+        {
+            const std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& [serial, at] : revoked_) {
+                X509_REVOKED* r = X509_REVOKED_new();
+                ASN1_INTEGER* sn = ASN1_INTEGER_new();
+                ASN1_INTEGER_set(sn, serial);
+                X509_REVOKED_set_serialNumber(r, sn);
+                ASN1_INTEGER_free(sn);
+                ASN1_TIME_set(t, static_cast<time_t>(at));
+                X509_REVOKED_set_revocationDate(r, t);
+                X509_CRL_add0_revoked(crl, r);
+            }
+        }
+        ASN1_TIME_free(t);
+        X509_CRL_sort(crl);
+        X509_CRL_sign(crl, ca_key_.p, EVP_sha256());
+        unsigned char* der = nullptr;
+        const int n = i2d_X509_CRL(crl, &der);
+        X509_CRL_free(crl);
+        std::string out(reinterpret_cast<char*>(der), static_cast<std::size_t>(n));
+        OPENSSL_free(der);
+        return out;
+    }
+
+    std::string make_ocsp(const std::string& body) const {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(body.data());
+        OCSP_REQUEST* req = d2i_OCSP_REQUEST(nullptr, &p, static_cast<long>(body.size()));
+        if (req == nullptr) {
+            return {};
+        }
+        OCSP_BASICRESP* bs = OCSP_BASICRESP_new();
+        ASN1_TIME* this_upd = ASN1_TIME_new();
+        ASN1_TIME* next_upd = ASN1_TIME_new();
+        ASN1_TIME* rev = ASN1_TIME_new();
+        X509_gmtime_adj(this_upd, -age_);
+        X509_gmtime_adj(next_upd, validity_ - age_);
+        for (int i = 0; i < OCSP_request_onereq_count(req); ++i) {
+            OCSP_CERTID* id = OCSP_onereq_get0_id(OCSP_request_onereq_get0(req, i));
+            ASN1_INTEGER* sn = nullptr;
+            OCSP_id_get0_info(nullptr, nullptr, nullptr, &sn, id);
+            const long serial = ASN1_INTEGER_get(sn);
+            int status = V_OCSP_CERTSTATUS_GOOD;
+            ASN1_TIME* when = nullptr;
+            {
+                const std::lock_guard<std::mutex> lock(mutex_);
+                if (auto it = revoked_.find(serial); it != revoked_.end()) {
+                    status = V_OCSP_CERTSTATUS_REVOKED;
+                    ASN1_TIME_set(rev, static_cast<time_t>(it->second));
+                    when = rev;
+                }
+            }
+            OCSP_basic_add1_status(bs, id, status, OCSP_REVOKED_STATUS_UNSPECIFIED, when,
+                                   this_upd, next_upd);
+        }
+        const Cert* cert = &ca_;
+        const Key* key = &ca_key_;
+        switch (signer_) {
+            case Signer::Issuer: break;
+            case Signer::Delegated: cert = &responder_; key = &responder_key_; break;
+            case Signer::DelegatedNoEku: cert = &no_eku_; key = &responder_key_; break;
+            case Signer::Stranger: cert = &stranger_; key = &stranger_key_; break;
+        }
+        OCSP_basic_sign(bs, cert->p, key->p, EVP_sha256(), nullptr, 0);
+        OCSP_RESPONSE* resp = OCSP_response_create(OCSP_RESPONSE_STATUS_SUCCESSFUL, bs);
+        unsigned char* der = nullptr;
+        const int n = i2d_OCSP_RESPONSE(resp, &der);
+        std::string out(reinterpret_cast<char*>(der), static_cast<std::size_t>(n));
+        OPENSSL_free(der);
+        OCSP_RESPONSE_free(resp);
+        OCSP_BASICRESP_free(bs);
+        OCSP_REQUEST_free(req);
+        ASN1_TIME_free(this_upd);
+        ASN1_TIME_free(next_upd);
+        ASN1_TIME_free(rev);
+        return out;
+    }
+
+    const Key& ca_key_;
+    const Cert& ca_;
+    Key responder_key_ = rsa_key();
+    Key stranger_key_ = rsa_key();
+    Cert responder_ = issue(responder_key_, {"Leht Test OCSP Responder", false, -1, 365,
+                                             "critical,digitalSignature", "OCSPSigning"},
+                            &ca_, &ca_key_);
+    Cert no_eku_ = issue(responder_key_, {"Leht Test Not A Responder", false, -1, 365,
+                                          "critical,digitalSignature"},
+                         &ca_, &ca_key_);
+    Cert stranger_ = issue(stranger_key_, {"Leht Test Stranger", false, -1, 365,
+                                           "critical,digitalSignature", "OCSPSigning"});
+    mutable std::mutex mutex_;
+    std::map<long, std::int64_t> revoked_;
+    std::atomic<Signer> signer_{Signer::Issuer};
+    std::atomic<long> age_{60};
+    std::atomic<long> validity_{7 * 86400};
+    std::atomic<bool> ocsp_down_{false};
+};
+
+/// A CA whose certificates point at its own revocation services, for
+/// long-term validation: a signer, a timestamp authority, and both servers.
+/// Separate from Pki because the URLs must exist before the certificates.
+struct LtvPki {
+    Key ca_key = rsa_key();
+    Cert ca = issue(ca_key, {"Leht LTV Root", true, -30, 3650});
+    LocalRevocation revocation{ca_key, ca};
+    Key signer_key = rsa_key();
+    Cert signer = issue(signer_key, {"Kati Karu", false, -1, 365,
+                                     "critical,digitalSignature,nonRepudiation", nullptr,
+                                     revocation.ocsp_url(), revocation.crl_url()},
+                        &ca, &ca_key);
+    Key tsa_key = rsa_key();
+    Cert tsa_cert = issue(tsa_key, {"Leht LTV TSA", false, -1, 365, "critical,digitalSignature",
+                                    "critical,timeStamping", revocation.ocsp_url(),
+                                    revocation.crl_url()},
+                          &ca, &ca_key);
+    LocalTsa tsa{tsa_key, tsa_cert, ca};
+
+    [[nodiscard]] crypto::TrustStore trust() const {
+        crypto::TrustStore t;
+        t.add_pem(ca.pem());
+        return t;
+    }
+    [[nodiscard]] crypto::Identity identity() const {
+        return crypto::Identity::from_pkcs12(pkcs12(signer_key, signer, {&ca}, "pw"),
+                                             crypto::Secret{"pw"});
+    }
 };
 
 }  // namespace leht::test

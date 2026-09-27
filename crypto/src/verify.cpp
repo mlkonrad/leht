@@ -14,6 +14,7 @@
 #include <openssl/x509v3.h>
 
 #include <array>
+#include <functional>
 #include <cstring>
 #include <ctime>
 
@@ -36,35 +37,26 @@ Trust trust_from(int err) {
     }
 }
 
-/// Builds a chain for `leaf` against `trust` at `when`, with `untrusted` as the
-/// intermediates the signature carried.
-Trust evaluate(X509* leaf, STACK_OF(X509)* untrusted, const TrustStore& trust, std::int64_t when,
-               std::vector<CertInfo>* chain, std::string* detail) {
-    detail::StorePtr store = detail::make_store(trust);
-    detail::StoreCtxPtr ctx{X509_STORE_CTX_new()};
-    if (!ctx || X509_STORE_CTX_init(ctx.get(), store.get(), leaf, untrusted) != 1) {
-        *detail = "cannot evaluate the certificate chain";
-        ERR_clear_error();
-        return Trust::Unknown;
+std::vector<CertInfo> describe(STACK_OF(X509)* chain) {
+    std::vector<CertInfo> out;
+    for (int i = 0; chain != nullptr && i < sk_X509_num(chain); ++i) {
+        out.push_back(detail::info(sk_X509_value(chain, i)));
     }
-    X509_STORE_CTX_set_time(ctx.get(), 0, static_cast<time_t>(when));
-    const int ok = X509_verify_cert(ctx.get());
-    const int err = ok == 1 ? X509_V_OK : X509_STORE_CTX_get_error(ctx.get());
-    if (chain != nullptr) {
-        chain->clear();
-        STACK_OF(X509)* built = X509_STORE_CTX_get0_chain(ctx.get());
-        for (int i = 0; built != nullptr && i < sk_X509_num(built); ++i) {
-            chain->push_back(detail::info(sk_X509_value(built, i)));
-        }
-        if (chain->empty()) {
-            chain->push_back(detail::info(leaf));
+    return out;
+}
+
+/// The worst revocation answer about `checks` as a trust verdict: Revoked
+/// when a certificate was revoked before the trusted time.
+bool revoked(const std::vector<RevocationCheck>& checks, std::string* detail) {
+    for (const RevocationCheck& c : checks) {
+        if (c.status == RevocationStatus::Revoked) {
+            *detail = "the certificate of " +
+                      (c.cert.common_name.empty() ? c.cert.subject : c.cert.common_name) +
+                      " was revoked (" + c.source + ")";
+            return true;
         }
     }
-    if (err != X509_V_OK) {
-        *detail = X509_verify_cert_error_string(err);
-    }
-    ERR_clear_error();
-    return trust_from(err);
+    return false;
 }
 
 const EVP_MD* acceptable_digest(const X509_ALGOR* alg) {
@@ -131,18 +123,18 @@ bool signing_cert_matches(CMS_SignerInfo* si, X509* signer) {
     return ok > 0;
 }
 
-TimestampReport check_timestamp(CMS_SignerInfo* si, const TrustStore& trust) {
+/// Computes the imprint a token must carry, with the token's own digest
+/// algorithm; false when that cannot be done.
+using ImprintOf = std::function<bool(const EVP_MD* md, Bytes* out)>;
+
+/// An RFC 3161 token: its imprint against `expected`, its signature against
+/// its own certificate, and that authority's trust (and revocation) at the
+/// token's own time.
+TimestampReport check_token(const unsigned char* der, long len, const ImprintOf& expected,
+                            const TrustStore& trust, const RevocationData& embedded,
+                            const RevocationData& online) {
     TimestampReport ts;
-    const int idx = CMS_unsigned_get_attr_by_NID(si, NID_id_smime_aa_timeStampToken, -1);
-    X509_ATTRIBUTE* attr = CMS_unsigned_get_attr(si, idx);
-    const ASN1_TYPE* type = X509_ATTRIBUTE_get0_type(attr, 0);
-    if (type == nullptr || type->type != V_ASN1_SEQUENCE) {
-        ts.problem = "the timestamp attribute is malformed";
-        return ts;
-    }
-    const unsigned char* p = type->value.sequence->data;
-    detail::Ptr<PKCS7, PKCS7_free> token{
-        d2i_PKCS7(nullptr, &p, type->value.sequence->length)};
+    detail::Ptr<PKCS7, PKCS7_free> token{d2i_PKCS7(nullptr, &der, len)};
     if (!token || PKCS7_type_is_signed(token.get()) == 0) {
         ts.problem = "the timestamp token is not a signed CMS";
         ERR_clear_error();
@@ -156,47 +148,56 @@ TimestampReport check_timestamp(CMS_SignerInfo* si, const TrustStore& trust) {
     }
     ts.time = detail::to_unix(TS_TST_INFO_get_time(tst.get()));
 
-    // The imprint must be the hash of this signature's value.
     TS_MSG_IMPRINT* imprint = TS_TST_INFO_get_msg_imprint(tst.get());
     const EVP_MD* md = acceptable_digest(TS_MSG_IMPRINT_get_algo(imprint));
-    const ASN1_OCTET_STRING* value = CMS_SignerInfo_get0_signature(si);
     const ASN1_OCTET_STRING* got = TS_MSG_IMPRINT_get_msg(imprint);
-    std::array<unsigned char, EVP_MAX_MD_SIZE> want{};
-    unsigned int want_len = 0;
-    if (md == nullptr ||
-        EVP_Digest(ASN1_STRING_get0_data(value), static_cast<std::size_t>(ASN1_STRING_length(value)),
-                   want.data(), &want_len, md, nullptr) != 1 ||
-        got == nullptr || static_cast<unsigned>(ASN1_STRING_length(got)) != want_len ||
-        std::memcmp(ASN1_STRING_get0_data(got), want.data(), want_len) != 0) {
-        ts.problem = "the timestamp does not cover this signature";
+    Bytes want;
+    if (md == nullptr || !expected(md, &want) || got == nullptr ||
+        static_cast<std::size_t>(ASN1_STRING_length(got)) != want.size() ||
+        std::memcmp(ASN1_STRING_get0_data(got), want.data(), want.size()) != 0) {
+        ts.problem = "the timestamp does not cover what it claims to";
         ERR_clear_error();
         return ts;
     }
 
     // The token's signature, against its own certificate.
     detail::StorePtr empty{X509_STORE_new()};
-    STACK_OF(X509)* signers = nullptr;
     if (PKCS7_verify(token.get(), nullptr, empty.get(), nullptr, nullptr, PKCS7_NOVERIFY) != 1) {
         ts.problem = "the timestamp token's signature does not verify";
         ERR_clear_error();
         return ts;
     }
-    signers = PKCS7_get0_signers(token.get(), nullptr, 0);
     // get0: the stack is ours, the certificates in it are the token's.
     struct StackFree {
         void operator()(STACK_OF(X509)* s) const noexcept { sk_X509_free(s); }
     };
-    const std::unique_ptr<STACK_OF(X509), StackFree> owned_signers{signers};
-    if (signers == nullptr || sk_X509_num(signers) != 1) {
+    const std::unique_ptr<STACK_OF(X509), StackFree> signers{
+        PKCS7_get0_signers(token.get(), nullptr, 0)};
+    if (!signers || sk_X509_num(signers.get()) != 1) {
         ts.problem = "the timestamp token has no single signer";
         ERR_clear_error();
         return ts;
     }
     ts.valid = true;
-    X509* tsa = sk_X509_value(signers, 0);
+    X509* tsa = sk_X509_value(signers.get(), 0);
     ts.authority = detail::info(tsa);
+
+    detail::X509StackPtr untrusted{sk_X509_new_null()};
+    STACK_OF(X509)* carried = token->d.sign->cert;
+    for (int i = 0; untrusted && carried != nullptr && i < sk_X509_num(carried); ++i) {
+        X509* c = sk_X509_value(carried, i);
+        X509_up_ref(c);
+        sk_X509_push(untrusted.get(), c);
+    }
+    detail::add_certs(embedded, untrusted.get());
+    detail::add_certs(online, untrusted.get());
+    detail::X509StackPtr chain;
     std::string why;
-    ts.trust = evaluate(tsa, token->d.sign->cert, trust, ts.time, nullptr, &why);
+    ts.trust = detail::evaluate_chain(tsa, untrusted.get(), trust, ts.time, &chain, &why);
+    ts.revocation = detail::check_revocation(chain.get(), ts.time, embedded, online);
+    if (ts.trust == Trust::Trusted && revoked(ts.revocation, &why)) {
+        ts.trust = Trust::Revoked;
+    }
     if (ts.trust != Trust::Trusted) {
         ts.problem = "timestamp authority: " + why;
     }
@@ -204,10 +205,38 @@ TimestampReport check_timestamp(CMS_SignerInfo* si, const TrustStore& trust) {
     return ts;
 }
 
+TimestampReport check_timestamp(CMS_SignerInfo* si, const TrustStore& trust,
+                                const RevocationData& embedded, const RevocationData& online) {
+    const int idx = CMS_unsigned_get_attr_by_NID(si, NID_id_smime_aa_timeStampToken, -1);
+    X509_ATTRIBUTE* attr = CMS_unsigned_get_attr(si, idx);
+    const ASN1_TYPE* type = X509_ATTRIBUTE_get0_type(attr, 0);
+    if (type == nullptr || type->type != V_ASN1_SEQUENCE) {
+        TimestampReport ts;
+        ts.problem = "the timestamp attribute is malformed";
+        return ts;
+    }
+    // B-T: the imprint is the hash of this signature's value.
+    const ASN1_OCTET_STRING* value = CMS_SignerInfo_get0_signature(si);
+    const ImprintOf of_value = [value](const EVP_MD* md, Bytes* out) {
+        out->resize(EVP_MAX_MD_SIZE);
+        unsigned int n = 0;
+        if (EVP_Digest(ASN1_STRING_get0_data(value),
+                       static_cast<std::size_t>(ASN1_STRING_length(value)), out->data(), &n, md,
+                       nullptr) != 1) {
+            return false;
+        }
+        out->resize(n);
+        return true;
+    };
+    return check_token(type->value.sequence->data, type->value.sequence->length, of_value, trust,
+                       embedded, online);
+}
+
 }  // namespace
 
 CmsReport verify_cms(const Bytes& der, const ContentReader& content, const TrustStore& trust,
-                     std::int64_t now) {
+                     std::int64_t now, const RevocationData& embedded,
+                     const RevocationData& online) {
     init(false);
     CmsReport r;
     const auto give_up = [&](const char* why) {
@@ -292,19 +321,103 @@ CmsReport verify_cms(const Bytes& der, const ContentReader& content, const Trust
     // 3. Trust, at the timestamp's time if a valid one says when the signature
     //    existed; otherwise now. /M is only the signer's claim.
     if (CMS_unsigned_get_attr_by_NID(si, NID_id_smime_aa_timeStampToken, -1) >= 0) {
-        r.timestamp = check_timestamp(si, trust);
+        r.timestamp = check_timestamp(si, trust, embedded, online);
     }
     std::int64_t when = now != 0 ? now : static_cast<std::int64_t>(std::time(nullptr));
     if (r.timestamp && r.timestamp->valid) {
         when = r.timestamp->time;
     }
-    r.trust = evaluate(signer, certs.get(), trust, when, &r.chain, &r.trust_detail);
+    // The /DSS certificates help: an intermediate the signature left out.
+    detail::add_certs(embedded, certs.get());
+    detail::add_certs(online, certs.get());
+    detail::X509StackPtr chain;
+    r.trust = detail::evaluate_chain(signer, certs.get(), trust, when, &chain, &r.trust_detail);
+    r.chain = describe(chain.get());
+    if (r.chain.empty()) {
+        r.chain.push_back(r.signer);
+    }
     if (r.trust == Trust::Trusted && !r.signer.can_sign) {
         r.trust = Trust::Untrusted;
         r.trust_detail = "the certificate's key usage does not allow signing";
     }
+    // 4. Revocation, at that same time: revoked afterwards does not matter.
+    r.revocation = detail::check_revocation(chain.get(), when, embedded, online);
+    if (r.trust == Trust::Trusted && revoked(r.revocation, &r.trust_detail)) {
+        r.trust = Trust::Revoked;
+    }
     ERR_clear_error();
     return r;
 }
+
+TimestampReport verify_document_timestamp(const Bytes& der, const ContentReader& content,
+                                          const TrustStore& trust, const RevocationData& embedded,
+                                          const RevocationData& online) {
+    init(false);
+    if (der.empty() || der.size() > kMaxDer) {
+        TimestampReport ts;
+        ts.problem = "the timestamp is empty or implausibly large";
+        return ts;
+    }
+    // The imprint is the digest of the byte ranges, with the token's own
+    // algorithm: read once, whatever it is.
+    bool read = false;
+    const ImprintOf of_ranges = [&](const EVP_MD* md, Bytes* out) {
+        if (read) {
+            return false;
+        }
+        read = true;
+        return digest_content(md, content, out);
+    };
+    return check_token(der.data(), static_cast<long>(der.size()), of_ranges, trust, embedded,
+                       online);
+}
+
+namespace detail {
+
+Trust evaluate_chain(X509* leaf, STACK_OF(X509)* untrusted, const TrustStore& trust,
+                     std::int64_t when, X509StackPtr* chain, std::string* detail) {
+    StorePtr store = make_store(trust);
+    StoreCtxPtr ctx{X509_STORE_CTX_new()};
+    if (!ctx || X509_STORE_CTX_init(ctx.get(), store.get(), leaf, untrusted) != 1) {
+        *detail = "cannot evaluate the certificate chain";
+        ERR_clear_error();
+        return Trust::Unknown;
+    }
+    X509_STORE_CTX_set_time(ctx.get(), 0, static_cast<time_t>(when));
+    const int ok = X509_verify_cert(ctx.get());
+    const int err = ok == 1 ? X509_V_OK : X509_STORE_CTX_get_error(ctx.get());
+    if (chain != nullptr) {
+        // get1: ours to free. Partial when no chain to an anchor was found.
+        chain->reset(X509_STORE_CTX_get1_chain(ctx.get()));
+        if (!*chain) {
+            chain->reset(sk_X509_new_null());
+            if (*chain) {
+                X509_up_ref(leaf);
+                sk_X509_push(chain->get(), leaf);
+            }
+        }
+    }
+    if (err != X509_V_OK) {
+        *detail = X509_verify_cert_error_string(err);
+    }
+    ERR_clear_error();
+    return trust_from(err);
+}
+
+void add_certs(const RevocationData& data, STACK_OF(X509)* to) {
+    if (to == nullptr) {
+        return;
+    }
+    for (const Bytes& der : data.certs) {
+        const unsigned char* p = der.data();
+        X509* c = d2i_X509(nullptr, &p, static_cast<long>(der.size()));
+        if (c != nullptr && sk_X509_push(to, c) <= 0) {
+            X509_free(c);
+        }
+    }
+    ERR_clear_error();
+}
+
+}  // namespace detail
 
 }  // namespace leht::crypto
