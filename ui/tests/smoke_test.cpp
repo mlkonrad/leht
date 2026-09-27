@@ -22,6 +22,7 @@
 #include <QStringList>
 
 #include <signal.h>
+#include <ctime>
 
 #include <QThread>
 
@@ -55,6 +56,7 @@
 #include <QTableWidget>
 
 #include <QDockWidget>
+#include <QPushButton>
 #include <QInputDialog>
 #include <QScrollBar>
 #include <QTreeWidget>
@@ -1245,6 +1247,88 @@ int main(int argc, char** argv) {
                 }
             } else {
                 std::printf("      SKIP encrypted signing: locked.pdf missing\n");
+            }
+
+            // Long-term validation (M4): sign with a timestamp and LTV through
+            // the viewer, against a TSA and OCSP/CRL servers on localhost.
+            {
+                leht::test::LtvPki ltv;
+                const QString ltvCa = tmp.filePath(QStringLiteral("ltv_ca.pem"));
+                const QString ltvP12 = tmp.filePath(QStringLiteral("ltv_signer.p12"));
+                {
+                    QFile c(ltvCa);
+                    check(c.open(QIODevice::WriteOnly), "the LTV CA file opens for writing");
+                    c.write(ltv.ca.pem().c_str());
+                    const auto bytes = leht::test::pkcs12(ltv.signer_key, ltv.signer, {&ltv.ca}, "pw");
+                    QFile k(ltvP12);
+                    check(k.open(QIODevice::WriteOnly), "the LTV key file opens for writing");
+                    k.write(reinterpret_cast<const char*>(bytes.data()),
+                            static_cast<qint64>(bytes.size()));
+                }
+                QSettings().setValue(QStringLiteral("trustedCertificates"), QStringList{ca, ltvCa});
+                const QString lta = tmp.filePath(QStringLiteral("to_sign_lta.pdf"));
+                QFile::remove(lta);
+                QFile::copy(QStringLiteral(LEHT_CORPUS_DIR "/text_10p.pdf"), lta);
+                window.openPath(lta);
+                pump(1500);
+                QVector<SigRow> ltvRows;
+                QStringList hosts;
+                const auto got = QObject::connect(
+                    worker, &RenderWorker::signaturesReady, &window,
+                    [&ltvRows](const QVector<SigRow>& rows) { ltvRows = rows; });
+                const auto net = QObject::connect(
+                    worker, &RenderWorker::networkUsed, &window,
+                    [&hosts](const QString& h) { hosts << h; });
+                QString ltvFailure;
+                const auto failed = QObject::connect(
+                    worker, &RenderWorker::saveFailed, &window,
+                    [&ltvFailure](const QString& m) { ltvFailure = m; });
+                SignSpec b;
+                b.p12Path = ltvP12;
+                b.password = QStringLiteral("pw");
+                b.tsaUrl = QString::fromStdString(ltv.tsa.url());
+                b.ltv = true;
+                QMetaObject::invokeMethod(worker, "signDocument", Qt::QueuedConnection,
+                                          Q_ARG(QString, lta), Q_ARG(SignSpec, b));
+                pump(5000);
+                QObject::disconnect(failed);
+                if (!ltvFailure.isEmpty()) {
+                    std::printf("      LTV signing failed: %s\n", qPrintable(ltvFailure));
+                }
+                check(!hosts.isEmpty() && hosts.first() == QStringLiteral("127.0.0.1"),
+                      "the viewer says where the network goes");
+                check(ltvRows.size() == 2, "a signature and a document timestamp");
+                if (ltvRows.size() == 2) {
+                    const SigRow& sig = ltvRows[0];
+                    check(sig.intact && sig.onlyValidationDataAfter && !sig.revoked,
+                          "the signature is intact, and only validation data came after");
+                    check(!sig.revocation.isEmpty() &&
+                              sig.revocation.first().contains(QStringLiteral("good (OCSP, embedded")),
+                          "the panel reports revocation from the embedded data");
+                    check(ltvRows[1].documentTimestamp && ltvRows[1].intact,
+                          "the document timestamp verifies");
+                }
+                auto* addLtv = window.findChild<QAction*>(QStringLiteral("addLongTermValidation"));
+                check(addLtv != nullptr && addLtv->isEnabled(),
+                      "Add Long-Term Validation is offered on a signed document");
+                check(window.findChild<QPushButton*>(QStringLiteral("checkRevocationOnline")) !=
+                          nullptr,
+                      "the panel offers Check Revocation Online");
+                shot(&window, "m4-ltv");
+
+                // Revoked since, checked online now: after the timestamp, so
+                // the signature still stands, and the panel says so.
+                ltv.revocation.revoke(ltv.signer, static_cast<std::int64_t>(std::time(nullptr)) + 60);
+                ltvRows.clear();
+                QMetaObject::invokeMethod(worker, "checkRevocationOnline", Qt::QueuedConnection);
+                pump(3000);
+                check(ltvRows.size() == 2 && ltvRows[0].intact && !ltvRows[0].revoked &&
+                          ltvRows[0].revocation.join(QStringLiteral(" ")).contains(
+                              QStringLiteral("revoked later")),
+                      "a revocation after the timestamp is reported, and does not undo it");
+                QObject::disconnect(got);
+                QObject::disconnect(net);
+                QSettings().setValue(QStringLiteral("trustedCertificates"), QStringList{ca});
             }
 
             // Back to the signed copy for the card.

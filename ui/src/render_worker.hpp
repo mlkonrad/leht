@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <memory>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -195,6 +196,23 @@ public slots:
     /// in the worker; the trust store travels there as PEM.
     void listSignatures();
 
+    // --- Long-term validation (M4) --------------------------------------------
+    //
+    // The worker, which parses the document, says what to fetch and parses what
+    // comes back; this thread only moves the bytes. These, and a timestamp
+    // authority, are the only times the viewer touches the network, and only
+    // when asked. networkUsed() names the hosts first.
+
+    /// Embeds validation data for every signature (B-LT) and, with `tsaUrl`,
+    /// a document timestamp over it all (B-LTA), writing `path`. Refused while
+    /// there are unsaved edits: they would ride along in a revision that
+    /// claims to add only validation data. Emits saved() or saveFailed().
+    void addLongTermValidation(QString path, QString tsaUrl);
+
+    /// Verifies every signature against revocation data fetched now, as well
+    /// as the document's own; nothing is embedded. Emits signaturesReady().
+    void checkRevocationOnline();
+
     /// Certificates to trust beyond the system's, remembered between sessions.
     void addTrustedCertificate(QString pemPath);
 
@@ -233,6 +251,11 @@ signals:
     void annotationsReady(QVector<AnnotRow> rows);
     void fieldsReady(QVector<FieldRow> rows);
     void signaturesReady(QVector<SigRow> rows);
+    /// About to fetch revocation data from these hosts.
+    void networkUsed(QString hosts);
+    /// addLongTermValidation() wrote what it says; `timestamp` is 0 when no
+    /// document timestamp was added.
+    void longTermValidationAdded(int certs, int ocsps, int crls, qint64 timestamp);
 
 private:
     /// What the viewer was doing when a worker died, which decides the response.
@@ -279,6 +302,21 @@ private:
     /// means there is no reply and the loss has been dealt with.
     template <typename Msg>
     std::optional<leht::ipc::Frame> roundTrip(const Msg& msg, Phase phase, int page);
+
+    /// Signature list, verified with `online` responses on top of the
+    /// document's own validation data.
+    void listSignaturesWith(const std::vector<leht::ipc::FetchedRow>& online);
+    /// What the worker says to fetch for this document, fetched. nullopt
+    /// after reporting a failure through `fail`.
+    std::optional<std::vector<leht::ipc::FetchedRow>> fetchRevocation(
+        const std::function<void(QString)>& fail);
+    /// Sends `msg` with `fd` for the worker to write into and returns its
+    /// reply of type `want`. On anything else -- a failure, a dead worker,
+    /// garbage -- reports through saveFailed(), prefixed by `context`, and
+    /// returns nullopt.
+    template <typename Msg>
+    std::optional<leht::ipc::Frame> fdRequest(const Msg& msg, int fd, leht::ipc::MsgType want,
+                                              const QString& context);
 
     /// Emits opened() and outlineReady() from the worker's replies.
     void publishOpened(const leht::ipc::Opened& result, const leht::ipc::Outline& outline);

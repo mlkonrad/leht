@@ -48,6 +48,9 @@
 #include <QTableWidget>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QSettings>
+#include <QVBoxLayout>
+#include <QPushButton>
 
 #include "outline_model.hpp"
 #include "thumbnail_bar.hpp"
@@ -135,6 +138,21 @@ MainWindow::MainWindow() {
     connect(worker_, &RenderWorker::fieldsReady, this, &MainWindow::onFieldsReady);
     connect(worker_, &RenderWorker::editStateChanged, this, &MainWindow::onEditStateChanged);
     connect(worker_, &RenderWorker::saved, this, &MainWindow::onSaved);
+    // Every network contact says where it goes, as it goes.
+    connect(worker_, &RenderWorker::networkUsed, this, [this](const QString& hosts) {
+        statusBar()->showMessage(
+            tr("Contacting %1 (certificate identifiers only, never the document)…").arg(hosts));
+    });
+    connect(worker_, &RenderWorker::longTermValidationAdded, this,
+            [this](int certs, int ocsps, int crls, qint64 timestamp) {
+                QString what = tr("Embedded %n certificate(s)", nullptr, certs) +
+                               tr(", %n OCSP response(s)", nullptr, ocsps) +
+                               tr(" and %n CRL(s)", nullptr, crls);
+                if (timestamp != 0) {
+                    what += tr(", then a document timestamp");
+                }
+                statusBar()->showMessage(what + QStringLiteral("."), 8000);
+            });
     connect(worker_, &RenderWorker::saveFailed, this, [this](const QString& why) {
         afterSave_ = nullptr;
         statusBar()->clearMessage();
@@ -566,6 +584,12 @@ void MainWindow::buildEditActions() {
     signInvisibly->setProperty("baseTip", signInvisibly->toolTip());
     signInvisibly->setToolTip(tr("Sign the document without marking a page"));
     connect(signInvisibly, &QAction::triggered, this, [this] { startSigning(0, QRectF()); });
+    QAction* ltv = menu->addAction(tr("Add Long-Term Validation…"));
+    ltv->setObjectName(QStringLiteral("addLongTermValidation"));
+    ltv->setToolTip(tr("Embed what every signature needs to be checked after its certificates "
+                       "expire (PAdES B-LT), and a document timestamp over it (B-LTA)"));
+    ltv->setEnabled(false);  // until the document has signatures
+    connect(ltv, &QAction::triggered, this, &MainWindow::addLongTermValidation);
     QAction* trustCert = menu->addAction(tr("Trust a Certificate…"));
     connect(trustCert, &QAction::triggered, this, [this] {
         const QString path = QFileDialog::getOpenFileName(
@@ -613,10 +637,24 @@ void MainWindow::buildSignaturePanel() {
 
     auto* dock = new QDockWidget(tr("Signatures"), this);
     dock->setObjectName(QStringLiteral("signatureDock"));
-    signatures_ = new QTreeWidget(dock);
+    auto* panel = new QWidget(dock);
+    auto* column = new QVBoxLayout(panel);
+    column->setContentsMargins(0, 0, 0, 0);
+    auto* online = new QPushButton(tr("Check Revocation Online"), panel);
+    online->setObjectName(QStringLiteral("checkRevocationOnline"));
+    online->setToolTip(tr("Ask the certificates' revocation services (OCSP, CRL) now whether "
+                          "they were revoked. Only certificate identifiers are sent, never the "
+                          "document, and nothing is added to it."));
+    connect(online, &QPushButton::clicked, this, [this] {
+        statusBar()->showMessage(tr("Checking revocation online…"));
+        onWorker([](RenderWorker* w) { w->checkRevocationOnline(); });
+    });
+    signatures_ = new QTreeWidget(panel);
     signatures_->setHeaderLabels({tr("Signature"), tr("Details")});
     signatures_->setColumnWidth(0, 180);
-    dock->setWidget(signatures_);
+    column->addWidget(online);
+    column->addWidget(signatures_);
+    dock->setWidget(panel);
     addDockWidget(Qt::RightDockWidgetArea, dock);
     dock->hide();
     connect(details, &QAction::triggered, dock, &QWidget::show);
@@ -639,6 +677,7 @@ QString trustWord(int trust) {
         case leht::crypto::Trust::Expired:     return MainWindow::tr("certificate expired");
         case leht::crypto::Trust::NotYetValid: return MainWindow::tr("certificate not yet valid");
         case leht::crypto::Trust::Unknown:     return MainWindow::tr("not checked");
+        case leht::crypto::Trust::Revoked:     return MainWindow::tr("certificate revoked");
     }
     return MainWindow::tr("not checked");
 }
@@ -651,14 +690,20 @@ std::pair<QString, QColor> verdict(const SigRow& row) {
     if (row.changesJudged && !row.changesPermitted) {
         return {MainWindow::tr("Intact, but changed in a way it forbids"), QColor(170, 20, 20)};
     }
+    if (static_cast<leht::crypto::Trust>(row.trust) == leht::crypto::Trust::Revoked) {
+        return {MainWindow::tr("Intact, but the certificate was revoked"), QColor(170, 20, 20)};
+    }
     const bool trusted = static_cast<leht::crypto::Trust>(row.trust) ==
                          leht::crypto::Trust::Trusted;
-    if (row.changedAfterSigning && !row.laterSignatureCoversChanges) {
+    if (row.changedAfterSigning && !row.laterSignatureCoversChanges &&
+        !row.onlyValidationDataAfter) {
         return {MainWindow::tr("Intact, but the document was changed afterwards"),
                 QColor(170, 110, 0)};
     }
     if (!trusted) {
-        return {MainWindow::tr("Intact, signer not trusted"), QColor(170, 110, 0)};
+        return {row.documentTimestamp ? MainWindow::tr("Intact, authority not trusted")
+                                      : MainWindow::tr("Intact, signer not trusted"),
+                QColor(170, 110, 0)};
     }
     return {MainWindow::tr("Valid"), QColor(20, 120, 40)};
 }
@@ -682,6 +727,9 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     signatureCount_ = static_cast<int>(rows.size());
     signatures_->clear();
     auto* dock = findChild<QDockWidget*>(QStringLiteral("signatureDock"));
+    if (auto* ltv = findChild<QAction*>(QStringLiteral("addLongTermValidation"))) {
+        ltv->setEnabled(!rows.isEmpty());
+    }
     if (rows.isEmpty()) {
         applyCertification(0);
         signatureBanner_->hide();
@@ -695,7 +743,9 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     for (const SigRow& row : rows) {
         const auto [word, colour] = verdict(row);
         auto* item = new QTreeWidgetItem(signatures_);
-        item->setText(0, row.signerCommonName.isEmpty() ? row.field : row.signerCommonName);
+        item->setText(0, row.documentTimestamp ? tr("Document timestamp")
+                         : row.signerCommonName.isEmpty() ? row.field
+                                                          : row.signerCommonName);
         item->setText(1, word);
         item->setForeground(1, colour);
         item->setData(0, Qt::UserRole, row.page);
@@ -723,13 +773,42 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
         }
         add(tr("Algorithm"), row.digest.isEmpty() ? row.subfilter
                                                   : tr("%1, %2").arg(row.digest, row.subfilter));
+        if (row.intact && !row.documentTimestamp) {
+            if (row.revocation.isEmpty()) {
+                add(tr("Revocation"), tr("not checked: nothing embedded (Check Revocation "
+                                         "Online asks now)"));
+            }
+            for (const QString& line : row.revocation) {
+                add(tr("Revocation"), line);
+            }
+        }
         add(tr("Claimed time"), row.claimedTime);
-        if (row.hasTimestamp) {
+        if (row.documentTimestamp) {
+            if (row.intact) {
+                add(tr("Proves"), tr("the file up to here existed at %1")
+                                      .arg(localTime(row.timestampTime)));
+                add(tr("Authority"), tr("%1 (%2)").arg(row.authority,
+                                                        trustWord(row.timestampTrust)));
+                for (const QString& line : row.revocation) {
+                    add(tr("Revocation"), line);
+                }
+                const bool unknown = std::any_of(
+                    row.revocation.begin(), row.revocation.end(),
+                    [](const QString& l) { return l.contains(QStringLiteral(": unknown")); });
+                if (unknown && !row.changedAfterSigning) {
+                    add(tr("Note"), tr("the newest document timestamp's own validation data "
+                                       "comes with the next Add Long-Term Validation"));
+                }
+            }
+        } else if (row.hasTimestamp) {
             add(tr("Timestamp"),
                 row.timestampValid
                     ? tr("%1, by %2 (%3)").arg(localTime(row.timestampTime), row.authority,
                                                trustWord(row.timestampTrust))
                     : tr("not valid: %1").arg(row.timestampProblem));
+            for (const QString& line : row.timestampRevocation) {
+                add(tr("Authority revocation"), line);
+            }
         } else if (row.intact) {
             add(tr("Timestamp"), tr("none: nothing proves when this was signed"));
         }
@@ -744,16 +823,20 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
                                          ? tr("all of them allowed")
                                          : row.changeProblems.join(QStringLiteral("; ")));
         }
-        if (row.changedAfterSigning) {
+        if (row.changedAfterSigning && row.onlyValidationDataAfter) {
+            add(tr("Afterwards"), tr("validation data was added; it changes nothing signed"));
+        } else if (row.changedAfterSigning) {
             add(tr("Changed"), row.laterSignatureCoversChanges
                                    ? tr("yes, and a later signature covers those changes")
                                    : tr("yes: the document was added to after this signature"));
         }
         add(tr("Certificate fingerprint"), row.fingerprint);
 
-        if (!row.rangeOk || !row.intact || (row.changesJudged && !row.changesPermitted)) {
+        if (!row.rangeOk || !row.intact || (row.changesJudged && !row.changesPermitted) ||
+            static_cast<leht::crypto::Trust>(row.trust) == leht::crypto::Trust::Revoked) {
             worst = 2;
-        } else if (worst < 1 && (row.changedAfterSigning && !row.laterSignatureCoversChanges)) {
+        } else if (worst < 1 && (row.changedAfterSigning && !row.laterSignatureCoversChanges &&
+                                 !row.onlyValidationDataAfter)) {
             worst = 1;
         } else if (worst < 1 && static_cast<leht::crypto::Trust>(row.trust) !=
                                     leht::crypto::Trust::Trusted) {
@@ -770,8 +853,15 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     for (const SigRow& row : rows) {
         certified = row.certification != 0 ? row.certification : certified;
     }
+    // A document timestamp is counted apart: nobody signed it.
+    const int stamps = static_cast<int>(std::count_if(
+        rows.begin(), rows.end(), [](const SigRow& r) { return r.documentTimestamp; }));
+    const QString counted =
+        stamps == 0 ? tr("%n signature(s)", nullptr, signatureCount_)
+                    : tr("%n signature(s)", nullptr, signatureCount_ - stamps) + QStringLiteral(", ") +
+                          tr("%n document timestamp(s)", nullptr, stamps);
     signatureBannerLabel_->setText(
-        tr(" %1  (%n signature(s)) ", nullptr, signatureCount_).arg(summary) +
+        tr(" %1  (%2) ").arg(summary, counted) +
         (certified != 0 ? tr(" Certified: %1. ").arg(certificationWords(certified)) : QString()));
     applyCertification(certified);
     QPalette pal = signatureBannerLabel_->palette();
@@ -858,6 +948,40 @@ void MainWindow::startSigning(int page, QRectF rect) {
     }
     statusBar()->showMessage(tr("Signing…"));
     onWorker([=](RenderWorker* w) { w->signDocument(target, spec); });
+}
+
+void MainWindow::addLongTermValidation() {
+    if (pageCount_ == 0 || signatureCount_ == 0) {
+        return;
+    }
+    if (modified_) {
+        QMessageBox::information(
+            this, tr("Add Long-Term Validation"),
+            tr("Save or undo your changes first. Validation data goes in a revision of its "
+               "own, which must add nothing else."));
+        return;
+    }
+    QSettings settings;
+    bool ok = false;
+    const QString tsa = QInputDialog::getText(
+        this, tr("Add Long-Term Validation"),
+        tr("Leht will ask each signing certificate's revocation services (OCSP, CRL) over the "
+           "network whether it was valid, and embed the answers. Only certificate identifiers "
+           "are sent, never the document.\n\nA timestamp authority, to add a document "
+           "timestamp over it all (leave empty to skip):"),
+        QLineEdit::Normal, settings.value(QStringLiteral("signing/tsa")).toString(), &ok);
+    if (!ok) {
+        return;
+    }
+    if (!tsa.trimmed().isEmpty()) {
+        settings.setValue(QStringLiteral("signing/tsa"), tsa.trimmed());
+    }
+    const QString target = currentPath_;
+    if (target.isEmpty()) {
+        return;
+    }
+    statusBar()->showMessage(tr("Adding long-term validation data…"));
+    onWorker([=](RenderWorker* w) { w->addLongTermValidation(target, tsa); });
 }
 
 void MainWindow::onEditStateChanged(bool canUndo, bool canRedo, bool modified) {

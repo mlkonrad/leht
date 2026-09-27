@@ -226,8 +226,18 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
     tsa_->setPlaceholderText(tr("https://timestamp.example.org"));
     tsa_->setEnabled(useTsa_->isChecked());
     connect(useTsa_, &QCheckBox::toggled, tsa_, &QLineEdit::setEnabled);
+    ltv_ = new QCheckBox(tr("Add long-term validation data (PAdES B-LTA)"), this);
+    ltv_->setChecked(settings.value(QStringLiteral("signing/ltv"), false).toBool());
+    ltv_->setEnabled(useTsa_->isChecked());
+    ltv_->setToolTip(tr("Then asks the certificates' own revocation services (OCSP, CRL) over "
+                        "the network whether they were valid, and embeds the answers with a "
+                        "document timestamp over it all: the signature stays checkable after "
+                        "the certificate expires. Only certificate identifiers are sent, "
+                        "never the document."));
+    connect(useTsa_, &QCheckBox::toggled, ltv_, &QCheckBox::setEnabled);
     layout->addWidget(useTsa_);
     layout->addWidget(tsa_);
+    layout->addWidget(ltv_);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     buttons->button(QDialogButtonBox::Ok)->setText(tr("Sign"));
@@ -273,6 +283,7 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
         saved.setValue(QStringLiteral("signing/location"), location_->text());
         saved.setValue(QStringLiteral("signing/useTsa"), useTsa_->isChecked());
         saved.setValue(QStringLiteral("signing/tsa"), tsa_->text());
+        saved.setValue(QStringLiteral("signing/ltv"), ltv_->isChecked());
         accept();
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -420,6 +431,7 @@ SignSpec SignDialog::spec() const {
     spec.location = location_->text().trimmed();
     if (useTsa_->isChecked()) {
         spec.tsaUrl = tsa_->text().trimmed();
+        spec.ltv = ltv_->isChecked();
     }
     if (rect_.isEmpty()) {
         return spec;  // invisible: no appearance at all

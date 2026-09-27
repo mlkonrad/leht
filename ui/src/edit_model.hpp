@@ -50,6 +50,9 @@ struct SignSpec {
     QRectF rect;        ///< empty means an invisible signature
     QString name, reason, location;
     QString tsaUrl;
+    /// Then embed validation data and a document timestamp (PAdES B-LTA).
+    /// Needs tsaUrl; fetches OCSP and CRL data over the network.
+    bool ltv = false;
     QByteArray image;                 ///< PNG/JPEG bytes for the appearance
     QVector<QPolygonF> strokes;       ///< a drawn signature
     QSizeF strokesCanvas;
@@ -94,6 +97,16 @@ struct SigRow {
     QString authority;
     int timestampTrust = 0;
     QString timestampProblem;
+    /// A document timestamp (B-LTA): the timestamp fields and `intact` say
+    /// it all; it has no signer.
+    bool documentTimestamp = false;
+    /// Added to after signing, but only with validation data: unchanged.
+    bool onlyValidationDataAfter = false;
+    /// Each chain certificate's revocation status, in words; empty when there
+    /// was no revocation data to check against.
+    QStringList revocation;
+    QStringList timestampRevocation;
+    bool revoked = false;  ///< one of them was revoked before the signing time
 };
 
 Q_DECLARE_METATYPE(AnnotRow)

@@ -96,6 +96,7 @@ private:
     QLineEdit* location_ = nullptr;
     QLineEdit* tsa_ = nullptr;
     QCheckBox* useTsa_ = nullptr;
+    QCheckBox* ltv_ = nullptr;
     QComboBox* certify_ = nullptr;
     QRadioButton* textOnly_ = nullptr;
     QRadioButton* drawn_ = nullptr;

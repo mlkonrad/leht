@@ -14,6 +14,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QDateTime>
+#include <QUrl>
 #include <QMutex>
 #include <QMutexLocker>
 
@@ -1323,13 +1325,299 @@ void RenderWorker::signDocument(QString path, SignSpec spec) {
     (void)openInWorker(/*silent=*/true);
     emit saved(path_);
     publishEditState();
+    if (spec.ltv && !spec.tsaUrl.trimmed().isEmpty()) {
+        // B-LT and B-LTA on top: their own revisions, after the signature.
+        addLongTermValidation(path_, spec.tsaUrl);
+        return;
+    }
     listSignatures();
 }
 
-void RenderWorker::listSignatures() {
+namespace {
+
+/// A new file beside `target`, for the worker to write into; commit() makes it
+/// the target, atomically and durably. Discarded unless committed.
+class Beside {
+public:
+    explicit Beside(const QString& target) : info_(target) {
+        temp_ = QFile::encodeName(info_.absolutePath() + QStringLiteral("/.") + info_.fileName() +
+                                  QStringLiteral(".leht-XXXXXX"));
+        fd_ = ::mkostemp(temp_.data(), O_CLOEXEC);
+        if (fd_ < 0) {
+            error_ = QString::fromUtf8(std::strerror(errno));
+        }
+    }
+    Beside(const Beside&) = delete;
+    Beside& operator=(const Beside&) = delete;
+    ~Beside() {
+        if (fd_ >= 0) {
+            ::close(fd_);
+            ::unlink(temp_.constData());
+        }
+    }
+
+    [[nodiscard]] int fd() const { return fd_; }
+    [[nodiscard]] const QString& error() const { return error_; }
+    [[nodiscard]] QString path() const { return info_.absoluteFilePath(); }
+
+    /// Returns empty on success, why not otherwise.
+    QString commit() {
+        struct stat st {};
+        const QByteArray target = QFile::encodeName(info_.absoluteFilePath());
+        const mode_t mode = ::stat(target.constData(), &st) == 0 ? (st.st_mode & 07777)
+                                                                 : (0666 & ~currentUmask());
+        if (::fchmod(fd_, mode) != 0 || ::fsync(fd_) != 0) {
+            return QString::fromUtf8(std::strerror(errno));
+        }
+        ::close(fd_);
+        fd_ = -1;
+        if (::rename(temp_.constData(), target.constData()) != 0) {
+            const int err = errno;
+            ::unlink(temp_.constData());
+            return QString::fromUtf8(std::strerror(err));
+        }
+        const int dir = ::open(QFile::encodeName(info_.absolutePath()).constData(),
+                               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dir >= 0) {
+            (void)::fsync(dir);
+            ::close(dir);
+        }
+        return {};
+    }
+
+private:
+    QFileInfo info_;
+    QByteArray temp_;
+    int fd_ = -1;
+    QString error_;
+};
+
+QString hosts_of(const std::vector<leht::crypto::RevocationQuery>& queries) {
+    QStringList hosts;
+    for (const auto& q : queries) {
+        const QString h = QUrl(QString::fromStdString(q.url)).host();
+        if (!hosts.contains(h)) {
+            hosts << h;
+        }
+    }
+    return hosts.join(QStringLiteral(", "));
+}
+
+QStringList revocation_lines(const std::vector<leht::ipc::RevocationRow>& rows, bool* revoked) {
+    QStringList out;
+    for (const leht::ipc::RevocationRow& c : rows) {
+        const QString who = QString::fromStdString(c.subject);
+        const QString source = QString::fromStdString(c.source);
+        const auto when = [](qint64 t) {
+            return QDateTime::fromSecsSinceEpoch(t).toString(Qt::ISODate);
+        };
+        switch (static_cast<leht::crypto::RevocationStatus>(c.status)) {
+            case leht::crypto::RevocationStatus::Good:
+                out << (c.revoked_at != 0
+                            ? RenderWorker::tr("%1: good when signed, revoked later on %2 (%3)")
+                                  .arg(who, when(c.revoked_at), source)
+                            : RenderWorker::tr("%1: good (%2)").arg(who, source));
+                break;
+            case leht::crypto::RevocationStatus::Revoked:
+                *revoked = true;
+                out << RenderWorker::tr("%1: REVOKED on %2 (%3)")
+                           .arg(who, when(c.revoked_at), source);
+                break;
+            case leht::crypto::RevocationStatus::Unknown:
+                out << RenderWorker::tr("%1: unknown, %2")
+                           .arg(who, QString::fromStdString(c.problem));
+                break;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+template <typename Msg>
+std::optional<leht::ipc::Frame> RenderWorker::fdRequest(const Msg& msg, int fd,
+                                                        leht::ipc::MsgType want,
+                                                        const QString& context) {
+    auto reply = sendRequest(msg, fd) ? receive() : std::nullopt;
+    if (!reply) {
+        emit saveFailed(context + tr("the document worker stopped; nothing was written."));
+        (void)workerLost(Phase::Edit, -1);
+        return std::nullopt;
+    }
+    try {
+        if (reply->type == leht::ipc::MsgType::Failed) {
+            emit saveFailed(context + QString::fromStdString(
+                                          leht::ipc::decode_as<leht::ipc::Failed>(*reply).message));
+            return std::nullopt;
+        }
+        if (reply->type != want) {
+            throw leht::ipc::ProtocolError("unexpected reply");
+        }
+    } catch (const leht::ipc::ProtocolError&) {
+        emit saveFailed(context + tr("the document worker answered with garbage; nothing was "
+                                     "written."));
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+        return std::nullopt;
+    }
+    return reply;
+}
+
+std::optional<std::vector<leht::ipc::FetchedRow>> RenderWorker::fetchRevocation(
+    const std::function<void(QString)>& fail) {
+    leht::ipc::ListRevocationQueries ask;
+    ask.trust_pem = trustPem();
+    auto reply = roundTrip(ask, Phase::Edit, -1);
+    std::vector<leht::crypto::RevocationQuery> queries;
+    try {
+        if (!reply) {
+            fail(tr("the document worker stopped."));
+            return std::nullopt;
+        }
+        if (reply->type == leht::ipc::MsgType::Failed) {
+            fail(QString::fromStdString(leht::ipc::decode_as<leht::ipc::Failed>(*reply).message));
+            return std::nullopt;
+        }
+        // Decoding checks every URL is http(s): a worker cannot point this
+        // process anywhere else.
+        for (const leht::ipc::QueryRow& q :
+             leht::ipc::decode_as<leht::ipc::RevocationQueryList>(*reply).queries) {
+            leht::crypto::RevocationQuery x;
+            x.kind = q.kind == 0 ? leht::crypto::RevocationQuery::Kind::Ocsp
+                                 : leht::crypto::RevocationQuery::Kind::Crl;
+            x.url = q.url;
+            x.request = q.request;
+            x.subject = q.subject;
+            queries.push_back(std::move(x));
+        }
+    } catch (const leht::ipc::ProtocolError&) {
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+        fail(tr("the document worker answered with garbage."));
+        return std::nullopt;
+    }
+    std::vector<leht::ipc::FetchedRow> out;
+    if (queries.empty()) {
+        return out;  // no certificate names a responder or a CRL
+    }
+    emit networkUsed(hosts_of(queries));
+    for (const auto& f : leht::crypto::fetch_revocation(queries)) {
+        out.push_back(leht::ipc::FetchedRow{
+            static_cast<std::uint8_t>(f.kind == leht::crypto::RevocationQuery::Kind::Ocsp ? 0 : 1),
+            f.url, f.body, f.error});
+    }
+    return out;
+}
+
+void RenderWorker::addLongTermValidation(QString path, QString tsaUrl) {
+    const QString context = tr("Long-term validation: ");
+    if (!proc_.load()) {
+        emit saveFailed(context + tr("no document is open."));
+        return;
+    }
+    if (!log_.empty()) {
+        emit saveFailed(context + tr("save or undo your changes first. Validation data goes in a "
+                                     "revision that must add nothing else."));
+        return;
+    }
+    const auto fetched = fetchRevocation([&](const QString& why) { emit saveFailed(context + why); });
+    if (!fetched) {
+        return;
+    }
+    int certs = 0;
+    int ocsps = 0;
+    int crls = 0;
+    {
+        Beside out(path);
+        if (out.fd() < 0) {
+            emit saveFailed(context + out.error());
+            return;
+        }
+        leht::ipc::AddValidationData request;
+        request.trust_pem = trustPem();
+        request.fetched = *fetched;
+        const auto reply =
+            fdRequest(request, out.fd(), leht::ipc::MsgType::ValidationDataAdded, context);
+        if (!reply) {
+            return;
+        }
+        const auto added = leht::ipc::decode_as<leht::ipc::ValidationDataAdded>(*reply);
+        certs = static_cast<int>(added.certs);
+        ocsps = static_cast<int>(added.ocsps);
+        crls = static_cast<int>(added.crls);
+        if (certs + ocsps + crls > 0) {
+            if (const QString why = out.commit(); !why.isEmpty()) {
+                emit saveFailed(context + why);
+                return;
+            }
+            path_ = out.path();
+            clearLog();
+            (void)openInWorker(/*silent=*/true);
+        }
+    }
+    qint64 stamped = 0;
+    if (!tsaUrl.trimmed().isEmpty()) {
+        Beside out(path);
+        if (out.fd() < 0) {
+            emit saveFailed(context + out.error());
+            return;
+        }
+        leht::ipc::PrepareDocTimestamp request;
+        request.reserve = static_cast<std::uint32_t>(leht::crypto::estimate_timestamp_size());
+        const auto reply =
+            fdRequest(request, out.fd(), leht::ipc::MsgType::SignaturePrepared, context);
+        if (!reply) {
+            return;
+        }
+        leht::crypto::SignOptions options;
+        options.tsa_url = tsaUrl.trimmed().toStdString();
+        try {
+            const auto prepared = leht::ipc::decode_as<leht::ipc::SignaturePrepared>(*reply);
+            emit networkUsed(QUrl(tsaUrl.trimmed()).host());
+            // The same check of the hole against the file's bytes as signing.
+            stamped = leht::crypto::timestamp_prepared(out.fd(), prepared.range, options).time;
+        } catch (const leht::Error& e) {
+            emit saveFailed(context + QString::fromUtf8(e.what()));
+            return;
+        } catch (const leht::ipc::ProtocolError&) {
+            emit saveFailed(context + tr("the document worker answered with garbage."));
+            distrust();
+            (void)workerLost(Phase::Edit, -1);
+            return;
+        }
+        if (const QString why = out.commit(); !why.isEmpty()) {
+            emit saveFailed(context + why);
+            return;
+        }
+        path_ = out.path();
+        clearLog();
+        (void)openInWorker(/*silent=*/true);
+    }
+    emit saved(path_);
+    publishEditState();
+    emit longTermValidationAdded(certs, ocsps, crls, stamped);
+    listSignatures();
+}
+
+void RenderWorker::checkRevocationOnline() {
+    if (!proc_.load()) {
+        return;
+    }
+    const auto fetched = fetchRevocation([&](const QString& why) {
+        emit failed(tr("Checking revocation online: %1").arg(why));
+    });
+    if (fetched) {
+        listSignaturesWith(*fetched);
+    }
+}
+
+void RenderWorker::listSignatures() { listSignaturesWith({}); }
+
+void RenderWorker::listSignaturesWith(const std::vector<leht::ipc::FetchedRow>& online) {
     QVector<SigRow> rows;
     leht::ipc::ListSignatures request;
     request.trust_pem = trustPem();
+    request.online = online;
     auto reply = proc_.load() ? roundTrip(request, Phase::Edit, -1) : std::nullopt;
     try {
         if (reply && reply->type == leht::ipc::MsgType::SignatureList) {
@@ -1377,6 +1665,11 @@ void RenderWorker::listSignatures() {
                 row.authority = QString::fromStdString(s.authority.common_name);
                 row.timestampTrust = s.timestamp_trust;
                 row.timestampProblem = QString::fromStdString(s.timestamp_problem);
+                row.documentTimestamp = s.document_timestamp;
+                row.onlyValidationDataAfter = s.only_validation_data_after;
+                row.revocation = revocation_lines(s.revocation, &row.revoked);
+                bool tsa_revoked = false;
+                row.timestampRevocation = revocation_lines(s.timestamp_revocation, &tsa_revoked);
                 rows.push_back(std::move(row));
             }
         } else if (reply) {
