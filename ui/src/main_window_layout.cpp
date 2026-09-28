@@ -5,7 +5,9 @@
 #include "main_window.hpp"
 
 #include "actions.hpp"
+#include "color_swatches.hpp"
 #include "comments_panel.hpp"
+#include "first_run_hints.hpp"
 #include "export_dialog.hpp"
 #include "file_tools.hpp"
 #include "file_tools_dialogs.hpp"
@@ -235,6 +237,35 @@ void MainWindow::buildLayout() {
             }
         }
     });
+    // The comment tools' colour, at the end of their row; it follows the tool.
+    swatches_ = new ColorSwatches(this);
+    swatches_->setToolTip(tr("The colour the chosen tool draws in"));
+    modes_->setModeExtra(QStringLiteral("comment"), swatches_);
+    const auto colourable = [](const QString& id) {
+        return id == QLatin1String("toolHighlight") || id == QLatin1String("toolUnderline") ||
+               id == QLatin1String("toolStrike") || id == QLatin1String("toolDraw") ||
+               id == QLatin1String("toolText");
+    };
+    const auto syncSwatches = [this, colourable] {
+        QAction* tool = tools_->checkedAction();
+        const QString id = tool != nullptr ? tool->objectName() : QString();
+        swatches_->setEnabled(colourable(id));
+        if (colourable(id)) {
+            swatches_->setColor(toolColor(id));
+        }
+        view_->setNewTextColor(toolColor(QStringLiteral("toolText")));
+    };
+    connect(tools_, &QActionGroup::triggered, this, syncSwatches);
+    connect(swatches_, &ColorSwatches::colorChosen, this, [this, colourable, syncSwatches](const QColor& colour) {
+        QAction* tool = tools_->checkedAction();
+        const QString id = tool != nullptr ? tool->objectName() : QString();
+        if (colourable(id)) {
+            QSettings().setValue(QStringLiteral("toolColors/") + id, colour.name());
+        }
+        syncSwatches();
+    });
+    syncSwatches();
+
     // A tool picked from a menu brings its mode along.
     connect(tools_, &QActionGroup::triggered, this, [this](QAction* tool) {
         if (modeTools_.value(modes_->mode()).contains(tool)) {
@@ -355,7 +386,7 @@ void MainWindow::buildMenus() {
         {tr("&Edit"), ids({"undo", "redo", "-", "copy", "-", "find", "findNext", "findPrevious", "-",
                            "preferences"})},
         {tr("&View"), ids({"zoomIn", "zoomOut", "actualSize", "fitWidth", "fitPage", "-", "rotateView", "-",
-                           "toggleSidebar", "fullScreen"})},
+                           "toggleSidebar", "fullScreen", "-", "focusNextRegion", "focusPreviousRegion"})},
         {tr("&Pages"), ids({"pageRotateLeft", "pageRotateRight", "-", "pageInsertFile", "pageInsertBlank",
                             "pageExtract", "pageDelete", "-", "toolCrop", "cropMargins", "-", "watermark"})},
         {tr("&Comment"), ids({"toolHighlight", "toolUnderline", "toolStrike", "toolNote", "toolText",
@@ -860,4 +891,75 @@ void MainWindow::exportText(const QString& pages, const QString& path) {
                                  6000);
     });
     onWorker([pages](RenderWorker* w) { w->extractText(pages); });
+}
+
+// --- Colours, first run, keyboard -------------------------------------------
+
+QColor MainWindow::toolColor(const QString& toolId) const {
+    static const QHash<QString, QColor> defaults = {
+        {QStringLiteral("toolHighlight"), QColor(255, 220, 0)},
+        {QStringLiteral("toolUnderline"), QColor(20, 90, 200)},
+        {QStringLiteral("toolStrike"), QColor(200, 30, 30)},
+        {QStringLiteral("toolDraw"), QColor(20, 90, 200)},
+        {QStringLiteral("toolText"), QColor(0, 0, 0)},
+    };
+    const QColor chosen(QSettings().value(QStringLiteral("toolColors/") + toolId).toString());
+    return chosen.isValid() ? chosen : defaults.value(toolId, QColor(0, 0, 0));
+}
+
+void MainWindow::showFirstRunHints() {
+    if (!isShowingWelcome()) {
+        return;
+    }
+    (void)FirstRunHints::showOnce(
+        this,
+        {{welcome_->findChild<QWidget*>(QStringLiteral("dropZone")), tr("Open a PDF"),
+          tr("Click Open, or drop PDFs and pictures here. Several at once can be combined into one.")},
+         {welcome_->findChild<QWidget*>(QStringLiteral("task_sign")), tr("Start from a task"),
+          tr("Sign, fill in a form, combine files, make a scan searchable: pick what you want done, "
+             "then the file.")},
+         {menuBar(), tr("Everything is in the menus"),
+          tr("Each command has its place in the menu bar, with its shortcut. Edit → Preferences holds "
+             "your name for comments and your signing defaults.")}},
+        QLatin1String(FirstRunHints::kWelcomeKey));
+}
+
+void MainWindow::focusRegion(int step) {
+    // The parts of the window, in reading order; only those showing count.
+    QVector<QWidget*> regions;
+    if (auto* bar = findChild<QToolBar*>(QStringLiteral("mainBar")); bar != nullptr && bar->isVisible()) {
+        regions << bar;
+    }
+    if (!isShowingWelcome()) {
+        regions << modes_;
+        if (sidebar_->isVisible()) {
+            regions << sidebar_;
+        }
+        regions << viewStack_->currentWidget();
+    } else {
+        regions << welcome_;
+    }
+    if (regions.isEmpty()) {
+        return;
+    }
+    int at = -1;
+    for (int i = 0; i < regions.size(); ++i) {
+        if (QWidget* f = QApplication::focusWidget(); f != nullptr && (f == regions[i] || regions[i]->isAncestorOf(f))) {
+            at = i;
+        }
+    }
+    const int n = static_cast<int>(regions.size());
+    const int next = ((at < 0 ? (step > 0 ? -1 : 0) : at) + step + n) % n;
+    QWidget* target = regions[next];
+    // Into the region: its first focusable child, or itself.
+    QWidget* focus = target->focusPolicy() != Qt::NoFocus ? target : nullptr;
+    if (focus == nullptr) {
+        for (QWidget* child : target->findChildren<QWidget*>()) {
+            if (child->isVisible() && child->isEnabled() && (child->focusPolicy() & Qt::TabFocus) != 0) {
+                focus = child;
+                break;
+            }
+        }
+    }
+    (focus != nullptr ? focus : target)->setFocus(Qt::TabFocusReason);
 }

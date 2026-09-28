@@ -264,6 +264,7 @@ void WelcomeView::refresh() {
                                          recent_);
         item->setData(Qt::UserRole, path);
         item->setToolTip(path);
+        item->setData(Qt::AccessibleTextRole, tr("%1, in %2").arg(info.fileName(), homeRelative(info.absolutePath())));
     }
     const bool any = recent_->count() > 0;
     // As tall as its rows, so a short list does not leave an empty box.

@@ -178,6 +178,10 @@ void CommentsPanel::rebuild() {
             text = text.left(139) + QChar(0x2026);
         }
         auto* item = new QTreeWidgetItem(pageItem, {text.isEmpty() ? typeName : text});
+        // Read aloud as "Note on page 3: text", not just the text.
+        item->setData(0, Qt::AccessibleTextRole,
+                      text.isEmpty() ? tr("%1 on page %2").arg(typeName).arg(r.page + 1)
+                                     : tr("%1 on page %2: %3").arg(typeName).arg(r.page + 1).arg(text));
         item->setIcon(0, icons::named(annotationTypeIcon(r.type)));
         item->setData(0, Qt::UserRole, i);
         item->setToolTip(0, text.isEmpty() ? typeName : typeName + QStringLiteral(": ") + r.contents);

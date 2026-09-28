@@ -17,6 +17,7 @@
 #include "file_tools_dialogs.hpp"
 #include "properties_dialog.hpp"
 #include "protect_dialog.hpp"
+#include "first_run_hints.hpp"
 #include "signature_cards.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "leht/ocr/ocr.hpp"
@@ -278,7 +279,8 @@ MainWindow::MainWindow() {
     });
     connect(view_, &PageView::highlightRequested, this,
             [this](int page, const QVector<QRectF>& boxes) {
-                onWorker([=](RenderWorker* w) { w->addHighlight(page, boxes, QColor(255, 220, 0)); });
+                const QColor color = toolColor(QStringLiteral("toolHighlight"));
+                onWorker([=](RenderWorker* w) { w->addHighlight(page, boxes, color); });
             });
     connect(view_, &PageView::noteRequested, this, [this](int page, QPointF at) {
         bool ok = false;
@@ -290,7 +292,8 @@ MainWindow::MainWindow() {
     });
     connect(view_, &PageView::inkRequested, this,
             [this](int page, const QVector<QPolygonF>& strokes) {
-                onWorker([=](RenderWorker* w) { w->addInk(page, strokes, QColor(30, 60, 200)); });
+                const QColor color = toolColor(QStringLiteral("toolDraw"));
+                onWorker([=](RenderWorker* w) { w->addInk(page, strokes, color); });
             });
     // The Redact tool marks; Apply Redactions removes. Nothing leaves the
     // file until the marks have been looked over.
@@ -305,7 +308,7 @@ MainWindow::MainWindow() {
     });
     connect(view_, &PageView::markupRequested, this,
             [this](int page, const QVector<QRectF>& boxes, bool strikeOut) {
-                const QColor color = strikeOut ? QColor(200, 30, 30) : QColor(20, 90, 200);
+                const QColor color = toolColor(strikeOut ? QStringLiteral("toolStrike") : QStringLiteral("toolUnderline"));
                 onWorker([=](RenderWorker* w) { w->addTextMarkup(page, boxes, strikeOut, color); });
             });
     connect(view_, &PageView::stampRequested, this, [this](int page, QPointF at) {
@@ -631,6 +634,13 @@ void MainWindow::buildActions() {
                            [this](bool on) { sidebar_->setExpanded(on); });
     sidebar->setChecked(true);
     connect(sidebar_, &Sidebar::expandedChanged, sidebar, &QAction::setChecked);
+    add({.id = QStringLiteral("focusNextRegion"), .text = tr("Next Part of the Window"),
+         .shortcuts = {QKeySequence(Qt::Key_F6)},
+         .tip = tr("Move between the toolbar, the mode bar, the sidebar and the page"), .group = view},
+        [this] { focusRegion(+1); });
+    add({.id = QStringLiteral("focusPreviousRegion"), .text = tr("Previous Part of the Window"),
+         .shortcuts = {QKeySequence(Qt::SHIFT | Qt::Key_F6)}, .group = view},
+        [this] { focusRegion(-1); });
     add({.id = QStringLiteral("fullScreen"), .text = tr("F&ull Screen"), .icon = QStringLiteral("maximize"),
          .themeIcon = QStringLiteral("view-fullscreen"), .shortcuts = {QKeySequence::FullScreen},
          .checkable = true, .group = view},
@@ -1562,6 +1572,24 @@ void MainWindow::onOpened(int pageCount, QVector<QSize> baseSizes) {
     updateZoomLabel();
     if (!currentPath_.isEmpty()) {
         recent::add(currentPath_);
+        // The document tour, once, the first time a document opens.
+        QTimer::singleShot(400, this, [this] {
+            if (pageCount_ <= 0 || !isVisible()) {
+                return;
+            }
+            (void)FirstRunHints::showOnce(
+                this,
+                {{modes_, tr("Pick what you are doing"),
+                  tr("Read, Comment, Fill & Sign, Pages or Redact: each shows only its own tools. Every "
+                     "command is also in the menus.")},
+                 {sidebar_, tr("The sidebar"),
+                  tr("Pages, outline, comments, form fields and signatures. Click the open tab again to "
+                     "fold it away; F9 shows or hides it.")},
+                 {view_, tr("Get around"),
+                  tr("Ctrl+F finds text, Ctrl+plus and minus zoom, F6 moves between the parts of the "
+                     "window. Help → Keyboard Shortcuts lists them all.")}},
+                QLatin1String(FirstRunHints::kDocumentKey));
+        });
     }
     if (!pendingTask_.isEmpty()) {
         QTimer::singleShot(0, this, &MainWindow::runPendingTask);

@@ -184,7 +184,10 @@ menu switches to its mode. The tools:
 | Erase | click an annotation to delete it; erasable ones are outlined |
 | Crop | drag the box to keep, then choose this page, every page or a range. Hides, like `leht crop --box` |
 
-Comments carry the name set in *Edit → Preferences → Name on comments*, if any. The left
+In Comment mode a colour button ends the tool row: Highlight, Underline, Strike Out, Draw
+and Text Box each keep a colour of their own (yellow, blue, red, blue, black to start), chosen
+from a few named colours or any other. Comments carry the name set in *Edit → Preferences →
+Name on comments*, if any. The left
 sidebar has tabs for Pages, Outline, Comments (every annotation by page, with a filter; click
 one to go to it, double-click a note to edit it), Form and Signatures; a tab shows only when
 the document has something for it.
@@ -196,6 +199,11 @@ its own, on a page range. A Form panel appears
 for documents with fields; values are edited in place, with a drop-down for checkboxes,
 radio groups and choice fields. The tools work on the unrotated view (Ctrl+R to rotate
 back) and say so otherwise.
+
+F6 and Shift+F6 move the keyboard between the toolbar, the mode bar, the sidebar and the page;
+every control has a name a screen reader says ("Page 3 of 10", "Note on page 2: …"). The first
+time Leht runs, a short tour points out the start screen, and another the first document's mode
+bar and sidebar; each shows once, and Escape ends it.
 
 ### Organising pages
 

@@ -63,6 +63,9 @@ void Sidebar::addPanel(const QString& id, const QString& icon, const QString& ti
     rail_->insertWidget(rail_->count() - 1, button);  // before the stretch
     group_->addButton(button);
     stack_->addWidget(panel);
+    if (panel->accessibleName().isEmpty()) {
+        panel->setAccessibleName(title);  // a screen reader names the panel it lands in
+    }
     tabs_.insert(id, {button, panel});
     order_ << id;
     connect(button, &QToolButton::clicked, this, [this, id] {

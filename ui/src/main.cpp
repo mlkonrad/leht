@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QIcon>
+#include <QTimer>
 
 int main(int argc, char** argv) {
     // Ties windows to the installed .desktop file: the Wayland app_id, and so
@@ -29,6 +30,8 @@ int main(int argc, char** argv) {
     for (int i = 1; i < args.size(); ++i) {
         window.openDocument(args.at(i));
     }
+    // The first time Leht runs: a short tour of the start screen.
+    QTimer::singleShot(500, &window, [&window] { window.showFirstRunHints(); });
 
     return QApplication::exec();
 }

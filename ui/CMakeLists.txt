@@ -6,10 +6,12 @@ qt_standard_project_setup()
 # headless smoke test link the exact same code.
 qt_add_library(leht_viewer_lib STATIC
     src/actions.cpp
+    src/color_swatches.cpp
     src/comments_panel.cpp
     src/export_dialog.cpp
     src/file_tools.cpp
     src/file_tools_dialogs.cpp
+    src/first_run_hints.cpp
     src/icons.cpp
     src/main_window.cpp
     src/main_window_layout.cpp

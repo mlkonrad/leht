@@ -41,6 +41,8 @@ public:
     /// Areas marked for redaction and not yet applied, drawn as proposals:
     /// outlined, not blacked out, so what they cover can still be read.
     void setRedactionMarks(const QVector<QPair<int, QRectF>>& marks);
+    /// The colour the Text Box tool types new text in.
+    void setNewTextColor(const QColor& color) { newTextColor_ = color; }
 
     [[nodiscard]] double zoom() const { return zoom_; }
     void setZoom(double zoom);
@@ -261,6 +263,7 @@ private:
     int editorAnnot_ = 0;  ///< 0 while typing new free text
     QString editorOriginal_;
     QVector<QPair<int, QRectF>> redactionMarks_;
+    QColor newTextColor_ = Qt::black;
     /// Highlight, Underline and Strike-out act on a text selection.
     [[nodiscard]] bool markupTool() const {
         return tool_ == Tool::Highlight || tool_ == Tool::Underline || tool_ == Tool::StrikeOut;

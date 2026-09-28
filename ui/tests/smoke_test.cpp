@@ -18,9 +18,13 @@
 #include <QTimeZone>
 #include "recent_files.hpp"
 #include "sidebar.hpp"
+#include "color_swatches.hpp"
+#include "first_run_hints.hpp"
 #include "signature_cards.hpp"
 #include "welcome_view.hpp"
+#include <QKeyEvent>
 #include <QListWidget>
+#include <QPointer>
 #include <QMenuBar>
 
 #include <QApplication>
@@ -212,6 +216,10 @@ long inkSamples(const QImage& img) {
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    // The first-run tours are tested on their own below; they must not cover
+    // the windows every other check drives.
+    QSettings().setValue(QLatin1String(FirstRunHints::kWelcomeKey), true);
+    QSettings().setValue(QLatin1String(FirstRunHints::kDocumentKey), true);
 
     MainWindow window;
     window.resize(800, 1000);
@@ -1128,7 +1136,11 @@ int main(int argc, char** argv) {
             check(window.isModified(), "the text layer is an edit");
             // One run, one undo step, however many pages it read.
             QMetaObject::invokeMethod(worker, "undo", Qt::QueuedConnection);
-            pump(2000);
+            // Undo reopens the file in the worker: under load that can take a
+            // while, so wait for the answer rather than a fixed time.
+            for (int i = 0; i < 40 && window.isModified(); ++i) {
+                pump(250);
+            }
             check(!window.isModified(), "one Undo takes the whole OCR run back");
             QMetaObject::invokeMethod(worker, "redo", Qt::QueuedConnection);
             pump(2500);
@@ -1268,6 +1280,50 @@ int main(int argc, char** argv) {
         pump(50);
         check(fresh.actions()->find(QStringLiteral("toolSelect"))->isChecked(),
               "leaving a mode puts its tool down");
+        // Colours: the swatch strip follows the comment tool, and remembers.
+        {
+            QSettings().remove(QStringLiteral("toolColors"));
+            check(fresh.toolColor(QStringLiteral("toolHighlight")) == QColor(255, 220, 0),
+                  "the highlighter starts yellow");
+            modes->setMode(QStringLiteral("comment"));
+            fresh.actions()->find(QStringLiteral("toolHighlight"))->trigger();
+            pump(50);
+            auto* swatches = fresh.findChild<ColorSwatches*>();
+            check(swatches != nullptr && swatches->isVisible() && swatches->isEnabled(),
+                  "Comment mode shows the colour swatches");
+            shot(&fresh, "ux-comment-colour");
+            emit swatches->colorChosen(QColor(120, 220, 120));
+            check(fresh.toolColor(QStringLiteral("toolHighlight")) == QColor(120, 220, 120) &&
+                      fresh.toolColor(QStringLiteral("toolDraw")) == QColor(20, 90, 200),
+                  "a colour chosen for the highlighter is its own");
+            fresh.actions()->find(QStringLiteral("toolMove"))->trigger();
+            pump(50);
+            check(!swatches->isEnabled(), "and the swatches rest for a tool without colour");
+            QSettings().remove(QStringLiteral("toolColors"));
+            modes->setMode(QStringLiteral("read"));
+            pump(50);
+        }
+
+        // The first-run tour: shows once, and Escape ends it.
+        {
+            const QString key = QStringLiteral("test/tourShown");
+            QSettings().remove(key);
+            auto* tour = FirstRunHints::showOnce(&fresh, {{modes, QStringLiteral("One"), QStringLiteral("…")},
+                                                          {fresh.sidebar(), QStringLiteral("Two"), QStringLiteral("…")}},
+                                                 key);
+            check(tour != nullptr && tour->isVisible(), "the first-run tour shows");
+            pump(50);
+            shot(&fresh, "ux-tour");
+            QPointer<FirstRunHints> alive(tour);
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QApplication::sendEvent(tour, &esc);
+            pump(100);
+            check(alive.isNull(), "Escape ends it");
+            check(FirstRunHints::showOnce(&fresh, {{modes, QStringLiteral("One"), QStringLiteral("…")}}, key) == nullptr,
+                  "and it never shows again");
+            QSettings().remove(key);
+        }
+
         fresh.sidebar()->showPanel(QStringLiteral("comments"));
         pump(100);
         check(fresh.sidebar()->currentPanel() == QStringLiteral("comments"), "the sidebar opens a tab");

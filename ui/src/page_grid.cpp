@@ -67,6 +67,7 @@ void PageGrid::setPageCount(int pageCount) {
     const QIcon ph = placeholder();
     for (int p = 0; p < pageCount; ++p) {
         auto* item = new QListWidgetItem(ph, QString::number(p + 1), this);
+        item->setData(Qt::AccessibleTextRole, tr("Page %1").arg(p + 1));
         item->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
         item->setToolTip(tr("Page %1").arg(p + 1));
     }

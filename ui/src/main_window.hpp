@@ -14,6 +14,7 @@
 #include "outline_model.hpp"
 
 class ActionRegistry;
+class ColorSwatches;
 class CommentsPanel;
 class ModeBar;
 class PageGrid;
@@ -78,6 +79,11 @@ public:
     void handleDroppedFiles(const QStringList& paths);
     /// A welcome-view task: "sign", "fill", "combine", "ocr", "reduce", "verify".
     void startTask(const QString& task);
+    /// The start-screen tour, the first time Leht runs (main() calls it once
+    /// the window shows). The document tour follows with the first document.
+    void showFirstRunHints();
+    /// The colour a comment tool draws in: the user's choice, else its own.
+    [[nodiscard]] QColor toolColor(const QString& toolId) const;
     /// File > Close: back to the welcome view (asks about unsaved edits).
     void closeDocument();
     /// Areas marked with the Redact tool and not yet applied.
@@ -248,6 +254,10 @@ private:
     /// Save As without the questions save() and saveAs() have already asked.
     bool saveToChosenPath();
     bool rearranged_ = false;
+    ColorSwatches* swatches_ = nullptr;
+    /// Moves focus to the next (+1) or previous (-1) part of the window:
+    /// toolbar, mode bar, sidebar, page.
+    void focusRegion(int step);
     bool sidebarBeforeGrid_ = true;  ///< whether the sidebar was open before the grid showed  ///< the next documentEdited follows a page rearrangement
     QVector<int> gridSelectionAfterEdit_;  ///< what the grid selects once the edit lands
     QWidget* signaturePanel_ = nullptr;

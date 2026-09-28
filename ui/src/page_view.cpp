@@ -23,6 +23,8 @@ PageView::PageView(QWidget* parent) : QAbstractScrollArea(parent) {
     viewport()->setBackgroundRole(QPalette::Dark);
     verticalScrollBar()->setSingleStep(40);
     setFocusPolicy(Qt::StrongFocus);  // so PageUp/Down, Home/End, arrows arrive
+    setAccessibleName(tr("Document"));
+    setAccessibleDescription(tr("No document open"));
 }
 
 void PageView::setPages(const QVector<QSize>& baseSizes) {
@@ -878,7 +880,7 @@ void PageView::mouseReleaseEvent(QMouseEvent* event) {
             if (box.width() < 12 || box.height() < 12) {
                 box = QRectF(dragStart_, QSizeF(220, 12 * 2.4));  // a click: a line's worth
             }
-            openEditor(page, box, 0, QString(), 12, Qt::black);
+            openEditor(page, box, 0, QString(), 12, newTextColor_);
         } else if (tool_ == Tool::Redact || tool_ == Tool::Sign || tool_ == Tool::Crop) {
             const QRectF box = QRectF(dragStart_, dragNow_).normalized();
             if (box.width() >= 2 && box.height() >= 2) {
@@ -1113,6 +1115,9 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
     const int page = currentPage();
     if (page != lastReportedPage_) {
         lastReportedPage_ = page;
+        // What a screen reader says on focus: where the reader is.
+        setAccessibleDescription(page >= 0 ? tr("Page %1 of %2").arg(page + 1).arg(pageCount())
+                                           : tr("No document open"));
         emit currentPageChanged(page);
     }
 }

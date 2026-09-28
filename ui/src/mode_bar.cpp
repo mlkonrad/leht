@@ -7,6 +7,7 @@
 #include <QHBoxLayout>
 #include <QTabBar>
 #include <QToolBar>
+#include <QWidgetAction>
 
 ModeBar::ModeBar(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("modeBar"));
@@ -63,8 +64,14 @@ void ModeBar::showTools(int index) {
     if (index < 0 || index >= modeTools_.size()) {
         return;
     }
+    tools_->setAccessibleName(tr("%1 tools").arg(tabs_->tabText(index).remove(QLatin1Char('&'))));
     for (QAction* a : modeTools_[index]) {
         tools_->addAction(a);
+    }
+    // Added, not owned: clear() takes it off the bar without deleting it.
+    if (QWidgetAction* extra = extras_.value(tabs_->tabData(index).toString())) {
+        tools_->addSeparator();
+        tools_->addAction(extra);
     }
 }
 
@@ -92,6 +99,14 @@ void ModeBar::setModeEnabled(const QString& id, bool enabled, const QString& why
             setMode(tabs_->tabData(0).toString());  // back to Read, which is always allowed
         }
     }
+}
+
+void ModeBar::setModeExtra(const QString& id, QWidget* widget) {
+    auto* action = new QWidgetAction(this);
+    action->setDefaultWidget(widget);
+    delete extras_.value(id);
+    extras_.insert(id, action);
+    showTools(tabs_->currentIndex());
 }
 
 void ModeBar::setToolButtonStyle(Qt::ToolButtonStyle style) {

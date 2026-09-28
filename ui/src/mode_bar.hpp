@@ -6,6 +6,7 @@
 #include <QWidget>
 
 class QAction;
+class QWidgetAction;
 class QTabBar;
 class QToolBar;
 
@@ -28,6 +29,9 @@ public:
     /// stays visible but disabled, with `why` as its tooltip.
     void setModeEnabled(const QString& id, bool enabled, const QString& why = {});
     void setToolButtonStyle(Qt::ToolButtonStyle style);
+    /// A widget shown after `id`'s tools while that mode is on (the comment
+    /// tools' colour swatches, say). The mode bar keeps it.
+    void setModeExtra(const QString& id, QWidget* widget);
 
 signals:
     void modeChanged(const QString& id);
@@ -39,4 +43,5 @@ private:
     QToolBar* tools_ = nullptr;
     QList<QList<QAction*>> modeTools_;
     QStringList tips_;
+    QHash<QString, QWidgetAction*> extras_;
 };
