@@ -83,6 +83,8 @@ void decode_frame(const Frame& f) {
     case MsgType::Protected: (void)decode_as<Protected>(f); break;
     case MsgType::GetInfo: (void)decode_as<GetInfo>(f); break;
     case MsgType::DocInfo: (void)decode_as<DocInfo>(f); break;
+    case MsgType::ExtractText: (void)decode_as<ExtractText>(f); break;
+    case MsgType::DocText: (void)decode_as<DocText>(f); break;
 
     case MsgType::TrustedListStep: (void)decode_as<TrustedListStep>(f); break;
     case MsgType::TrustedListProgress: (void)decode_as<TrustedListProgress>(f); break;

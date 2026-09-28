@@ -232,6 +232,18 @@ PDF version, whether it has a password, when and with what it was made — and e
 title, author, subject and keywords (`ops/info.hpp`). The edits go in the log like any
 other; one Undo takes back the whole dialog.
 
+### Several documents, and export
+
+Each document has a window of its own. Opening a file while a window shows another (from the
+Open dialog, Open Recent, a drop, or `leht-viewer a.pdf b.pdf`) opens a new window beside it;
+opening a file that is already open brings its window forward. **File → New Window**
+(Ctrl+N) gives an empty one; Quit closes them all, each asking about its own unsaved edits.
+
+**File → Export → Pages as Images…** writes each chosen page as a PNG at 96, 150 or 300 dpi;
+**Text…** writes the chosen pages' text as UTF-8, pages apart by a form feed as `pdftotext`
+does (the worker reads it, protocol 11: ExtractText 28 / DocText 126). Neither changes the
+document.
+
 **The edit log is the source of truth.** The viewer keeps every edit since the file was
 opened or last saved:
 

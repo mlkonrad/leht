@@ -230,6 +230,7 @@ bool is_known(std::uint16_t type) noexcept {
     case MsgType::PagesWritten: case MsgType::MergeAdded: case MsgType::Merged:
     case MsgType::Protect: case MsgType::Protected:
     case MsgType::GetInfo: case MsgType::DocInfo:
+    case MsgType::ExtractText: case MsgType::DocText:
 
     case MsgType::TrustedListStep: case MsgType::TrustedListProgress:
         return true;
@@ -851,6 +852,34 @@ DocInfo DocInfo::decode(Reader& r) {
         std::string key = r.str(64);
         std::string value = r.str(kMaxString);
         m.fields.emplace_back(std::move(key), std::move(value));
+    }
+    return m;
+}
+
+void ExtractText::encode(Writer& w) const {
+    w.str(pages);
+}
+ExtractText ExtractText::decode(Reader& r) {
+    ExtractText m;
+    m.pages = r.str(kMaxName);
+    return m;
+}
+
+void DocText::encode(Writer& w) const {
+    w.u32(static_cast<std::uint32_t>(page_numbers.size()));
+    for (std::size_t i = 0; i < page_numbers.size(); ++i) {
+        w.i32(page_numbers[i]);
+        w.str(i < texts.size() ? texts[i] : std::string());
+    }
+}
+DocText DocText::decode(Reader& r) {
+    DocText m;
+    const std::size_t n = r.count(8);
+    m.page_numbers.reserve(n);
+    m.texts.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        m.page_numbers.push_back(page_index(r));
+        m.texts.push_back(r.str(kMaxString));
     }
     return m;
 }

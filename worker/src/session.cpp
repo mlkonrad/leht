@@ -213,6 +213,9 @@ void Session::dispatch(Frame& frame) {
         case MsgType::Protect:
             on_protect(id, frame);
             return;
+        case MsgType::ExtractText:
+            on_extract_text(id, decode_as<ExtractText>(frame));
+            return;
         case MsgType::GetInfo:
             (void)decode_as<GetInfo>(frame);
             on_get_info(id);
@@ -807,6 +810,18 @@ void Session::on_list_fields(std::uint64_t id) {
 //
 // The viewer runs these in a worker of their own (see protocol.hpp), so the
 // document here is the file as it is on disk, not the one on screen.
+
+void Session::on_extract_text(std::uint64_t id, const ExtractText& m) {
+    if (!require_document(id)) {
+        return;
+    }
+    DocText out;
+    for (const int p : page_set(m.pages, doc_->page_count())) {
+        out.page_numbers.push_back(p);
+        out.texts.push_back(text_page(p).text());
+    }
+    channel_.send(id, out);
+}
 
 void Session::on_get_info(std::uint64_t id) {
     if (!require_document(id)) {

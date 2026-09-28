@@ -508,6 +508,13 @@ void MainWindow::buildActions() {
     // Through close(), so unsaved edits are asked about.
     add({.id = QStringLiteral("quit"), .text = tr("&Quit"), .icon = QStringLiteral("log-out"),
          .themeIcon = QStringLiteral("application-exit"), .shortcuts = {QKeySequence::Quit}, .group = file},
+        [] { QApplication::closeAllWindows(); });  // each asks about its own unsaved edits
+    add({.id = QStringLiteral("newWindow"), .text = tr("&New Window"), .icon = QStringLiteral("files"),
+         .themeIcon = QStringLiteral("window-new"), .shortcuts = {QKeySequence::New},
+         .tip = tr("Another window, for another document"), .group = file},
+        [this] { (void)newWindow(); });
+    add({.id = QStringLiteral("closeWindow"), .text = tr("Close &Window"),
+         .shortcuts = {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_W)}, .group = file},
         [this] { close(); });
 
     // Edit.
@@ -1416,8 +1423,37 @@ QString MainWindow::askOpenPath() {
 void MainWindow::openDialog() {
     const QString path = askOpenPath();
     if (!path.isEmpty()) {
-        openPath(path);
+        openDocument(path);
     }
+}
+
+MainWindow* MainWindow::newWindow() {
+    auto* window = new MainWindow();
+    window->setAttribute(Qt::WA_DeleteOnClose);
+    window->resize(size());
+    window->move(pos() + QPoint(32, 32));  // beside this one, not on top of it
+    window->show();
+    return window;
+}
+
+void MainWindow::openDocument(const QString& path) {
+    const QString absolute = QFileInfo(path).absoluteFilePath();
+    // Already open somewhere: that window comes forward, rather than a copy.
+    for (QWidget* w : QApplication::topLevelWidgets()) {
+        auto* other = qobject_cast<MainWindow*>(w);
+        if (other != nullptr && other->isVisible() && other->currentPath_ == absolute && other->pageCount_ > 0) {
+            other->showNormal();
+            other->raise();
+            other->activateWindow();
+            return;
+        }
+    }
+    // This window is busy with a document: the new one gets its own.
+    if (pageCount_ > 0 || stack_->currentWidget() == documentPage_) {
+        newWindow()->openPath(absolute);
+        return;
+    }
+    openPath(absolute);
 }
 
 void MainWindow::openPath(const QString& path) {
@@ -1836,7 +1872,7 @@ void MainWindow::buildFileTools() {
                 }
                 box.exec();
                 if (open != nullptr && box.clickedButton() == open) {
-                    openPath(written.first());
+                    openDocument(written.first());
                 }
             });
     connect(fileTools_, &FileTools::passwordRequired, this, [this](bool wrong) {

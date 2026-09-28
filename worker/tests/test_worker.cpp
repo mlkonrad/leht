@@ -589,6 +589,12 @@ void pages_are_organised_in_the_worker() {
     CHECK(next(*w).type == MsgType::Failed);
     w->channel().send(992, ListAnnots{});
     CHECK(next(*w).type == MsgType::AnnotList);  // and the worker lives on
+
+    // Export > Text: the text of the pages asked for, one string each.
+    w->channel().send(993, ExtractText{"2-3"});
+    const DocText text = decode_as<DocText>(next(*w));
+    CHECK(text.page_numbers == std::vector<int>({1, 2}) && text.texts.size() == 2 &&
+          !text.texts[0].empty());
 }
 
 void redaction_through_the_worker() {

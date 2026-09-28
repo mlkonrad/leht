@@ -1218,11 +1218,36 @@ int main(int argc, char** argv) {
         pump(1500);
         check(!fresh.isShowingWelcome() && fresh.view()->pageCount() == 10,
               "a file dropped on the window opens");
+        check(recent::files().value(0) == QFileInfo(QString::fromStdString(doc)).absoluteFilePath(),
+              "an opened file heads the recent list");
+        {
+            const auto windows = [] {
+                int n = 0;
+                for (QWidget* w : QApplication::topLevelWidgets()) {
+                    n += qobject_cast<MainWindow*>(w) != nullptr && w->isVisible() ? 1 : 0;
+                }
+                return n;
+            };
+            const int before = windows();
+            fresh.openDocument(QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf"));
+            pump(1500);
+            check(windows() == before + 1 && fresh.view()->pageCount() == 10,
+                  "another file opens in a window of its own, leaving this one as it was");
+            fresh.openDocument(QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf"));
+            pump(300);
+            check(windows() == before + 1, "opening it again brings that window forward instead");
+            for (QWidget* w : QApplication::topLevelWidgets()) {
+                auto* other = qobject_cast<MainWindow*>(w);
+                if (other != nullptr && other != &fresh && other != &window && other->isVisible()) {
+                    other->close();  // unmodified: closes without asking
+                }
+            }
+            pump(300);
+            check(windows() == before, "and it closes");
+        }
         check(fresh.actions()->find(QStringLiteral("save"))->isEnabled() &&
                   fresh.actions()->find(QStringLiteral("toolHighlight"))->isEnabled(),
               "an open document enables the tools");
-        check(recent::files().value(0) == QFileInfo(QString::fromStdString(doc)).absoluteFilePath(),
-              "an opened file heads the recent list");
 
         // Modes: the tool row follows the mode, and a tool picked from a
         // menu brings its mode along.
@@ -1418,6 +1443,23 @@ int main(int argc, char** argv) {
         leht::Context ctx;
         leht::Document saved = leht::Document::open(ctx, copy.toStdString());
         check(saved.metadata("info:Title").value_or("") == "Üürileping", "the title is saved");
+
+        // Export: pages as pictures, and the text.
+        const QStringList pictures =
+            window.exportImages(QStringLiteral("1-2"), 72, tmp.filePath(QStringLiteral("page %1.png")));
+        check(pictures.size() == 2 && QFile::exists(tmp.filePath(QStringLiteral("page 002.png"))),
+              "Export Pages as Images writes a picture per page");
+        const QImage picture(pictures.value(0));
+        check(!picture.isNull() && std::abs(picture.width() - qRound(view->pageSizePoints(0).width())) <= 1,
+              "at 72 dpi a page is as many pixels wide as it is points");
+        const QString textFile = tmp.filePath(QStringLiteral("text.txt"));
+        window.exportText(QStringLiteral("1-2"), textFile);
+        pump(1000);
+        QFile exported(textFile);
+        const QString text = exported.open(QIODevice::ReadOnly) ? QString::fromUtf8(exported.readAll()) : QString();
+        check(text.contains(QStringLiteral("page 1 -")) && text.contains(QStringLiteral("page 2 -")) &&
+                  text.count(QLatin1Char('\f')) == 1,
+              "Export Text writes both pages, a page break between them");
     }
 
     // --- Signatures in words ---------------------------------------------------

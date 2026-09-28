@@ -74,6 +74,7 @@ enum class MsgType : std::uint16_t {
     MergeFinish = 25,  ///< carries the output file's fd via SCM_RIGHTS
     Protect = 26,      ///< carries the output file's fd via SCM_RIGHTS
     GetInfo = 27,
+    ExtractText = 28,
 
     // The EU trusted lists: requests 30-39, to leht-worker --trusted-list.
     TrustedListStep = 30,
@@ -107,6 +108,7 @@ enum class MsgType : std::uint16_t {
     Merged = 123,
     Protected = 124,
     DocInfo = 125,
+    DocText = 126,
 
     // The EU trusted lists: replies 130-139.
     TrustedListProgress = 130,
@@ -582,6 +584,23 @@ struct DocInfo {
     std::vector<std::pair<std::string, std::string>> fields;
     void encode(Writer& w) const;
     static DocInfo decode(Reader& r);
+};
+
+/// File > Export > Text: the text of `pages` (a range spec; "" all), in
+/// reading order, one string per page.
+struct ExtractText {
+    static constexpr MsgType kType = MsgType::ExtractText;
+    std::string pages;
+    void encode(Writer& w) const;
+    static ExtractText decode(Reader& r);
+};
+
+struct DocText {
+    static constexpr MsgType kType = MsgType::DocText;
+    std::vector<int> page_numbers;    ///< 0-based, as the pages were asked for
+    std::vector<std::string> texts;   ///< one per page number
+    void encode(Writer& w) const;
+    static DocText decode(Reader& r);
 };
 
 struct Protected {

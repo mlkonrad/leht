@@ -7,6 +7,7 @@ qt_standard_project_setup()
 qt_add_library(leht_viewer_lib STATIC
     src/actions.cpp
     src/comments_panel.cpp
+    src/export_dialog.cpp
     src/file_tools.cpp
     src/file_tools_dialogs.cpp
     src/icons.cpp

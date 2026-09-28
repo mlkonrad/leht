@@ -53,7 +53,13 @@ public:
     MainWindow();
     ~MainWindow() override;
 
+    /// Opens `path` in this window, replacing what it shows.
     void openPath(const QString& path);
+    /// Opens `path` as the user asked: the window already showing it comes
+    /// forward; an empty window opens it; otherwise a new window does.
+    void openDocument(const QString& path);
+    /// File > New Window: another window, empty, deleted when closed.
+    MainWindow* newWindow();
 
     // Accessors for the headless smoke test; the worker lives on another thread
     // and has no parent, so findChild cannot reach it.
@@ -78,6 +84,13 @@ public:
     /// edit group. Asks first when `confirm`. False if nothing was marked or
     /// the user called it off.
     bool applyRedactions(bool confirm = true);
+    /// File > Export > Pages as Images, without the dialogs: `pages` (a range
+    /// spec, "" all) at `dpi`, each to `pattern` with %1 for the page number
+    /// (or to `pattern` itself for one page). Returns the files written.
+    QStringList exportImages(const QString& pages, int dpi, const QString& pattern);
+    /// File > Export > Text, without the dialogs. Asynchronous: the file is
+    /// written when the worker's text arrives.
+    void exportText(const QString& pages, const QString& path);
 
 private slots:
     void openDialog();

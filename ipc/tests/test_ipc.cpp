@@ -903,7 +903,10 @@ void test_file_tools() {
                             MsgType::PagesWritten, MsgType::MergeAdded, MsgType::Merged}) {
         CHECK(is_known(static_cast<std::uint16_t>(t)));
     }
-    CHECK(!is_known(28) && !is_known(126));
+    CHECK(!is_known(29) && !is_known(127));
+    CHECK(round_trip(ExtractText{"2-4"}).pages == "2-4");
+    const DocText text = round_trip(DocText{{0, 3}, {"Tere", "õhtust"}});
+    CHECK(text.page_numbers == std::vector<int>({0, 3}) && text.texts[1] == "õhtust");
     const DocInfo info = round_trip(DocInfo{{{"format", "PDF 1.7"}, {"info:Title", "Üürileping"}}});
     CHECK(info.fields.size() == 2 && info.fields[1].second == "Üürileping");
     (void)round_trip(GetInfo{});

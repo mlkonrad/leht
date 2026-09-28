@@ -159,6 +159,8 @@ public slots:
     void insertBlankPage(int at, QSizeF size);
     /// File > Document Properties: answered by infoReady().
     void requestInfo();
+    /// File > Export > Text: answered by textReady(), one string per page.
+    void extractText(QString pages);
     /// Sets Title, Author, Subject or Keywords ("" removes it), as an edit.
     void setInfo(QString key, QString value);
 
@@ -283,6 +285,8 @@ signals:
     void pagesRearranged();
     /// The document's facts, as Document::metadata() keys and values.
     void infoReady(QStringList keys, QStringList values);
+    /// `texts[i]` is page `pages[i]`'s text (0-based); empty lists on failure.
+    void textReady(QVector<int> pages, QStringList texts);
     void documentEdited(QVector<int> pages, bool allPages, QVector<QSize> baseSizes);
     /// `modified`: there are edits since the file was opened or last saved.
     void editStateChanged(bool canUndo, bool canRedo, bool modified);

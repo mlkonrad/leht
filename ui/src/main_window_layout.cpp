@@ -6,6 +6,7 @@
 
 #include "actions.hpp"
 #include "comments_panel.hpp"
+#include "export_dialog.hpp"
 #include "file_tools.hpp"
 #include "file_tools_dialogs.hpp"
 #include "icons.hpp"
@@ -18,6 +19,8 @@
 #include "sidebar.hpp"
 #include "thumbnail_bar.hpp"
 #include "welcome_view.hpp"
+#include "leht/edit.hpp"
+#include "leht/error.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "leht/ocr/ocr.hpp"
 #endif
@@ -38,6 +41,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
@@ -52,6 +56,8 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
+#include <memory>
 
 void MainWindow::buildMainToolbar() {
     QToolBar* bar = addToolBar(tr("Main"));
@@ -297,7 +303,7 @@ void MainWindow::buildLayout() {
 
     welcome_ = new WelcomeView(this);
     connect(welcome_, &WelcomeView::openRequested, this, &MainWindow::openDialog);
-    connect(welcome_, &WelcomeView::openPath, this, &MainWindow::openPath);
+    connect(welcome_, &WelcomeView::openPath, this, &MainWindow::openDocument);
     connect(welcome_, &WelcomeView::taskChosen, this, &MainWindow::startTask);
     connect(welcome_, &WelcomeView::filesDropped, this, &MainWindow::handleDroppedFiles);
 
@@ -319,7 +325,7 @@ void MainWindow::buildMenus() {
             QAction* a = recentMenu_->addAction(QFileInfo(path).fileName());
             a->setToolTip(path);
             a->setStatusTip(path);
-            connect(a, &QAction::triggered, this, [this, path] { openPath(path); });
+            connect(a, &QAction::triggered, this, [this, path] { openDocument(path); });
         }
         if (files.isEmpty()) {
             recentMenu_->addAction(tr("No recent files"))->setEnabled(false);
@@ -337,10 +343,15 @@ void MainWindow::buildMenus() {
         }
         return items;
     };
+    std::vector<Item> fileMenu = ids({"newWindow", "open", "openRecent", "close", "closeWindow", "-", "save",
+                                      "saveAs", "-", "combineFiles", "reduceFileSize", "splitDocument", "-",
+                                      "protect", "unprotect", "-", "properties"});
+    fileMenu.emplace_back(tr("&Export"), ids({"exportImages", "exportText"}));
+    for (Item& item : ids({"print", "-", "quit"})) {
+        fileMenu.push_back(std::move(item));
+    }
     actions_->populate(menuBar(), {
-        {tr("&File"), ids({"open", "openRecent", "close", "-", "save", "saveAs", "-", "combineFiles",
-                           "reduceFileSize", "splitDocument", "-", "protect", "unprotect", "-", "properties", "print", "-",
-                           "quit"})},
+        {tr("&File"), fileMenu},
         {tr("&Edit"), ids({"undo", "redo", "-", "copy", "-", "find", "findNext", "findPrevious", "-",
                            "preferences"})},
         {tr("&View"), ids({"zoomIn", "zoomOut", "actualSize", "fitWidth", "fitPage", "-", "rotateView", "-",
@@ -468,7 +479,7 @@ void MainWindow::handleDroppedFiles(const QStringList& paths) {
         return;
     }
     if (paths.size() == 1) {
-        openPath(paths.first());
+        openDocument(paths.first());
         return;
     }
     QMessageBox box(QMessageBox::Question, tr("Several files"),
@@ -482,7 +493,7 @@ void MainWindow::handleDroppedFiles(const QStringList& paths) {
     if (box.clickedButton() == combine) {
         combineFiles(paths);
     } else if (box.clickedButton() == first) {
-        openPath(paths.first());
+        openDocument(paths.first());
     }
 }
 
@@ -557,6 +568,56 @@ void MainWindow::runPendingTask() {
 // --- Pages mode: organising pages ------------------------------------------
 
 void MainWindow::buildPageActions() {
+    {
+        // File > Export: not a page edit, but it lives with the page commands.
+        const QString file = tr("File");
+        const auto open = [this] { return pageCount_ > 0; };
+        QAction* images = actions_->add({.id = QStringLiteral("exportImages"), .text = tr("Pages as &Images…"),
+                                         .icon = QStringLiteral("image"),
+                                         .tip = tr("Save pages as PNG pictures"), .enabledWhen = open, .group = file});
+        connect(images, &QAction::triggered, this, [this] {
+            ExportDialog dialog(this, ExportDialog::Kind::Images, pageCount_, std::max(0, view_->currentPage()));
+            if (dialog.exec() != QDialog::Accepted) {
+                return;
+            }
+            const QString spec = dialog.pages();
+            const QFileInfo doc(currentPath_);
+            const bool one = !spec.isEmpty() && !spec.contains(QLatin1Char(',')) && !spec.contains(QLatin1Char('-'));
+            QString pattern;
+            if (one) {
+                pattern = QFileDialog::getSaveFileName(
+                    this, tr("Export page as"), doc.dir().filePath(tr("%1, page %2.png").arg(doc.completeBaseName(), spec)),
+                    tr("PNG pictures (*.png)"));
+            } else {
+                const QString folder = QFileDialog::getExistingDirectory(this, tr("Export pages into"), doc.absolutePath());
+                if (!folder.isEmpty()) {
+                    pattern = QDir(folder).filePath(doc.completeBaseName() + QStringLiteral(", page %1.png"));
+                }
+            }
+            if (pattern.isEmpty()) {
+                return;
+            }
+            const QStringList written = exportImages(spec, dialog.dpi(), pattern);
+            statusBar()->showMessage(tr("Exported %n picture(s).", nullptr, static_cast<int>(written.size())), 6000);
+        });
+        QAction* text = actions_->add({.id = QStringLiteral("exportText"), .text = tr("&Text…"),
+                                       .icon = QStringLiteral("file-text"),
+                                       .tip = tr("Save the document's text as a plain text file"),
+                                       .enabledWhen = open, .group = file});
+        connect(text, &QAction::triggered, this, [this] {
+            ExportDialog dialog(this, ExportDialog::Kind::Text, pageCount_, std::max(0, view_->currentPage()));
+            if (dialog.exec() != QDialog::Accepted) {
+                return;
+            }
+            const QFileInfo doc(currentPath_);
+            const QString path = QFileDialog::getSaveFileName(this, tr("Export text as"),
+                                                              doc.dir().filePath(doc.completeBaseName() + QStringLiteral(".txt")),
+                                                              tr("Text files (*.txt)"));
+            if (!path.isEmpty()) {
+                exportText(dialog.pages(), path);
+            }
+        });
+    }
     const QString group = tr("Pages");
     const auto open = [this] { return pageCount_ > 0 && certAllows(4); };
     const auto add = [&](ActionRegistry::Spec spec, auto&& slot) {
@@ -738,4 +799,65 @@ void MainWindow::insertFilesAt(const QStringList& paths, int at) {
         onWorker([=](RenderWorker* w) { w->insertPages(where, data, QString()); });
     }
     statusBar()->showMessage(tr("Inserting %n file(s)…", nullptr, static_cast<int>(paths.size())), 4000);
+}
+
+// --- Export ------------------------------------------------------------------
+
+QStringList MainWindow::exportImages(const QString& pages, int dpi, const QString& pattern) {
+    QStringList written;
+    std::vector<int> chosen;
+    try {
+        chosen = leht::page_set(pages.toStdString(), pageCount_);
+    } catch (const leht::Error&) {
+        return written;
+    }
+    auto* progress = new QProgressDialog(tr("Exporting pages…"), tr("Cancel"), 0,
+                                         static_cast<int>(chosen.size()), this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(500);
+    const double zoom = dpi / 72.0;
+    for (std::size_t i = 0; i < chosen.size(); ++i) {
+        progress->setValue(static_cast<int>(i));
+        if (progress->wasCanceled()) {
+            break;
+        }
+        const int page = chosen[i];
+        QImage image;
+        // As printing does: the worker renders, this thread waits for it.
+        QMetaObject::invokeMethod(worker_, "renderAt", Qt::BlockingQueuedConnection, Q_RETURN_ARG(QImage, image),
+                                  Q_ARG(int, page), Q_ARG(double, zoom));
+        if (image.isNull()) {
+            continue;
+        }
+        image.setDotsPerMeterX(static_cast<int>(std::lround(dpi / 0.0254)));
+        image.setDotsPerMeterY(static_cast<int>(std::lround(dpi / 0.0254)));
+        const QString path = chosen.size() == 1 && !pattern.contains(QLatin1String("%1"))
+                                 ? pattern
+                                 : pattern.arg(page + 1, 3, 10, QLatin1Char('0'));
+        if (image.save(path, "PNG")) {
+            written << path;
+        }
+    }
+    progress->close();
+    progress->deleteLater();
+    return written;
+}
+
+void MainWindow::exportText(const QString& pages, const QString& path) {
+    auto once = std::make_shared<QMetaObject::Connection>();
+    *once = connect(worker_, &RenderWorker::textReady, this,
+                    [this, once, path](const QVector<int>& numbers, const QStringList& texts) {
+        disconnect(*once);
+        QFile file(path);
+        if (numbers.isEmpty() || !file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QMessageBox::warning(this, tr("Export text"), tr("Could not write “%1”.").arg(path));
+            return;
+        }
+        // Pages apart by a form feed, as pdftotext does: a plain-text page break.
+        file.write(texts.join(QLatin1Char('\f')).toUtf8());
+        file.close();
+        statusBar()->showMessage(tr("Exported the text of %n page(s).", nullptr, static_cast<int>(numbers.size())),
+                                 6000);
+    });
+    onWorker([pages](RenderWorker* w) { w->extractText(pages); });
 }

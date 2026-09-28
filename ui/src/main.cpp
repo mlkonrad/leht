@@ -23,10 +23,11 @@ int main(int argc, char** argv) {
     MainWindow window;
     window.show();
 
-    // A path on the command line opens immediately: `leht-viewer file.pdf`.
+    // Paths on the command line open immediately, each in its own window:
+    // `leht-viewer a.pdf b.pdf`.
     const QStringList args = QApplication::arguments();
-    if (args.size() > 1) {
-        window.openPath(args.at(1));
+    for (int i = 1; i < args.size(); ++i) {
+        window.openDocument(args.at(i));
     }
 
     return QApplication::exec();

@@ -1888,6 +1888,28 @@ void RenderWorker::requestInfo() {
     emit infoReady(keys, values);
 }
 
+void RenderWorker::extractText(QString pages) {
+    QVector<int> numbers;
+    QStringList texts;
+    auto reply = proc_.load() ? roundTrip(ipc::ExtractText{pages.toStdString()}, Phase::Edit, -1)
+                              : std::nullopt;
+    try {
+        if (reply && reply->type == ipc::MsgType::DocText) {
+            const ipc::DocText text = ipc::decode_as<ipc::DocText>(*reply);
+            for (std::size_t i = 0; i < text.page_numbers.size() && i < text.texts.size(); ++i) {
+                numbers.push_back(text.page_numbers[i]);
+                texts.push_back(QString::fromStdString(text.texts[i]));
+            }
+        } else if (reply) {
+            (void)ipc::decode_as<ipc::Failed>(*reply);
+        }
+    } catch (const ipc::ProtocolError&) {
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+    }
+    emit textReady(numbers, texts);
+}
+
 void RenderWorker::setInfo(QString key, QString value) {
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::SetInfo;
