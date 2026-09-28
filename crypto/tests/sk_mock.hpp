@@ -148,7 +148,10 @@ public:
     ~LocalSmartId() override { stop(); }
 
     [[nodiscard]] crypto::SmartIdService service() const {
-        return {base() + "/v3/", "smart-id-demo", {"00000000-0000-4000-8000-000000000000", "DEMO"}};
+        // SK's real pins: over plain http to 127.0.0.1 they are allowed, and
+        // unused -- the pinning itself is tested over TLS in test_sk.
+        return {base() + "/v3/", "smart-id-demo", {"00000000-0000-4000-8000-000000000000", "DEMO"},
+                crypto::SmartIdService::demo().pins};
     }
     [[nodiscard]] const Cert& signer() const { return signer_; }
 
@@ -469,7 +472,8 @@ public:
     ~LocalMobileId() override { stop(); }
 
     [[nodiscard]] crypto::MobileIdService service() const {
-        return {base() + "/mid-api", {"00000000-0000-0000-0000-000000000000", "DEMO"}};
+        return {base() + "/mid-api", {"00000000-0000-0000-0000-000000000000", "DEMO"},
+                crypto::MobileIdService::demo().pins};
     }
 
     std::atomic<Outcome> outcome{Outcome::Ok};

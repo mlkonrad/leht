@@ -25,6 +25,8 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -105,6 +107,7 @@ struct CertSpec {
     std::string qc_statements{};  ///< qcStatements extension value, as DER in hex
     std::string policies{};       ///< certificatePolicies, OIDs separated by commas
     std::string ca_issuers_url{};  ///< authorityInfoAccess caIssuers, when set
+    std::string subject_alt_name{};  ///< e.g. "IP:127.0.0.1", when set
 };
 
 /// Issues a certificate for `key` from `issuer` (self-signed when null).
@@ -152,6 +155,9 @@ inline Cert issue(const Key& key, const CertSpec& spec, const Cert* issuer = nul
             aia += (aia.empty() ? "" : ",") + std::string("caIssuers;URI:") + spec.ca_issuers_url;
         }
         add(NID_info_access, aia.c_str());
+    }
+    if (!spec.subject_alt_name.empty()) {
+        add(NID_subject_alt_name, spec.subject_alt_name.c_str());
     }
     if (!spec.crl_url.empty()) {
         add(NID_crl_distribution_points, ("URI:" + spec.crl_url).c_str());
@@ -317,6 +323,11 @@ protected:
 
 private:
     void serve() {
+        // A client that hung up must not kill the test with SIGPIPE.
+        sigset_t pipe;
+        sigemptyset(&pipe);
+        sigaddset(&pipe, SIGPIPE);
+        pthread_sigmask(SIG_BLOCK, &pipe, nullptr);
         while (!stop_) {
             const int c = ::accept4(fd_, nullptr, nullptr, SOCK_CLOEXEC);
             if (c < 0) {

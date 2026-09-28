@@ -194,6 +194,21 @@ verification code, what is happening, and Cancel.
   `crypto/src/http.cpp`): TLS verified against the system's CAs with the host name
   checked, one request per connection, a size cap and a timeout, and the status code read
   from the reply — SK's codes carry the message.
+- **Pinned.** Beyond the system's CAs and the host name, the chain SK's server presents
+  must hold one of two keys built into Leht: DigiCert's issuing CA *Global G2 TLS RSA
+  SHA256 2020 CA1* (valid to 2031) or its root, *DigiCert Global Root G2* (to 2038). All
+  four of SK's hosts, demo and live, are certified that way (checked 28 September 2026). A
+  certificate from any other CA — an intercepting proxy's, or a CA that should not have
+  issued one — is refused before a byte is sent, and so is plain `http://` to anything but
+  this machine. The CA keys are pinned rather than SK's own certificates on purpose: those
+  are renewed every year (the demo Smart-ID one expires on 10 October 2026), and a pinned
+  certificate would break signing on SK's schedule, not Leht's. The cost is that DigiCert
+  itself is trusted for SK's names; if SK ever changes certificate authority, Leht needs an
+  update, and the error says so.
+- **A server that hangs up** mid-request is an error, not the end of Leht: writing to a
+  closed connection raises SIGPIPE, which kills a process by default, so every HTTP
+  exchange (SK, timestamps, OCSP, CRLs, the trusted lists) blocks it on its own thread for
+  its duration, without changing it for the rest of the process.
 
 What SK's demo did, checked by hand on 28 September 2026 (`LEHT_SK_DEMO=1 test_sk`): a
 Mobile-ID signature with `+37268000769`, end to end; a Smart-ID certificate choice by
@@ -204,10 +219,9 @@ checks every request as SK documents it — the `authCode` of each QR link inclu
 signs as a phone does. A signature through a real phone and SK's demo app has not been
 made yet.
 
-For a live deployment, what is missing is SK's side — a contract, a registered name and
-UUID (Preferences → Signing, or `--relying-party-name` and `--relying-party-uuid`) — and,
-before that, **pinning SK's TLS certificates**, which SK recommends and Leht does not do
-yet.
+For a live deployment, what is missing is SK's side: a contract, and a registered name and
+UUID (Preferences → Signing, or `--relying-party-name` and `--relying-party-uuid`), plus
+the live addresses, which use the same pins.
 
 ## Certification and field locks
 
@@ -563,4 +577,4 @@ they are overdue.
 
 - **Smart-ID and Mobile-ID with real accounts.** Only SK's demo environment is wired in;
   see [Signing with a phone](#signing-with-a-phone-smart-id-and-mobile-id) for what a live
-  one needs, TLS pinning included.
+  one needs.

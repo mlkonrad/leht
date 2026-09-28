@@ -269,11 +269,19 @@ std::string mobile_id_status(int status) {
     }
 }
 
+/// A service's HTTP error messages, and the CA keys its TLS chain must hold.
+struct Api {
+    StatusText status_text;
+    const std::vector<std::string>* pins;
+};
+
 /// One JSON exchange: POST `post` when given, else GET. The reply's body.
 std::string exchange(const std::string& what, const std::string& url, const json* post,
-                     int timeout_seconds, StatusText status_text) {
+                     int timeout_seconds, const Api& api) {
     detail::HttpRequest r;
     r.url = url;
+    // Empty pins, only as a test sets them: the system's CAs alone decide.
+    r.pins = api.pins != nullptr && !api.pins->empty() ? api.pins : nullptr;
     r.what = what;
     r.timeout_seconds = timeout_seconds;
     r.max_size = std::size_t{256} << 10;
@@ -288,7 +296,7 @@ std::string exchange(const std::string& what, const std::string& url, const json
     // client speaks, and the status codes carry the message.
     const detail::HttpReply reply = detail::http11(r);
     if (reply.status != 200) {
-        throw Error(0, status_text(reply.status));
+        throw Error(0, api.status_text(reply.status));
     }
     return {reply.body.begin(), reply.body.end()};
 }
@@ -309,7 +317,7 @@ void say(const PhoneDialog& d, const std::string& text) {
 /// with `tick` and the cancel check between. Returns the final body.
 template <typename Session, typename Parse>
 Session poll(const std::string& what, const std::string& url, const PhoneDialog& dialog,
-             StatusText status_text, Parse parse, const std::function<void()>& tick = {}) {
+             const Api& api, Parse parse, const std::function<void()>& tick = {}) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kMaxWaitSeconds);
     for (;;) {
         check_cancel(dialog);
@@ -317,7 +325,7 @@ Session poll(const std::string& what, const std::string& url, const PhoneDialog&
             tick();
         }
         const std::string body = exchange(what, url + "?timeoutMs=" + std::to_string(kPollMs),
-                                          nullptr, kPollMs / 1000 + 15, status_text);
+                                          nullptr, kPollMs / 1000 + 15, api);
         Session s;
         try {
             s = parse(body);
@@ -491,6 +499,7 @@ public:
 
     [[nodiscard]] const EVP_MD* digest() const override { return EVP_sha256(); }
     [[nodiscard]] bool pss() const override { return true; }
+    [[nodiscard]] Api api() const { return {smart_id_status, &service_.pins}; }
 
     Bytes sign(const Bytes& hash) override {
         const std::string base = with_slash(service_.base_url);
@@ -513,7 +522,7 @@ public:
             url = base + "signature/notification/document/" + document_;
         }
         check_cancel(dialog_);
-        const json started = sk::parse(exchange(kSmartId, url, &body, 30, smart_id_status));
+        const json started = sk::parse(exchange(kSmartId, url, &body, 30, api()));
         const std::string session = path_segment(sk::str(started, "sessionID"), "session ID");
         if (!linked) {
             const json* vc = sk::obj(started, "vc");
@@ -531,7 +540,7 @@ public:
             say(dialog_, "Enter your Smart-ID PIN2 on the phone.");
         }
         const sk::SmartIdSession s = poll<sk::SmartIdSession>(
-            kSmartId, base + "session/" + session, dialog_, smart_id_status,
+            kSmartId, base + "session/" + session, dialog_, api(),
             sk::parse_smart_id_session);
         smart_id_outcome(s);
         if (!s.cert.empty() && s.cert != cert_der_) {
@@ -633,6 +642,7 @@ public:
           national_id_(std::move(national_id)), cert_der_(std::move(cert_der)), md_(md), ec_(ec) {}
 
     [[nodiscard]] const EVP_MD* digest() const override { return md_; }
+    [[nodiscard]] Api api() const { return {mobile_id_status, &service_.pins}; }
 
     Bytes sign(const Bytes& hash) override {
         const std::string hash_type = EVP_MD_get_type(md_) == NID_sha512   ? "SHA512"
@@ -657,10 +667,10 @@ public:
         check_cancel(dialog_);
         const std::string base = service_.base_url;
         const json started =
-            sk::parse(exchange(kMobileId, base + "/signature", &body, 30, mobile_id_status));
+            sk::parse(exchange(kMobileId, base + "/signature", &body, 30, api()));
         const std::string session = path_segment(sk::str(started, "sessionID"), "session ID");
         const sk::MobileIdSession s = poll<sk::MobileIdSession>(
-            kMobileId, base + "/signature/session/" + session, dialog_, mobile_id_status,
+            kMobileId, base + "/signature/session/" + session, dialog_, api(),
             sk::parse_mobile_id_session);
         mobile_id_outcome(s);
         if (!s.cert.empty() && s.cert != cert_der_) {
@@ -690,15 +700,30 @@ private:
 
 // --- public -------------------------------------------------------------------
 
+std::vector<std::string> sk_pins() {
+    // SK's servers, demo and live alike (sid.demo.sk.ee, tsp.demo.sk.ee,
+    // rp-api.smart-id.com, mid.sk.ee, checked 28 September 2026), are
+    // certified by DigiCert: the issuing CA, then its root. Their own
+    // certificates are renewed every year -- the demo Smart-ID one expires on
+    // 10 October 2026 -- so pinning those would break Leht on SK's schedule;
+    // the CA keys last until 2031 and 2038. SHA-256 of the SPKI, Base64.
+    return {
+        "Wec45nQiFwKvHtuHxSAMGkt19k+uPSw9JlEkxhvYPHk=",  // DigiCert Global G2 TLS RSA SHA256 2020 CA1
+        "i7WTqTvh0OioIruIfFR4kMPnBqrS2rdiVPl/s2uC/CY=",  // DigiCert Global Root G2
+    };
+}
+
 SmartIdService SmartIdService::demo() {
     return {env_or("LEHT_SMARTID_URL", "https://sid.demo.sk.ee/smart-id-rp/v3/"),
             "smart-id-demo",
-            {"00000000-0000-4000-8000-000000000000", "DEMO"}};
+            {"00000000-0000-4000-8000-000000000000", "DEMO"},
+            sk_pins()};
 }
 
 MobileIdService MobileIdService::demo() {
     return {env_or("LEHT_MOBILEID_URL", "https://tsp.demo.sk.ee/mid-api"),
-            {"00000000-0000-0000-0000-000000000000", "DEMO"}};
+            {"00000000-0000-0000-0000-000000000000", "DEMO"},
+            sk_pins()};
 }
 
 bool Identity::on_phone() const { return impl_->remote != nullptr; }
@@ -714,7 +739,7 @@ Identity Identity::from_smart_id_qr(const SmartIdService& service, const PhoneDi
     check_cancel(dialog);
     const json started = sk::parse(exchange(
         kSmartId, base + "signature/certificate-choice/device-link/anonymous", &body, 30,
-        smart_id_status));
+        Api{smart_id_status, &service.pins}));
     // elapsedSeconds counts from the moment this reply arrived.
     const auto t0 = std::chrono::steady_clock::now();
     const std::string session = path_segment(sk::str(started, "sessionID"), "session ID");
@@ -734,7 +759,7 @@ Identity Identity::from_smart_id_qr(const SmartIdService& service, const PhoneDi
     link.relying_party_name = service.party.name;
     say(dialog, "Scan the QR code with the Smart-ID app.");
     const sk::SmartIdSession s = poll<sk::SmartIdSession>(
-        kSmartId, base + "session/" + session, dialog, smart_id_status,
+        kSmartId, base + "session/" + session, dialog, Api{smart_id_status, &service.pins},
         sk::parse_smart_id_session, [&] {
             link.elapsed_seconds = static_cast<long>(
                 std::chrono::duration_cast<std::chrono::seconds>(
@@ -763,11 +788,11 @@ Identity Identity::from_smart_id(const SmartIdService& service, const std::strin
     check_cancel(dialog);
     const json started = sk::parse(
         exchange(kSmartId, base + "signature/certificate-choice/notification/etsi/" + semantics_id,
-                 &body, 30, smart_id_status));
+                 &body, 30, Api{smart_id_status, &service.pins}));
     const std::string session = path_segment(sk::str(started, "sessionID"), "session ID");
     say(dialog, "Choose the Smart-ID account on your phone.");
     const sk::SmartIdSession s = poll<sk::SmartIdSession>(
-        kSmartId, base + "session/" + session, dialog, smart_id_status,
+        kSmartId, base + "session/" + session, dialog, Api{smart_id_status, &service.pins},
         sk::parse_smart_id_session);
     return Identity{smart_id_chosen(s, service, dialog, {})};
 }
@@ -790,7 +815,7 @@ Identity Identity::from_mobile_id(const MobileIdService& service, const std::str
     check_cancel(dialog);
     say(dialog, "Asking Mobile-ID for the certificate.");
     const json reply = sk::parse(
-        exchange(kMobileId, service.base_url + "/certificate", &body, 30, mobile_id_status));
+        exchange(kMobileId, service.base_url + "/certificate", &body, 30, Api{mobile_id_status, &service.pins}));
     const std::string result = sk::str(reply, "result");
     if (result == "NOT_FOUND") {
         throw Error(0, "Mobile-ID has no active certificate for this phone number and personal "

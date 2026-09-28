@@ -113,7 +113,7 @@ if(LEHT_BUILD_TESTS)
     # LEHT_SK_DEMO=1 adds one signature through SK's real DEMO environment.
     add_executable(test_sk tests/test_sk.cpp)
     target_link_libraries(test_sk PRIVATE
-        leht::crypto OpenSSL::Crypto nlohmann_json::nlohmann_json leht::warnings)
+        leht::crypto OpenSSL::Crypto OpenSSL::SSL nlohmann_json::nlohmann_json leht::warnings)
     target_include_directories(test_sk PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests ${CMAKE_CURRENT_SOURCE_DIR}/tests
         ${CMAKE_CURRENT_SOURCE_DIR}/src)

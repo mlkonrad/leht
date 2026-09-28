@@ -15,12 +15,14 @@
 #include <openssl/http.h>
 #include <openssl/ssl.h>
 
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -222,6 +224,43 @@ Bytes one_hop(const HttpRequest& r, const std::string& url, std::string* redirec
     return read_reply(reply.get(), r, url);
 }
 
+/// Writing to a connection the server has already closed raises SIGPIPE,
+/// which kills the process -- the CLI or the viewer -- unless someone ignores
+/// it. A library must not change that for the whole process, so each
+/// exchange blocks SIGPIPE on its own thread, and takes back any it caused
+/// before unblocking: the write then just fails with EPIPE.
+class NoSigpipe {
+public:
+    NoSigpipe() {
+        sigemptyset(&pipe_);
+        sigaddset(&pipe_, SIGPIPE);
+        sigset_t pending;
+        sigpending(&pending);
+        // One already pending is someone else's: leave it alone.
+        was_pending_ = sigismember(&pending, SIGPIPE) == 1;
+        blocked_ = pthread_sigmask(SIG_BLOCK, &pipe_, &old_) == 0;
+    }
+    NoSigpipe(const NoSigpipe&) = delete;
+    NoSigpipe& operator=(const NoSigpipe&) = delete;
+    ~NoSigpipe() {
+        if (!blocked_) {
+            return;
+        }
+        if (!was_pending_) {
+            const timespec zero{0, 0};
+            while (sigtimedwait(&pipe_, nullptr, &zero) == SIGPIPE) {
+            }
+        }
+        pthread_sigmask(SIG_SETMASK, &old_, nullptr);
+    }
+
+private:
+    sigset_t pipe_{};
+    sigset_t old_{};
+    bool was_pending_ = false;
+    bool blocked_ = false;
+};
+
 /// A reply's body, "chunked" as HTTP/1.1 allows; nullopt until it is whole.
 std::optional<Bytes> dechunk(const unsigned char* p, std::size_t n) {
     Bytes out;
@@ -261,7 +300,22 @@ std::optional<Bytes> dechunk(const unsigned char* p, std::size_t n) {
 
 }  // namespace
 
+std::string spki_pin(X509* cert) {
+    unsigned char* der = nullptr;
+    const int n = i2d_PUBKEY(X509_get0_pubkey(cert), &der);
+    if (n <= 0) {
+        ERR_clear_error();
+        return {};
+    }
+    const Bytes hash = sha256(der, static_cast<std::size_t>(n));
+    OPENSSL_free(der);
+    unsigned char out[64];
+    const int len = EVP_EncodeBlock(out, hash.data(), static_cast<int>(hash.size()));
+    return {reinterpret_cast<const char*>(out), static_cast<std::size_t>(len)};
+}
+
 HttpReply http11(const HttpRequest& r) {
+    const NoSigpipe quiet;
     int use_ssl = 0;
     char* host = nullptr;
     char* port = nullptr;
@@ -289,6 +343,11 @@ HttpReply http11(const HttpRequest& r) {
     const int timeout = r.timeout_seconds > 0 ? r.timeout_seconds : 60;
     const time_t deadline = std::time(nullptr) + timeout;
     const std::string where = r.what + " at " + r.url;
+    if (r.pins != nullptr && use_ssl == 0 && h != "127.0.0.1" && h != "localhost" &&
+        h != "[::1]" && h != "::1") {
+        // A pinned service over plain HTTP would pin nothing.
+        throw Error(0, r.what + " must be reached over https://, not " + r.url);
+    }
 
     // Connect with a timeout, then block with one on every read and write.
     BioPtr bio{BIO_new_connect((h + ":" + p).c_str())};
@@ -326,6 +385,27 @@ HttpReply http11(const HttpRequest& r) {
         bio.reset(chain);
         if (BIO_do_handshake(bio.get()) != 1) {
             fail("TLS with " + where + " failed");
+        }
+        if (r.pins != nullptr) {
+            // Verified already against the system's CAs, with the host name
+            // checked; now it must also be a chain Leht expects for this
+            // service. Any certificate in it may match: the pins are CA keys,
+            // which outlive the server's own certificate.
+            SSL* ssl = nullptr;
+            BIO_get_ssl(bio.get(), &ssl);
+            STACK_OF(X509)* verified = ssl != nullptr ? SSL_get0_verified_chain(ssl) : nullptr;
+            bool pinned = false;
+            for (int i = 0; verified != nullptr && !pinned && i < sk_X509_num(verified); ++i) {
+                const std::string pin = spki_pin(sk_X509_value(verified, i));
+                pinned = std::find(r.pins->begin(), r.pins->end(), pin) != r.pins->end();
+            }
+            if (!pinned) {
+                throw Error(0, r.what + " at " + h +
+                                   " presented a certificate from a certificate authority Leht "
+                                   "does not expect for it, so nothing was sent. Either the "
+                                   "connection is being intercepted, or the service has changed "
+                                   "its certificate authority and Leht needs updating.");
+            }
         }
     }
 
@@ -421,6 +501,7 @@ HttpReply http11(const HttpRequest& r) {
 }
 
 Bytes http_transfer(const HttpRequest& r) {
+    const NoSigpipe quiet;
     std::string url = r.url;
     for (int hop = 0;; ++hop) {
         std::string redirect;

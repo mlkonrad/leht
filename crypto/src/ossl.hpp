@@ -91,7 +91,15 @@ struct HttpRequest {
     /// Redirects to follow (http or https only). Zero for anything whose
     /// address a document supplied: OCSP, CRLs.
     int max_redirects = 0;
+    /// http11() only: the certificate chain the server presents, once
+    /// verified against the system's CAs, must also contain a key whose
+    /// SHA-256 (of its SubjectPublicKeyInfo, Base64) is one of these. With
+    /// pins, plain http:// is refused except to this machine (the tests' mock).
+    const std::vector<std::string>* pins = nullptr;
 };
+
+/// SHA-256 of `cert`'s SubjectPublicKeyInfo, Base64: the form pins take.
+std::string spki_pin(X509* cert);
 
 /// One HTTP(S) exchange (http.cpp). Throws leht::Error when the URL is not
 /// http(s), the server does not answer, or the reply is empty or too large.

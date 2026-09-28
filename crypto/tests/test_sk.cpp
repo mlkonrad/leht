@@ -14,10 +14,12 @@
 #include "leht/ops/sign.hpp"
 #include "edit_harness.hpp"
 #include "prepared.hpp"
+#include "ossl.hpp"
 #include "sk.hpp"
 #include "sk_mock.hpp"
 
 #include <openssl/cms.h>
+#include <openssl/ssl.h>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -506,6 +508,146 @@ void mobile_id_failures_speak_to_the_person() {
     CHECK(mid.complaints.none());
 }
 
+// --- TLS pinning -----------------------------------------------------------------
+
+/// One HTTPS reply on 127.0.0.1, with a certificate from the test PKI's
+/// root, which the client is made to trust through $SSL_CERT_FILE.
+class LocalTls {
+public:
+    explicit LocalTls(const leht::test::Pki& pki)
+        : cert_(leht::test::issue(key_, {"127.0.0.1", false, -1, 30, "critical,digitalSignature",
+                                         "serverAuth", {}, {}, {}, {}, {}, "IP:127.0.0.1"},
+                                  &pki.ca, &pki.ca_key)) {
+        fd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len = sizeof(addr);
+        CHECK(::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 &&
+              ::listen(fd_, 4) == 0 &&
+              ::getsockname(fd_, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        port_ = ntohs(addr.sin_port);
+        ctx_ = SSL_CTX_new(TLS_server_method());
+        SSL_CTX_use_certificate(ctx_, cert_.p);
+        SSL_CTX_add1_chain_cert(ctx_, pki.ca.p);
+        SSL_CTX_use_PrivateKey(ctx_, key_.p);
+        thread_ = std::thread([this] {
+            // A client that hung up must not kill the test with SIGPIPE.
+            sigset_t pipe;
+            sigemptyset(&pipe);
+            sigaddset(&pipe, SIGPIPE);
+            pthread_sigmask(SIG_BLOCK, &pipe, nullptr);
+            for (;;) {
+                const int c = ::accept4(fd_, nullptr, nullptr, SOCK_CLOEXEC);
+                if (c < 0) {
+                    return;
+                }
+                SSL* ssl = SSL_new(ctx_);
+                SSL_set_fd(ssl, c);
+                if (SSL_accept(ssl) == 1) {
+                    char buf[4096];
+                    (void)SSL_read(ssl, buf, sizeof(buf));
+                    const std::string reply =
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                        "Content-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}";
+                    (void)SSL_write(ssl, reply.data(), static_cast<int>(reply.size()));
+                    SSL_shutdown(ssl);
+                }
+                SSL_free(ssl);
+                ::close(c);
+            }
+        });
+    }
+    ~LocalTls() {
+        ::shutdown(fd_, SHUT_RDWR);
+        ::close(fd_);
+        thread_.join();
+        SSL_CTX_free(ctx_);
+    }
+    [[nodiscard]] std::string url() const {
+        return "https://127.0.0.1:" + std::to_string(port_) + "/x";
+    }
+
+private:
+    leht::test::Key key_ = leht::test::rsa_key();
+    leht::test::Cert cert_;
+    int fd_ = -1;
+    int port_ = 0;
+    SSL_CTX* ctx_ = nullptr;
+    std::thread thread_;
+};
+
+void sk_connections_are_pinned() {
+    // The client trusts the system's CAs; here, the test root instead.
+    const TempPath roots("sk_tls_roots.pem");
+    leht::test::write_file(roots.str(), pki().ca.pem());
+    ::setenv("SSL_CERT_FILE", roots.str().c_str(), 1);
+    LocalTls server(pki());
+    leht::crypto::detail::HttpRequest r;
+    r.url = server.url();
+    r.what = "the test service";
+    r.timeout_seconds = 10;
+
+    // No pins: the system's (here the test) CAs decide alone.
+    CHECK(leht::crypto::detail::http11(r).status == 200);
+    // The root's key pinned: the chain holds it.
+    const std::vector<std::string> good{"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                                        leht::crypto::detail::spki_pin(pki().ca.p)};
+    r.pins = &good;
+    const auto reply = leht::crypto::detail::http11(r);
+    CHECK(reply.status == 200 && std::string(reply.body.begin(), reply.body.end()) == "{\"ok\":true}");
+    // SK's pins: a valid chain from another CA is refused before anything is sent.
+    const std::vector<std::string> sk = leht::crypto::SmartIdService::demo().pins;
+    CHECK(sk.size() == 2);
+    r.pins = &sk;
+    CHECK(says(error_of([&] { (void)leht::crypto::detail::http11(r); }),
+               "does not expect for it, so nothing was sent"));
+    // With pins, plain http is for this machine only.
+    r.url = "http://sid.demo.sk.ee/smart-id-rp/v3/session/x";
+    CHECK(says(error_of([&] { (void)leht::crypto::detail::http11(r); }), "must be reached over https"));
+    ::unsetenv("SSL_CERT_FILE");
+
+    // A server that hangs up while the request is still being sent: an
+    // error, not SIGPIPE killing the process (the viewer, the CLI).
+    {
+        const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len = sizeof(addr);
+        CHECK(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 &&
+              ::listen(fd, 1) == 0 &&
+              ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+        std::thread rude([fd] {
+            for (int i = 0; i < 2; ++i) {  // http11, then OpenSSL's own client
+                const int c = ::accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
+                // Close before a byte arrives (a clean FIN): the client's
+                // first write goes out, the next meets a closed socket.
+                ::close(c);
+            }
+        });
+        const Bytes big(8 << 20, 'x');
+        leht::crypto::detail::HttpRequest post;
+        post.url = "http://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + "/";
+        post.what = "a server that hangs up";
+        post.post = &big;
+        post.content_type = "application/json";
+        post.timeout_seconds = 10;
+        CHECK(throws([&] { (void)leht::crypto::detail::http11(post); }));
+        CHECK(throws([&] { (void)leht::crypto::detail::http_transfer(post); }));
+        rude.join();
+        ::close(fd);
+        sigset_t pending;
+        sigpending(&pending);
+        CHECK(sigismember(&pending, SIGPIPE) == 0);  // none left behind either
+    }
+
+    // The pins are what they claim: SHA-256 of a key, in Base64.
+    for (const std::string& pin : sk) {
+        CHECK(leht::test::unb64(pin).size() == 32);
+    }
+}
+
 // --- real PDFs -------------------------------------------------------------------
 
 /// Prepares `in` for `id`, signs it, and checks it with our code, qpdf and pdfsig.
@@ -765,6 +907,7 @@ int main() {
     RUN(cancel_while_the_phone_signs_writes_nothing);
     RUN(mobile_id_signs_with_ecdsa_and_rsa);
     RUN(mobile_id_failures_speak_to_the_person);
+    RUN(sk_connections_are_pinned);
     RUN(phone_signatures_are_valid_pdf_signatures);
 #ifdef LEHT_CLI
     RUN(the_cli_signs_with_smart_id_by_qr);

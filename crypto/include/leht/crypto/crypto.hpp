@@ -123,16 +123,22 @@ struct SmartIdService {
     std::string base_url;     ///< ".../smart-id-rp/v3/", with the slash
     std::string scheme_name;  ///< ties QR links to the environment: "smart-id-demo"
     RelyingParty party;
-    /// SK's demo environment, as DEMO. $LEHT_SMARTID_URL replaces the URL, for
-    /// tests against a local mock only.
+    /// TLS pins: the server's verified chain must hold one of these keys
+    /// (SHA-256 of the SubjectPublicKeyInfo, Base64). With pins, plain
+    /// http:// is refused but to this machine. Empty: the system's CAs alone.
+    std::vector<std::string> pins;
+    /// SK's demo environment, as DEMO, pinned to SK's certificate authority.
+    /// $LEHT_SMARTID_URL replaces the URL, for tests against a local mock
+    /// only -- and a pinned service accepts plain http:// only to 127.0.0.1.
     static SmartIdService demo();
 };
 
 struct MobileIdService {
     std::string base_url;  ///< ".../mid-api", no slash
     RelyingParty party;
-    /// SK's demo environment, as DEMO. $LEHT_MOBILEID_URL replaces the URL,
-    /// for tests only.
+    std::vector<std::string> pins;  ///< as SmartIdService::pins
+    /// SK's demo environment, as DEMO, pinned as SmartIdService::demo().
+    /// $LEHT_MOBILEID_URL replaces the URL, for tests only.
     static MobileIdService demo();
 };
 
