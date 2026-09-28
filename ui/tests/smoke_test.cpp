@@ -10,6 +10,7 @@
 #include "actions.hpp"
 #include "comments_panel.hpp"
 #include "mode_bar.hpp"
+#include "page_grid.hpp"
 #include "preferences.hpp"
 #include "recent_files.hpp"
 #include "sidebar.hpp"
@@ -1243,6 +1244,64 @@ int main(int argc, char** argv) {
         pump(200);
         check(fresh.isShowingWelcome(), "Close returns to the welcome view");
         check(!fresh.actions()->find(QStringLiteral("save"))->isEnabled(), "and disables Save again");
+    }
+
+    // --- Pages mode: turn, delete, move, insert (protocol 11) ----------------
+    {
+        QTemporaryDir tmp;
+        const QString copy = tmp.filePath(QStringLiteral("organise.pdf"));
+        QFile::copy(QString::fromStdString(doc), copy);
+        window.openPath(copy);
+        pump(1500);
+        window.modeBar()->setMode(QStringLiteral("pages"));
+        pump(300);
+        auto* grid = window.findChild<PageGrid*>();
+        check(grid != nullptr && grid->isVisible() && grid->count() == 10,
+              "Pages mode shows a grid of the 10 pages");
+        shot(&window, "ux-page-grid");
+        const auto act = [&](const char* id) { window.actions()->find(QLatin1String(id))->trigger(); };
+
+        emit grid->moveRequested({9}, 0);  // the last page to the front, as a drag would
+        pump(1500);
+        check(window.isModified() && grid->selectedPages() == QVector<int>{0},
+              "a page dragged to the front moves, and stays selected");
+        grid->selectPages({1});
+        act("pageDelete");
+        pump(1500);
+        check(view->pageCount() == 9 && grid->count() == 9, "Delete Pages removes the selected page");
+        grid->selectPages({0});
+        act("pageRotateRight");
+        pump(1500);
+        check(view->pageSizePoints(0).width() > view->pageSizePoints(0).height(),
+              "Rotate Right turns the selected page sideways");
+        emit grid->filesDropped({QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf")}, 9);
+        pump(2000);
+        check(view->pageCount() == 12 && grid->count() == 12, "a PDF dropped on the grid inserts its pages");
+        grid->selectPages({11});
+        act("pageInsertBlank");
+        pump(1500);
+        check(view->pageCount() == 13, "Insert Blank Page adds a page");
+        act("undo");
+        pump(2000);
+        check(view->pageCount() == 12 && grid->count() == 12, "undo takes the blank page back out");
+
+        check(window.save(), "the organised document saves");
+        pump(2500);
+        try {
+            leht::Context ctx;
+            leht::Document saved = leht::Document::open(ctx, copy.toStdString());
+            check(saved.page_count() == 12, "the saved file has 12 pages");
+            const auto has = [&](int page, const char* what) {
+                return leht::TextPage(ctx, saved, page).text().find(what) != std::string::npos;
+            };
+            check(has(0, "page 10 -") && has(1, "page 2 -") && has(8, "page 9 -"),
+                  "the pages are saved in their new order");
+        } catch (const leht::Error&) {
+            check(false, "the organised file opens");
+        }
+        window.modeBar()->setMode(QStringLiteral("read"));
+        pump(200);
+        check(!grid->isVisible(), "leaving Pages mode shows the pages again");
     }
 
     // --- Editing (M4b) -----------------------------------------------------

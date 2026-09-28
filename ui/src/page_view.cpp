@@ -48,6 +48,19 @@ void PageView::clear() {
     viewport()->update();
 }
 
+void PageView::forgetPages() {
+    cancelEditor();
+    selectedAnnot_ = 0;
+    grip_ = Grip::None;
+    rendered_.clear();
+    requested_.clear();
+    failed_.clear();
+    selectionPage_ = -1;
+    selectionBoxes_.clear();
+    selectionText_.clear();
+    clearMatches();
+}
+
 QSize PageView::scaledSize(int page) const {
     QSize base = baseSizes_.value(page);
     if (rotation_ == 90 || rotation_ == 270) {

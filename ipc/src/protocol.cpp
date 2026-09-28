@@ -148,6 +148,7 @@ constexpr std::size_t kMaxName = 4096;  ///< field names, annotation types, stam
 
 // Signatures.
 constexpr std::size_t kMaxImageBytes = std::size_t{32} << 20;  ///< an appearance graphic
+constexpr std::size_t kMaxInsertBytes = std::size_t{128} << 20;  ///< a file whose pages are inserted
 constexpr std::size_t kMaxStrokes = 4096;        ///< strokes in a drawn signature
 constexpr std::size_t kMaxStrokePoints = 100000; ///< points across all of them
 constexpr std::size_t kMaxLines = 64;            ///< text lines in an appearance
@@ -576,13 +577,33 @@ void Edit::encode(Writer& w) const {
         w.i32(page);
         put_words(w, words);
         break;
+    case Kind::RotatePages:
+        w.str(pages);
+        w.i32(degrees);
+        break;
+    case Kind::DeletePages:
+        w.str(pages);
+        break;
+    case Kind::MovePages:
+        w.str(pages);
+        w.i32(page);
+        break;
+    case Kind::InsertPages:
+        w.i32(page);
+        w.str(pages);
+        w.bytes(data);
+        break;
+    case Kind::InsertBlank:
+        w.i32(page);
+        put_rect(w, rects.empty() ? Rect{} : rects.front());
+        break;
     }
 }
 
 Edit Edit::decode(Reader& r) {
     Edit m;
     const std::uint8_t kind = r.u8();
-    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::AddTextLayer)) {
+    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::InsertBlank)) {
         throw ProtocolError("unknown edit kind");
     }
     m.kind = static_cast<Kind>(kind);
@@ -674,6 +695,29 @@ Edit Edit::decode(Reader& r) {
     case Kind::AddTextLayer:
         m.page = page_index(r);
         m.words = get_words(r);
+        break;
+    case Kind::RotatePages:
+        m.pages = r.str(kMaxName);
+        m.degrees = r.i32();
+        if (m.degrees % 90 != 0 || m.degrees < -360 || m.degrees > 360) {
+            throw ProtocolError("pages turn by a multiple of 90 degrees");
+        }
+        break;
+    case Kind::DeletePages:
+        m.pages = r.str(kMaxName);
+        break;
+    case Kind::MovePages:
+        m.pages = r.str(kMaxName);
+        m.page = page_index(r);  // may equal the page count: the end
+        break;
+    case Kind::InsertPages:
+        m.page = page_index(r);
+        m.pages = r.str(kMaxName);
+        m.data = r.bytes(kMaxInsertBytes);
+        break;
+    case Kind::InsertBlank:
+        m.page = page_index(r);
+        m.rects.push_back(get_rect(r));
         break;
     }
     return m;

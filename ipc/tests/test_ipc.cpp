@@ -227,6 +227,43 @@ void test_edit_messages_round_trip() {
     CHECK(l2.page == 3 && l2.words.size() == 2 && l2.words[1].text == "õhtust" &&
           l2.words[1].box.x1 == 80.0F);
 
+    // Organising pages (v11).
+    Edit turn;
+    turn.kind = Edit::Kind::RotatePages;
+    turn.pages = "1,3-";
+    turn.degrees = -90;
+    const Edit turn2 = round_trip(turn);
+    CHECK(turn2.pages == "1,3-" && turn2.degrees == -90);
+    Edit gone;
+    gone.kind = Edit::Kind::DeletePages;
+    gone.pages = "2";
+    CHECK(round_trip(gone).pages == "2");
+    Edit moved;
+    moved.kind = Edit::Kind::MovePages;
+    moved.pages = "4-5";
+    moved.page = 0;
+    const Edit moved2 = round_trip(moved);
+    CHECK(moved2.pages == "4-5" && moved2.page == 0);
+    Edit insert;
+    insert.kind = Edit::Kind::InsertPages;
+    insert.page = 2;
+    insert.pages = "3,1";
+    insert.data = {'%', 'P', 'D', 'F'};
+    const Edit insert2 = round_trip(insert);
+    CHECK(insert2.page == 2 && insert2.pages == "3,1" && insert2.data.size() == 4 && insert2.data[1] == 'P');
+    Edit blank;
+    blank.kind = Edit::Kind::InsertBlank;
+    blank.page = 1;
+    blank.rects = {{0, 0, 595, 842}};
+    const Edit blank2 = round_trip(blank);
+    CHECK(blank2.page == 1 && blank2.rects.size() == 1 && blank2.rects[0].y1 == 842.0F);
+    Edit odd = turn;
+    odd.degrees = 45;  // a turn the worker could only refuse is refused at the door
+    CHECK(rejects<Edit>(make_frame(1, odd).payload));
+    Edit backwards = moved;
+    backwards.page = -1;
+    CHECK(rejects<Edit>(make_frame(1, backwards).payload));
+
     Recognize rec;
     rec.zoom = 300.0F / 72.0F;
     rec.bitmap.width = 4;
@@ -523,6 +560,15 @@ void test_edit_messages_reject_hostile_input() {
         layer.words = {{"Tere", {1, 2, 30, 14}}};
         check_truncations(layer);
         check_truncations(Words{layer.words});
+        Edit insert;
+        insert.kind = Edit::Kind::InsertPages;
+        insert.pages = "1";
+        insert.data = {1, 2, 3, 4, 5};
+        check_truncations(insert);
+        Edit blank;
+        blank.kind = Edit::Kind::InsertBlank;
+        blank.rects = {{0, 0, 100, 100}};
+        check_truncations(blank);
         Recognize rec;
         rec.bitmap.width = 2;
         rec.bitmap.height = 1;

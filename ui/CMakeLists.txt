@@ -14,6 +14,7 @@ qt_add_library(leht_viewer_lib STATIC
     src/main_window_layout.cpp
     src/mode_bar.cpp
     src/page_dialogs.cpp
+    src/page_grid.cpp
     src/page_view.cpp
     src/preferences.cpp
     src/recent_files.cpp

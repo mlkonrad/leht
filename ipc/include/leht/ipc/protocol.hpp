@@ -32,7 +32,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 10;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split; 10: trusted lists
+inline constexpr std::uint32_t kProtocolVersion = 11;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split; 10: trusted lists; 11: organising pages
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -214,6 +214,13 @@ struct Edit {
         SetAnnotContents = 9,  ///< annot_id, text
         CropBox = 10,     ///< pages, rects[0]: the box to keep
         AddTextLayer = 11,  ///< page, words: an OCR'd page's invisible text
+        // Organising pages (ops/organize.hpp). The pages change, so Edited
+        // says all_pages and carries the new sizes.
+        RotatePages = 12,   ///< pages, degrees
+        DeletePages = 13,   ///< pages
+        MovePages = 14,     ///< pages, page: the one they go before (page count: the end)
+        InsertPages = 15,   ///< page: where; data: the source file; pages: its pages ("": all)
+        InsertBlank = 16,   ///< page: where; rects[0]: (0, 0, width, height)
     };
     Kind kind = Kind::Redact;
     int page = 0;
@@ -226,6 +233,11 @@ struct Edit {
     ops::WatermarkOptions watermark;
     ops::Margins margins;
     std::vector<ops::OcrWord> words;
+    int degrees = 0;
+    /// InsertPages: the whole source file, read by the viewer and parsed only
+    /// here. Carried in the edit, not named by path, so replaying the log
+    /// inserts the same pages even if the file has changed since.
+    std::vector<std::uint8_t> data;
     void encode(Writer& w) const;
     static Edit decode(Reader& r);
 };

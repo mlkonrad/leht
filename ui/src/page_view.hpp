@@ -35,6 +35,9 @@ public:
     /// Page base sizes at zoom 1.0, from the worker's opened() signal.
     void setPages(const QVector<QSize>& baseSizes);
     void clear();
+    /// The pages were rearranged (moved, deleted, inserted): every image and
+    /// mark is of the wrong page now. Call before the edit's onDocumentEdited.
+    void forgetPages();
 
     [[nodiscard]] double zoom() const { return zoom_; }
     void setZoom(double zoom);

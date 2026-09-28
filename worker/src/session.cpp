@@ -9,6 +9,7 @@
 #include "leht/ops/compress.hpp"
 #include "leht/ops/crop.hpp"
 #include "leht/ops/ocr_layer.hpp"
+#include "leht/ops/organize.hpp"
 #include "leht/crypto/crypto.hpp"
 #include "leht/ops/forms.hpp"
 #include "leht/ops/merge.hpp"
@@ -463,6 +464,38 @@ void Session::on_edit(std::uint64_t id, const Edit& m) {
         }
         (void)ops::crop(ctx_, *doc_, m.pages, m.rects.front());
         out.pages = page_set(m.pages, doc_->page_count());
+        break;
+    // Organising pages: page numbers shift, so everything is redrawn.
+    case Edit::Kind::RotatePages:
+        (void)ops::rotate_pages(ctx_, *doc_, m.pages, m.degrees);
+        out.all_pages = true;
+        break;
+    case Edit::Kind::DeletePages:
+        (void)ops::delete_pages(ctx_, *doc_, m.pages);
+        out.all_pages = true;
+        break;
+    case Edit::Kind::MovePages:
+        (void)ops::move_pages(ctx_, *doc_, m.pages, m.page);
+        out.all_pages = true;
+        break;
+    case Edit::Kind::InsertPages: {
+        // The other file is parsed here, in the sandbox, like the document.
+        Document source = Document::open_memory(ctx_, m.data.data(), m.data.size(), "pdf");
+        if (source.needs_password()) {
+            channel_.send(id, Failed{"the file to insert is password-protected; remove its password first"});
+            return;
+        }
+        (void)ops::insert_pages(ctx_, *doc_, m.page, source, m.pages);
+        out.all_pages = true;
+        break;
+    }
+    case Edit::Kind::InsertBlank:
+        if (m.rects.empty()) {
+            channel_.send(id, Failed{"no size for the new page"});
+            return;
+        }
+        ops::insert_blank_page(ctx_, *doc_, m.page, m.rects.front().x1, m.rects.front().y1);
+        out.all_pages = true;
         break;
     }
     // Every cached display list and text layer may now be out of date.

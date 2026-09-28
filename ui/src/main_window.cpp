@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QTreeWidgetItem>
 
+#include "page_grid.hpp"
 #include "page_view.hpp"
 #include "page_dialogs.hpp"
 #include "file_tools.hpp"
@@ -136,17 +137,38 @@ MainWindow::MainWindow() {
                 if (thumbnails_ != nullptr) {
                     thumbnails_->onThumbnail(page, img);
                 }
+                if (pageGrid_ != nullptr) {
+                    pageGrid_->onThumbnail(page, img);
+                }
             });
 
     connect(view_, &PageView::currentPageChanged, this,
             &MainWindow::onCurrentPageChanged);
 
     // Editing: the view's tools -> worker edits; worker changes -> view.
+    // Before the view hears of the edit: its pictures are of the wrong pages.
+    connect(worker_, &RenderWorker::pagesRearranged, this, [this] {
+        view_->forgetPages();
+        rearranged_ = true;
+    });
     connect(worker_, &RenderWorker::documentEdited, view_, &PageView::onDocumentEdited);
     connect(worker_, &RenderWorker::documentEdited, this,
-            [this](const QVector<int>& pages, bool allPages, const QVector<QSize>&) {
-        if (thumbnails_ != nullptr) {
+            [this](const QVector<int>& pages, bool allPages, const QVector<QSize>& sizes) {
+        if (std::exchange(rearranged_, false) || sizes.size() != pageCount_) {
+            // Pages came, went or moved: every thumbnail and count is new.
+            pageCount_ = static_cast<int>(sizes.size());
+            thumbnails_->setPageCount(pageCount_);
+            pageGrid_->setPageCount(pageCount_);
+            if (!gridSelectionAfterEdit_.isEmpty()) {
+                pageGrid_->selectPages(std::exchange(gridSelectionAfterEdit_, {}));
+            }
+            pageSpin_->setMaximum(qMax(1, pageCount_));
+            onCurrentPageChanged(view_->currentPage());
+        } else {
             thumbnails_->invalidate(pages, allPages);
+            if (allPages || !pages.isEmpty()) {
+                pageGrid_->invalidate();
+            }
         }
         onWorker([](RenderWorker* w) {
             w->listAnnotations();
@@ -279,6 +301,7 @@ MainWindow::MainWindow() {
     buildActions();
     buildEditActions();
     buildFileTools();
+    buildPageActions();
     buildMainToolbar();
     buildSignaturePanel();
     buildLayout();
@@ -1222,6 +1245,8 @@ void MainWindow::openPath(const QString& path) {
     }
     signatureBanner_->hide();
     certLevel_ = 0;
+    undoAction_->setEnabled(false);  // the worker has no log for the new document yet
+    redoAction_->setEnabled(false);
     actions_->refresh();
     stack_->setCurrentWidget(documentPage_);
     emit requestOpen(path);

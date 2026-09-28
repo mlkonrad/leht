@@ -683,7 +683,17 @@ bool RenderWorker::replayLog() {
     return true;
 }
 
-void RenderWorker::rebuild() {
+namespace {
+
+bool rearrangesPages(const ipc::Edit& e) {
+    using K = ipc::Edit::Kind;
+    return e.kind == K::DeletePages || e.kind == K::MovePages || e.kind == K::InsertPages ||
+           e.kind == K::InsertBlank || e.kind == K::RotatePages;
+}
+
+}  // namespace
+
+void RenderWorker::rebuild(bool rearranged) {
     if (!proc_.load()) {
         return;
     }
@@ -691,6 +701,9 @@ void RenderWorker::rebuild() {
         cache_->clear();
     }
     if (openInWorker(/*silent=*/true)) {
+        if (rearranged) {
+            emit pagesRearranged();
+        }
         emit documentEdited({}, true, baseSizes_);
     }
 }
@@ -716,6 +729,9 @@ void RenderWorker::applyEdit(const ipc::Edit& edit, bool fromRedo) {
             return;
         }
         const ipc::Edited edited = ipc::decode_as<ipc::Edited>(*reply);
+        if (rearrangesPages(edit)) {
+            emit pagesRearranged();
+        }
         log_.push_back(edit);
         logGroups_.push_back(redoing_ != 0 ? redoing_ : openGroup_ != 0 ? openGroup_ : nextGroup_++);
         if (!fromRedo) {
@@ -893,18 +909,60 @@ void RenderWorker::cropBox(QString pages, QRectF box) {
     applyEdit(e);
 }
 
+void RenderWorker::rotatePages(QString pages, int degrees) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::RotatePages;
+    e.pages = pages.toStdString();
+    e.degrees = degrees;
+    applyEdit(e);
+}
+
+void RenderWorker::deletePages(QString pages) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::DeletePages;
+    e.pages = pages.toStdString();
+    applyEdit(e);
+}
+
+void RenderWorker::movePages(QString pages, int before) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::MovePages;
+    e.pages = pages.toStdString();
+    e.page = before;
+    applyEdit(e);
+}
+
+void RenderWorker::insertPages(int at, QByteArray data, QString pages) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::InsertPages;
+    e.page = at;
+    e.pages = pages.toStdString();
+    e.data.assign(data.begin(), data.end());
+    applyEdit(e);
+}
+
+void RenderWorker::insertBlankPage(int at, QSizeF size) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::InsertBlank;
+    e.page = at;
+    e.rects = {toRect(QRectF(QPointF(0, 0), size))};
+    applyEdit(e);
+}
+
 void RenderWorker::undo() {
     if (log_.empty() || !proc_.load()) {
         return;
     }
     const std::uint64_t group = logGroups_.back();
+    bool rearranged = false;
     while (!log_.empty() && logGroups_.back() == group) {
+        rearranged = rearranged || rearrangesPages(log_.back());
         redo_.push_back(std::move(log_.back()));
         redoGroups_.push_back(group);
         log_.pop_back();
         logGroups_.pop_back();
     }
-    rebuild();
+    rebuild(rearranged);
     publishEditState();
 }
 

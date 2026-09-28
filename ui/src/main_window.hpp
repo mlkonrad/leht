@@ -15,6 +15,7 @@
 class ActionRegistry;
 class CommentsPanel;
 class ModeBar;
+class PageGrid;
 class PageView;
 class QAction;
 class QMenu;
@@ -127,6 +128,19 @@ private:
     void buildActions();
     void buildEditActions();
     void buildMainToolbar();
+    /// Pages mode: turn, delete, move, insert, extract (ops/organize.hpp).
+    void buildPageActions();
+    /// The pages a page command acts on: the grid's selection in the page
+    /// grid, else the page in view. 0-based, ascending.
+    [[nodiscard]] QVector<int> targetPages() const;
+    /// Shows the page grid (true) or the reading view in the document area.
+    void showPageGrid(bool grid);
+    /// Inserts every page of each PDF in `paths`, in order, before page `at`.
+    void insertFilesAt(const QStringList& paths, int at);
+    /// True unless the user calls off a page change to a signed document.
+    /// Unlike a redaction it is appended, so the signatures stay intact, but
+    /// each will say the document changed after it.
+    [[nodiscard]] bool confirmChangingSigned(const QString& what);
     void buildSignaturePanel();
     void buildLayout();
     void buildMenus();
@@ -201,6 +215,11 @@ private:
     QHash<QString, QList<QAction*>> modeTools_;
     Sidebar* sidebar_ = nullptr;
     CommentsPanel* comments_ = nullptr;
+    QStackedWidget* viewStack_ = nullptr;  ///< the page view, or the page grid
+    PageGrid* pageGrid_ = nullptr;
+    bool rearranged_ = false;
+    bool sidebarBeforeGrid_ = true;  ///< whether the sidebar was open before the grid showed  ///< the next documentEdited follows a page rearrangement
+    QVector<int> gridSelectionAfterEdit_;  ///< what the grid selects once the edit lands
     QWidget* signaturePanel_ = nullptr;
     QMenu* recentMenu_ = nullptr;
     int certLevel_ = 0;

@@ -167,8 +167,8 @@ value as a name after MuPDF sets it.
 Every command is in the menu bar (File, Edit, View, Pages, Comment, Sign, Tools, Help), with
 its shortcut; Help → Keyboard Shortcuts lists them all. Above the page, the **mode bar** picks
 what you are doing and shows only that mode's tools: *Read*, *Comment* (Highlight, Note, Text
-Box, Draw, Move, Erase), *Fill & Sign*, *Pages* (Crop, Crop Margins, Watermark, Recognize
-Text, Split) and *Redact*. Picking a tool from a menu switches to its mode. The tools:
+Box, Draw, Move, Erase), *Fill & Sign*, *Pages* (below) and *Redact*. Picking a tool from a
+menu switches to its mode. The tools:
 
 | Tool | What it does |
 |---|---|
@@ -194,6 +194,26 @@ its own, on a page range. A Form panel appears
 for documents with fields; values are edited in place, with a drop-down for checkboxes,
 radio groups and choice fields. The tools work on the unrotated view (Ctrl+R to rotate
 back) and say so otherwise.
+
+### Organising pages
+
+*Pages* mode shows every page in a grid. Select pages (Shift and Ctrl-click, or drag a
+rectangle), then **Rotate Left/Right**, **Delete Pages** (or the Delete key), **Insert Pages
+from File…**, **Insert Blank Page** (the size of the page before it) or **Extract Pages…**
+(a new PDF; this one is not changed). Drag pages to reorder them — a bar shows where they
+will land — and drop PDF files between pages to insert them there. Double-click a page to
+read it. The same commands are in the Pages menu and, outside the grid, act on the page in
+view.
+
+These are edits like any other (`ops/organize.hpp`, protocol 11): Undo takes them back,
+Save writes them. Deleting and moving pages keep the outline and links pointing at the right
+pages. A file to insert is read by the viewer and parsed only in the sandboxed worker; its
+bytes travel in the edit, so undo, redo and a respawned worker insert the same pages even if
+the file changed since. In a signed document a page change is appended as a revision — the
+signatures stay intact but report the change — and the viewer asks first; a certified
+document's pages cannot be changed. Deleting a page is not redaction: a signed document is
+saved incrementally, so a deleted page's content stays in the earlier revision; to remove it
+for good, redact it.
 
 **The edit log is the source of truth.** The viewer keeps every edit since the file was
 opened or last saved:

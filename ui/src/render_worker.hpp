@@ -145,6 +145,14 @@ public slots:
     void cropMargins(QString pages, leht::ops::Margins margins);
     /// Keeps only `box` of each page in `pages`: hides the rest (see ops::crop).
     void cropBox(QString pages, QRectF box);
+    // Organising pages (ops/organize.hpp); `pages` is a 1-based range spec,
+    // positions are 0-based ("before the page now at").
+    void rotatePages(QString pages, int degrees);
+    void deletePages(QString pages);
+    void movePages(QString pages, int before);
+    /// `data` is the whole PDF file, read by the caller; the worker parses it.
+    void insertPages(int at, QByteArray data, QString pages);
+    void insertBlankPage(int at, QSizeF size);
 
     void undo();
     void redo();
@@ -261,6 +269,10 @@ signals:
 
     /// The document changed. Rendered images of `pages` (of every page, if
     /// `allPages`) are out of date, and `baseSizes` are the page sizes now.
+    /// Pages were moved, deleted or inserted (or such an edit undone): what
+    /// was shown for page N is not page N any more. Comes just before the
+    /// documentEdited() for it.
+    void pagesRearranged();
     void documentEdited(QVector<int> pages, bool allPages, QVector<QSize> baseSizes);
     /// `modified`: there are edits since the file was opened or last saved.
     void editStateChanged(bool canUndo, bool canRedo, bool modified);
@@ -360,7 +372,7 @@ private:
     bool replayLog();
     /// Reopens the file in the current worker and replays the log, then
     /// publishes every page as changed. Used by undo and after a failed edit.
-    void rebuild();
+    void rebuild(bool rearranged = false);
     void publishEdited(const leht::ipc::Edited& edited);
     void publishEditState();
 

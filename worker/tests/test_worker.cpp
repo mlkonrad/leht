@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <cstdlib>
 #include <vector>
 #include <memory>
@@ -537,6 +538,57 @@ void edits_apply_render_and_save() {
     CHECK(edit_ok(*w, del).pages == std::vector<int>({0}));
     w->channel().send(904, del);
     CHECK(next(*w).type == MsgType::Failed);
+}
+
+/// Organising pages in the sandbox: the other file's bytes travel in the
+/// edit and are parsed here; a bad one fails the edit, not the worker.
+void pages_are_organised_in_the_worker() {
+    auto w = start();
+    (void)open_ok(*w, corpus("text_10p.pdf"));
+    Edit turn;
+    turn.kind = Edit::Kind::RotatePages;
+    turn.pages = "1";
+    turn.degrees = 90;
+    const Edited t = edit_ok(*w, turn);
+    CHECK(t.all_pages && t.base_sizes.size() == 10);
+    CHECK(t.base_sizes[0].width == t.base_sizes[1].height);  // turned sideways
+
+    Edit gone;
+    gone.kind = Edit::Kind::DeletePages;
+    gone.pages = "10";
+    CHECK(edit_ok(*w, gone).base_sizes.size() == 9);
+
+    Edit moved;
+    moved.kind = Edit::Kind::MovePages;
+    moved.pages = "1";
+    moved.page = 9;  // the end
+    const Edited m = edit_ok(*w, moved);
+    CHECK(m.base_sizes.size() == 9 && m.base_sizes[8].width == t.base_sizes[0].width);
+
+    std::ifstream file(corpus("outlined.pdf"), std::ios::binary);
+    Edit insert;
+    insert.kind = Edit::Kind::InsertPages;
+    insert.page = 0;
+    insert.data.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    CHECK(edit_ok(*w, insert).base_sizes.size() == 12);
+
+    Edit blank;
+    blank.kind = Edit::Kind::InsertBlank;
+    blank.page = 12;
+    blank.rects = {{0, 0, 200, 300}};
+    const Edited b = edit_ok(*w, blank);
+    CHECK(b.base_sizes.size() == 13 && b.base_sizes[12].width == 200 && b.base_sizes[12].height == 300);
+
+    Edit junk = insert;
+    junk.data = {'n', 'o', 't', ' ', 'a', ' ', 'P', 'D', 'F'};
+    w->channel().send(990, junk);
+    CHECK(next(*w).type == MsgType::Failed);
+    Edit everything;
+    everything.kind = Edit::Kind::DeletePages;
+    w->channel().send(991, everything);
+    CHECK(next(*w).type == MsgType::Failed);
+    w->channel().send(992, ListAnnots{});
+    CHECK(next(*w).type == MsgType::AnnotList);  // and the worker lives on
 }
 
 void redaction_through_the_worker() {
@@ -1330,6 +1382,7 @@ int main() {
     RUN(sandbox_forbids_escape_routes);
     RUN(search_can_be_cancelled);
     RUN(edits_apply_render_and_save);
+    RUN(pages_are_organised_in_the_worker);
     RUN(redaction_through_the_worker);
     RUN(forms_through_the_worker);
     RUN(replay_is_deterministic);

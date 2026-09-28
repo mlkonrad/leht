@@ -10,6 +10,7 @@
 #include "file_tools_dialogs.hpp"
 #include "icons.hpp"
 #include "mode_bar.hpp"
+#include "page_grid.hpp"
 #include "page_view.hpp"
 #include "preferences.hpp"
 #include "recent_files.hpp"
@@ -24,6 +25,8 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QDir>
+#include <QFileDialog>
+#include <QFile>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileInfo>
@@ -47,6 +50,8 @@
 #include <QToolBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 void MainWindow::buildMainToolbar() {
     QToolBar* bar = addToolBar(tr("Main"));
@@ -190,7 +195,9 @@ void MainWindow::buildLayout() {
     modeTools_.insert(QStringLiteral("sign"),
                       tools({"toolSign", "signInvisibly", "-", "addLongTermValidation", "checkRevocation"}));
     modeTools_.insert(QStringLiteral("pages"),
-                      tools({"toolCrop", "cropMargins", "watermark", "-", "recognizeText", "-", "splitDocument"}));
+                      tools({"pageGrid", "-", "pageRotateLeft", "pageRotateRight", "-", "pageInsertFile",
+                             "pageInsertBlank", "pageExtract", "pageDelete", "-", "toolCrop", "cropMargins",
+                             "watermark", "recognizeText"}));
     modeTools_.insert(QStringLiteral("redact"), tools({"toolRedact", "redactText"}));
     modes_ = new ModeBar(this);
     modes_->addMode(QStringLiteral("read"), QStringLiteral("book-open"), tr("Read"),
@@ -200,10 +207,13 @@ void MainWindow::buildLayout() {
     modes_->addMode(QStringLiteral("sign"), QStringLiteral("signature"), tr("Fill && Sign"),
                     tr("Fill in forms and sign"), modeTools_.value(QStringLiteral("sign")));
     modes_->addMode(QStringLiteral("pages"), QStringLiteral("layout-grid"), tr("Pages"),
-                    tr("Crop, watermark, recognize text, split"), modeTools_.value(QStringLiteral("pages")));
+                    tr("Turn, reorder, insert and delete pages; crop, watermark, recognize text"),
+                    modeTools_.value(QStringLiteral("pages")));
     modes_->addMode(QStringLiteral("redact"), QStringLiteral("eye-off"), tr("Redact"),
                     tr("Remove content from the file for good"), modeTools_.value(QStringLiteral("redact")));
     connect(modes_, &ModeBar::modeChanged, this, [this](const QString& mode) {
+        // Pages mode opens on the page grid; every other mode reads.
+        showPageGrid(mode == QLatin1String("pages"));
         // A tool the new mode does not show is put down.
         if (!modeTools_.value(mode).contains(tools_->checkedAction())) {
             tools_->actions().first()->trigger();
@@ -233,8 +243,42 @@ void MainWindow::buildLayout() {
 
     auto* splitter = new QSplitter(Qt::Horizontal, this);
     splitter->setObjectName(QStringLiteral("documentSplitter"));
+    pageGrid_ = new PageGrid(this);
+    connect(pageGrid_, &PageGrid::needThumbnail, worker_, &RenderWorker::renderThumbnail);
+    connect(pageGrid_, &PageGrid::openPage, this, [this](int page) {
+        modes_->setMode(QStringLiteral("read"));
+        view_->goToPage(page);
+    });
+    connect(pageGrid_, &PageGrid::moveRequested, this, [this](const QVector<int>& pages, int before) {
+        if (pages.isEmpty() || !certAllows(4) || !confirmChangingSigned(tr("Moving pages"))) {
+            return;
+        }
+        // Where the block lands: before `before`, less the moved pages ahead of it.
+        const int ahead = static_cast<int>(std::count_if(pages.begin(), pages.end(), [&](int p) { return p < before; }));
+        QVector<int> landed;
+        for (int i = 0; i < pages.size(); ++i) {
+            landed.push_back(before - ahead + i);
+        }
+        gridSelectionAfterEdit_ = landed;
+        const QString spec = PageGrid::rangeSpec(pages);
+        onWorker([=](RenderWorker* w) { w->movePages(spec, before); });
+    });
+    connect(pageGrid_, &PageGrid::deletePressed, actions_->find(QStringLiteral("pageDelete")),
+            &QAction::trigger);
+    connect(pageGrid_, &PageGrid::filesDropped, this,
+            [this](const QStringList& paths, int before) { insertFilesAt(paths, before); });
+    pageGrid_->setContextActions({actions_->find(QStringLiteral("pageRotateLeft")),
+                                  actions_->find(QStringLiteral("pageRotateRight")), nullptr,
+                                  actions_->find(QStringLiteral("pageInsertFile")),
+                                  actions_->find(QStringLiteral("pageInsertBlank")),
+                                  actions_->find(QStringLiteral("pageExtract")), nullptr,
+                                  actions_->find(QStringLiteral("pageDelete"))});
+    viewStack_ = new QStackedWidget(this);
+    viewStack_->addWidget(view_);
+    viewStack_->addWidget(pageGrid_);
+
     splitter->addWidget(sidebar_);
-    splitter->addWidget(view_);
+    splitter->addWidget(viewStack_);
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setCollapsible(0, false);
@@ -298,7 +342,8 @@ void MainWindow::buildMenus() {
                            "preferences"})},
         {tr("&View"), ids({"zoomIn", "zoomOut", "actualSize", "fitWidth", "fitPage", "-", "rotateView", "-",
                            "toggleSidebar", "fullScreen"})},
-        {tr("&Pages"), ids({"toolCrop", "cropMargins", "-", "watermark"})},
+        {tr("&Pages"), ids({"pageRotateLeft", "pageRotateRight", "-", "pageInsertFile", "pageInsertBlank",
+                            "pageExtract", "pageDelete", "-", "toolCrop", "cropMargins", "-", "watermark"})},
         {tr("&Comment"), ids({"toolHighlight", "toolNote", "toolText", "toolDraw", "-", "toolMove",
                               "toolErase"})},
         {tr("&Sign"), ids({"toolSign", "signInvisibly", "-", "addLongTermValidation", "checkRevocation", "-",
@@ -502,4 +547,190 @@ void MainWindow::runPendingTask() {
         }
     }
     // kVerify is answered by onSignaturesReady (verifyPending_).
+}
+
+// --- Pages mode: organising pages ------------------------------------------
+
+void MainWindow::buildPageActions() {
+    const QString group = tr("Pages");
+    const auto open = [this] { return pageCount_ > 0 && certAllows(4); };
+    const auto add = [&](ActionRegistry::Spec spec, auto&& slot) {
+        spec.certNeeds = 4;  // never in a certified document: its pages are fixed
+        if (!spec.enabledWhen) {
+            spec.enabledWhen = open;
+        }
+        spec.group = group;
+        QAction* a = actions_->add(spec);
+        connect(a, &QAction::triggered, this, std::forward<decltype(slot)>(slot));
+        return a;
+    };
+    QAction* grid = add({.id = QStringLiteral("pageGrid"), .text = tr("Page &Grid"),
+                         .icon = QStringLiteral("layout-grid"),
+                         .tip = tr("Show every page, to select, drag and drop; off to see the pages full size"),
+                         .checkable = true,
+                         .enabledWhen = [this] { return pageCount_ > 0; }},
+                        [this](bool on) { showPageGrid(on); });
+    grid->setProperty("certNeeds", 0);  // looking is always allowed
+    grid->setProperty("certMenu", false);
+
+    const auto turn = [this](int degrees) {
+        const QVector<int> pages = targetPages();
+        if (pages.isEmpty() || !confirmChangingSigned(tr("Turning pages"))) {
+            return;
+        }
+        gridSelectionAfterEdit_ = pages;
+        const QString spec = PageGrid::rangeSpec(pages);
+        onWorker([=](RenderWorker* w) { w->rotatePages(spec, degrees); });
+    };
+    add({.id = QStringLiteral("pageRotateLeft"), .text = tr("Rotate &Left"), .icon = QStringLiteral("rotate-ccw"),
+         .tip = tr("Turn the selected pages a quarter turn counter-clockwise, in the file")},
+        [turn] { turn(-90); });
+    add({.id = QStringLiteral("pageRotateRight"), .text = tr("Rotate &Right"), .icon = QStringLiteral("rotate-cw"),
+         .tip = tr("Turn the selected pages a quarter turn clockwise, in the file")},
+        [turn] { turn(90); });
+    add({.id = QStringLiteral("pageDelete"), .text = tr("&Delete Pages"), .icon = QStringLiteral("trash-2"),
+         .tip = tr("Remove the selected pages (Undo brings them back)")},
+        [this] {
+            const QVector<int> pages = targetPages();
+            if (pages.isEmpty()) {
+                return;
+            }
+            if (pages.size() >= pageCount_) {
+                QMessageBox::information(this, tr("Delete pages"), tr("A document must keep at least one page."));
+                return;
+            }
+            if (!confirmChangingSigned(tr("Deleting pages"))) {
+                return;
+            }
+            gridSelectionAfterEdit_ = {std::min(pages.first(), pageCount_ - static_cast<int>(pages.size()) - 1)};
+            const QString spec = PageGrid::rangeSpec(pages);
+            onWorker([=](RenderWorker* w) { w->deletePages(spec); });
+            statusBar()->showMessage(tr("Deleted %n page(s). Undo brings them back.", nullptr,
+                                        static_cast<int>(pages.size())), 6000);
+        });
+    add({.id = QStringLiteral("pageInsertFile"), .text = tr("Insert Pages from &File…"),
+         .icon = QStringLiteral("file-plus"), .tip = tr("Put the pages of another PDF after the selected page")},
+        [this] {
+            const QStringList paths = QFileDialog::getOpenFileNames(
+                this, tr("Insert pages from"), QFileInfo(currentPath_).absolutePath(),
+                tr("PDF documents (*.pdf)"));
+            if (!paths.isEmpty()) {
+                insertFilesAt(paths, pageGrid_->isVisible() ? pageGrid_->insertionPoint()
+                                                            : std::max(0, view_->currentPage()) + 1);
+            }
+        });
+    add({.id = QStringLiteral("pageInsertBlank"), .text = tr("Insert &Blank Page"), .icon = QStringLiteral("file"),
+         .tip = tr("Add an empty page, the size of the one before it, after the selected page")},
+        [this] {
+            if (!confirmChangingSigned(tr("Inserting a page"))) {
+                return;
+            }
+            const QVector<int> pages = targetPages();
+            const int at = pages.isEmpty() ? pageCount_ : pages.last() + 1;
+            const QSize like = view_->pageSizePoints(std::max(0, at - 1)).toSize();
+            const QSizeF size = like.isEmpty() ? QSizeF(595, 842) : QSizeF(like);  // A4 if in doubt
+            gridSelectionAfterEdit_ = {at};
+            onWorker([=](RenderWorker* w) { w->insertBlankPage(at, size); });
+        });
+    add({.id = QStringLiteral("pageExtract"), .text = tr("E&xtract Pages…"), .icon = QStringLiteral("file-output"),
+         .tip = tr("Save the selected pages as a new PDF; this document is not changed"),
+         .enabledWhen = [this] { return pageCount_ > 0 && !fileToolBusy_; }},
+        [this] {
+            const QVector<int> pages = targetPages();
+            // Extract reads the file on disk, so edits are settled first.
+            if (pages.isEmpty() ||
+                !resolveUnsaved([this] { actions_->find(QStringLiteral("pageExtract"))->trigger(); })) {
+                return;
+            }
+            const QString spec = PageGrid::rangeSpec(pages);
+            const QString suggested = QFileInfo(currentPath_).dir().filePath(
+                tr("%1 (pages %2).pdf").arg(QFileInfo(currentPath_).completeBaseName(), spec));
+            const QString output = QFileDialog::getSaveFileName(this, tr("Extract pages to"), suggested,
+                                                                tr("PDF documents (*.pdf)"));
+            if (output.isEmpty()) {
+                return;
+            }
+            const QString input = currentPath_;
+            runFileTool(tr("Extracting pages…"), [input, spec, output](FileTools* t, const QString& password) {
+                t->split(input, password, {spec}, {output});
+            });
+        });
+}
+
+QVector<int> MainWindow::targetPages() const {
+    if (pageCount_ <= 0) {
+        return {};
+    }
+    if (viewStack_ != nullptr && viewStack_->currentWidget() == pageGrid_) {
+        return pageGrid_->selectedPages();
+    }
+    return {std::max(0, view_->currentPage())};
+}
+
+void MainWindow::showPageGrid(bool grid) {
+    if (viewStack_ == nullptr) {
+        return;
+    }
+    const bool wasGrid = viewStack_->currentWidget() == pageGrid_;
+    viewStack_->setCurrentWidget(grid ? static_cast<QWidget*>(pageGrid_) : view_);
+    // The grid is the pages at a glance; the sidebar's thumbnails would only
+    // repeat it. Folded while it shows, as it was after.
+    if (grid && !wasGrid) {
+        sidebarBeforeGrid_ = sidebar_->isExpanded();
+        sidebar_->setExpanded(false);
+    } else if (!grid && wasGrid && sidebarBeforeGrid_) {
+        sidebar_->setExpanded(true);
+    }
+    if (QAction* toggle = actions_->find(QStringLiteral("pageGrid"))) {
+        toggle->setChecked(grid);
+    }
+    if (grid) {
+        if (pageGrid_->count() != pageCount_) {
+            pageGrid_->setPageCount(pageCount_);
+        }
+        pageGrid_->selectPages({std::max(0, view_->currentPage())});
+        pageGrid_->setFocus();
+    } else {
+        view_->setFocus();
+    }
+}
+
+bool MainWindow::confirmChangingSigned(const QString& what) {
+    if (signatureCount_ == 0) {
+        return true;
+    }
+    const auto answer = QMessageBox::question(
+        this, tr("This document is signed"),
+        tr("%1 is saved as a new revision after the %n signature(s). They stay intact, but each will "
+           "say that the document was changed after it was signed.\n\nCarry on?",
+           nullptr, signatureCount_)
+            .arg(what),
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    return answer == QMessageBox::Yes;
+}
+
+void MainWindow::insertFilesAt(const QStringList& paths, int at) {
+    if (paths.isEmpty() || pageCount_ <= 0 || !certAllows(4) || !confirmChangingSigned(tr("Inserting pages"))) {
+        return;
+    }
+    // The viewer only reads the bytes; the worker parses them, in its sandbox.
+    constexpr qint64 kMaxBytes = qint64{128} << 20;
+    const int where = std::clamp(at, 0, pageCount_);
+    // Each file goes in at the same place, so the last goes first: the pages
+    // then read in the order the files were given.
+    for (auto it = paths.rbegin(); it != paths.rend(); ++it) {
+        const QString& path = *it;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly) || file.size() > kMaxBytes) {
+            QMessageBox::warning(this, tr("Insert pages"),
+                                 file.size() > kMaxBytes
+                                     ? tr("“%1” is larger than 128 MB; combine it with Combine Files instead.")
+                                           .arg(QFileInfo(path).fileName())
+                                     : tr("“%1” could not be read.").arg(QFileInfo(path).fileName()));
+            return;
+        }
+        const QByteArray data = file.readAll();
+        onWorker([=](RenderWorker* w) { w->insertPages(where, data, QString()); });
+    }
+    statusBar()->showMessage(tr("Inserting %n file(s)…", nullptr, static_cast<int>(paths.size())), 4000);
 }
