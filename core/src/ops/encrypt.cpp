@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "leht/ops/encrypt.hpp"
 
+#include "edit_internal.hpp"
+#include "fd_output.hpp"
 #include "guards.hpp"
 #include "leht/context.hpp"
 #include "leht/error.hpp"
@@ -85,6 +87,20 @@ pdf_write_options base_options() {
     return opts;
 }
 
+pdf_write_options encrypting_options(const EncryptOptions& options) {
+    pdf_write_options opts = base_options();
+    opts.do_encrypt = method_code(options.method);
+    opts.permissions = permission_bits(options.permissions);
+    copy_password(opts.upwd_utf8, options.user_password, "user");
+    // An empty owner password would leave the document trivially unlockable,
+    // so fall back to the user password rather than to nothing.
+    copy_password(opts.opwd_utf8,
+                  options.owner_password.empty() ? options.user_password
+                                                 : options.owner_password,
+                  "owner");
+    return opts;
+}
+
 }  // namespace
 
 void encrypt(const Context& ctx, const std::string& input,
@@ -99,16 +115,7 @@ void encrypt(const Context& ctx, const std::string& input,
 
     OwnedPdfDoc doc = open_and_unlock(c, input, options.user_password);
 
-    pdf_write_options opts = base_options();
-    opts.do_encrypt = method_code(options.method);
-    opts.permissions = permission_bits(options.permissions);
-    copy_password(opts.upwd_utf8, options.user_password, "user");
-    // An empty owner password would leave the document trivially unlockable,
-    // so fall back to the user password rather than to nothing.
-    copy_password(opts.opwd_utf8,
-                  options.owner_password.empty() ? options.user_password
-                                                 : options.owner_password,
-                  "owner");
+    pdf_write_options opts = encrypting_options(options);
 
     pdf_document* pdf = doc.get();
     detail::refuse_directory_output(output);
@@ -135,6 +142,22 @@ void decrypt(const Context& ctx, const std::string& input,
     detail::refuse_directory_output(output);
     const char* out = output.c_str();
     guarded(c, [&](fz_context* g) { pdf_save_document(g, pdf, out, &opts); });
+}
+
+void encrypt(const Context& ctx, const Document& doc, int output_fd,
+             const EncryptOptions& options) {
+    fz_context* c = ctx.raw();
+    // The caller has unlocked it: the worker opens and authenticates first.
+    pdf_document* pdf = detail::require_pdf(c, doc);
+    detail::write_pdf_fd(c, pdf, output_fd, encrypting_options(options));
+}
+
+void decrypt(const Context& ctx, const Document& doc, int output_fd) {
+    fz_context* c = ctx.raw();
+    pdf_document* pdf = detail::require_pdf(c, doc);
+    pdf_write_options opts = base_options();
+    opts.do_encrypt = PDF_ENCRYPT_NONE;
+    detail::write_pdf_fd(c, pdf, output_fd, opts);
 }
 
 }  // namespace leht::ops

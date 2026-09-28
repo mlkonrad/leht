@@ -153,6 +153,10 @@ public slots:
     /// `data` is the whole PDF file, read by the caller; the worker parses it.
     void insertPages(int at, QByteArray data, QString pages);
     void insertBlankPage(int at, QSizeF size);
+    /// File > Document Properties: answered by infoReady().
+    void requestInfo();
+    /// Sets Title, Author, Subject or Keywords ("" removes it), as an edit.
+    void setInfo(QString key, QString value);
 
     void undo();
     void redo();
@@ -273,6 +277,8 @@ signals:
     /// was shown for page N is not page N any more. Comes just before the
     /// documentEdited() for it.
     void pagesRearranged();
+    /// The document's facts, as Document::metadata() keys and values.
+    void infoReady(QStringList keys, QStringList values);
     void documentEdited(QVector<int> pages, bool allPages, QVector<QSize> baseSizes);
     /// `modified`: there are edits since the file was opened or last saved.
     void editStateChanged(bool canUndo, bool canRedo, bool modified);

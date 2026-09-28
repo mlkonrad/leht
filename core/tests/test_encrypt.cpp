@@ -6,6 +6,9 @@
 #include "leht/renderer.hpp"
 #include "test_harness.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <filesystem>
 #include <string>
 
@@ -170,7 +173,50 @@ void overlong_password_is_rejected() {
 
 }  // namespace
 
+/// The worker's path: from an open document into a descriptor. Changing the
+/// password of an unlocked document, and removing it.
+void descriptor_variants_protect_change_and_remove() {
+    Context ctx;
+    TempPdf locked{"enc_fd_locked.pdf"};
+    TempPdf changed{"enc_fd_changed.pdf"};
+    TempPdf open_again{"enc_fd_open.pdf"};
+    const auto write = [](const std::string& path, auto&& fn) {
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        CHECK(fd >= 0);
+        fn(fd);
+        ::close(fd);
+    };
+
+    {
+        Document doc = Document::open(ctx, corpus("text_10p.pdf"));
+        EncryptOptions options;
+        options.user_password = "esimene";
+        write(locked.str(), [&](int fd) { encrypt(ctx, doc, fd, options); });
+    }
+    {
+        Document doc = Document::open(ctx, locked.str());
+        CHECK(doc.needs_password());
+        CHECK(doc.authenticate("esimene"));
+        EncryptOptions options;
+        options.user_password = "teine";
+        write(changed.str(), [&](int fd) { encrypt(ctx, doc, fd, options); });
+    }
+    {
+        Document doc = Document::open(ctx, changed.str());
+        CHECK(doc.needs_password());
+        CHECK(!doc.authenticate("esimene"));
+        CHECK(doc.authenticate("teine"));
+        write(open_again.str(), [&](int fd) { decrypt(ctx, doc, fd); });
+    }
+    Document plain = Document::open(ctx, open_again.str());
+    CHECK(!plain.needs_password());
+    CHECK(plain.page_count() == 10);
+    Renderer r(ctx, plain);
+    CHECK(r.page_size(0, 1.0F).width > 0);
+}
+
 int main() {
+    RUN(descriptor_variants_protect_change_and_remove);
     RUN(encrypted_document_demands_a_password);
     RUN(unlocked_document_renders);
     RUN(decrypt_round_trips);

@@ -79,6 +79,10 @@ void decode_frame(const Frame& f) {
     case MsgType::PagesWritten: (void)decode_as<PagesWritten>(f); break;
     case MsgType::MergeAdded: (void)decode_as<MergeAdded>(f); break;
     case MsgType::Merged: (void)decode_as<Merged>(f); break;
+    case MsgType::Protect: (void)decode_as<Protect>(f); break;
+    case MsgType::Protected: (void)decode_as<Protected>(f); break;
+    case MsgType::GetInfo: (void)decode_as<GetInfo>(f); break;
+    case MsgType::DocInfo: (void)decode_as<DocInfo>(f); break;
 
     case MsgType::TrustedListStep: (void)decode_as<TrustedListStep>(f); break;
     case MsgType::TrustedListProgress: (void)decode_as<TrustedListProgress>(f); break;

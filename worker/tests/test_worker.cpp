@@ -776,6 +776,39 @@ void merges_inside_the_sandbox() {
     CHECK(!failure(send_input(*w, 32, MergeAdd{"page.png"}, corpus("page.png"))).empty());
 }
 
+/// Password protection is written in the sandbox: locking a file, then
+/// opening the locked file, unlocking it and writing it back without one.
+void protects_and_unprotects_inside_the_sandbox() {
+    leht::test::TempPath locked("worker_locked.pdf");
+    leht::test::TempPath plain("worker_unlocked.pdf");
+    {
+        auto w = start();
+        (void)open_ok(*w, corpus("text_10p.pdf"));
+        Protect p;
+        p.user_password = "salajane";
+        const Protected r = decode_as<Protected>(send_output(*w, 30, p, locked.str()));
+        CHECK(r.bytes == std::filesystem::file_size(locked.str()));
+    }
+    {
+        leht::Context ctx;
+        leht::Document doc = leht::Document::open(ctx, locked.str());
+        CHECK(doc.needs_password() && doc.authenticate("salajane") && doc.page_count() == 10);
+    }
+    {
+        auto w = start();
+        CHECK(!decode_as<NeedsPassword>(open(*w, locked.str())).retry);
+        w->channel().send(31, Authenticate{"salajane"});
+        (void)decode_as<Opened>(next(*w));
+        (void)decode_as<Outline>(next(*w));
+        Protect off;
+        off.encrypt = false;
+        (void)decode_as<Protected>(send_output(*w, 32, off, plain.str()));
+    }
+    leht::Context ctx;
+    leht::Document doc = leht::Document::open(ctx, plain.str());
+    CHECK(!doc.needs_password() && doc.page_count() == 10);
+}
+
 void compresses_and_splits_inside_the_sandbox() {
     leht::test::TempPath heavy("worker_heavy.pdf");
     {
@@ -1383,6 +1416,7 @@ int main() {
     RUN(search_can_be_cancelled);
     RUN(edits_apply_render_and_save);
     RUN(pages_are_organised_in_the_worker);
+    RUN(protects_and_unprotects_inside_the_sandbox);
     RUN(redaction_through_the_worker);
     RUN(forms_through_the_worker);
     RUN(replay_is_deterministic);

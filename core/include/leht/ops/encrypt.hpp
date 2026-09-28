@@ -5,6 +5,7 @@
 
 namespace leht {
 class Context;
+class Document;
 }
 
 namespace leht::ops {
@@ -48,5 +49,15 @@ void encrypt(const Context& ctx, const std::string& input,
 /// either the user or the owner password.
 void decrypt(const Context& ctx, const std::string& input,
              const std::string& output, const std::string& password = "");
+
+/// As encrypt(), from an open (and, if it was encrypted, unlocked) document
+/// into `output_fd`, which is borrowed and written from its current offset.
+/// `doc` is only read. The sandboxed worker's entry point: it may change a
+/// document's password without ever holding the file's path.
+void encrypt(const Context& ctx, const Document& doc, int output_fd,
+             const EncryptOptions& options);
+
+/// As decrypt(), from an open, unlocked document into `output_fd`.
+void decrypt(const Context& ctx, const Document& doc, int output_fd);
 
 }  // namespace leht::ops

@@ -903,7 +903,37 @@ void test_file_tools() {
                             MsgType::PagesWritten, MsgType::MergeAdded, MsgType::Merged}) {
         CHECK(is_known(static_cast<std::uint16_t>(t)));
     }
-    CHECK(!is_known(26) && !is_known(124));
+    CHECK(!is_known(28) && !is_known(126));
+    const DocInfo info = round_trip(DocInfo{{{"format", "PDF 1.7"}, {"info:Title", "Üürileping"}}});
+    CHECK(info.fields.size() == 2 && info.fields[1].second == "Üürileping");
+    (void)round_trip(GetInfo{});
+    Edit title;
+    title.kind = Edit::Kind::SetInfo;
+    title.name = "Title";
+    title.text = "Üürileping";
+    const Edit title2 = round_trip(title);
+    CHECK(title2.name == "Title" && title2.text == "Üürileping");
+
+    Protect lock;
+    lock.user_password = "salajane";
+    lock.owner_password = "omanik";
+    lock.method = 1;
+    lock.permissions = 0x11;
+    const Protect lock2 = round_trip(lock);
+    CHECK(lock2.encrypt && lock2.user_password == "salajane" && lock2.owner_password == "omanik" &&
+          lock2.method == 1 && lock2.permissions == 0x11);
+    CHECK(!round_trip(Protect{false, "", "", 2, 0}).encrypt);
+    Protect odd = lock;
+    odd.method = 3;
+    CHECK(rejects<Protect>(make_frame(1, odd).payload));
+    odd = lock;
+    odd.permissions = 0x80;
+    CHECK(rejects<Protect>(make_frame(1, odd).payload));
+    odd = lock;
+    odd.user_password = std::string(128, 'x');  // longer than a PDF allows
+    CHECK(rejects<Protect>(make_frame(1, odd).payload));
+    CHECK(round_trip(Protected{12345}).bytes == 12345);
+    CHECK(is_known(26) && is_known(124) && takes_fd(MsgType::Protect) && !takes_fd(MsgType::Protected));
     // Outputs, and a merge's inputs, arrive as fds; nothing else here does.
     CHECK(takes_fd(MsgType::Compress) && takes_fd(MsgType::ExtractPages) &&
           takes_fd(MsgType::MergeAdd) && takes_fd(MsgType::MergeFinish));

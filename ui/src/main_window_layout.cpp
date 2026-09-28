@@ -337,7 +337,8 @@ void MainWindow::buildMenus() {
     };
     actions_->populate(menuBar(), {
         {tr("&File"), ids({"open", "openRecent", "close", "-", "save", "saveAs", "-", "combineFiles",
-                           "reduceFileSize", "splitDocument", "-", "print", "-", "quit"})},
+                           "reduceFileSize", "splitDocument", "-", "protect", "unprotect", "-", "properties", "print", "-",
+                           "quit"})},
         {tr("&Edit"), ids({"undo", "redo", "-", "copy", "-", "find", "findNext", "findPrevious", "-",
                            "preferences"})},
         {tr("&View"), ids({"zoomIn", "zoomOut", "actualSize", "fitWidth", "fitPage", "-", "rotateView", "-",

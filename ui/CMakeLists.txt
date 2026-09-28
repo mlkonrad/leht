@@ -17,6 +17,8 @@ qt_add_library(leht_viewer_lib STATIC
     src/page_grid.cpp
     src/page_view.cpp
     src/preferences.cpp
+    src/properties_dialog.cpp
+    src/protect_dialog.cpp
     src/recent_files.cpp
     src/render_worker.cpp
     src/sidebar.cpp

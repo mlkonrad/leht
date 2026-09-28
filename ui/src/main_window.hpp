@@ -238,6 +238,7 @@ private:
     QThread fileToolsThread_;
     FileTools* fileTools_ = nullptr;
     bool fileToolBusy_ = false;  ///< one job at a time
+    bool documentEncrypted_ = false;  ///< it asked for a password when opened
     QProgressDialog* fileToolsProgress_ = nullptr;
     QString fileToolTitle_;
     std::function<void(FileTools*, QString)> fileToolJob_;

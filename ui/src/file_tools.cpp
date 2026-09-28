@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "file_tools.hpp"
 
+#include <algorithm>
+
 #include "worker_files.hpp"
 
 #include "leht/ipc/process.hpp"
@@ -238,6 +240,50 @@ void FileTools::compress(QString input, QString password, QString output, int pr
     emit finished(tr("Reduced from %1 to %2 (%3% smaller).")
                       .arg(sizeText(before), sizeText(result.bytes))
                       .arg(saved),
+                  {output});
+}
+
+void FileTools::protect(QString input, QString password, QString output, bool lock,
+                        QString userPassword, QString ownerPassword, int method, int permissions) {
+    auto w = startWorker();
+    if (!w || !openInput(*w, input, password)) {
+        return;
+    }
+    if (cancelled()) {
+        return;
+    }
+    emit progress(0, 1, lock ? tr("Protecting “%1”…").arg(QFileInfo(input).fileName())
+                             : tr("Removing the password from “%1”…").arg(QFileInfo(input).fileName()));
+    Beside out(output);
+    if (out.fd() < 0) {
+        emit failed(tr("Could not write “%1”: %2").arg(output, out.error()));
+        return;
+    }
+    ipc::Protect msg;
+    msg.encrypt = lock;
+    msg.user_password = userPassword.toStdString();
+    msg.owner_password = ownerPassword.toStdString();
+    msg.method = static_cast<std::uint8_t>(method);
+    msg.permissions = static_cast<std::uint8_t>(permissions);
+    QString error;
+    const auto reply = request(*w, msg, out.fd(), error);
+    // The passwords are not kept a moment longer than the request needs.
+    std::fill(msg.user_password.begin(), msg.user_password.end(), '\0');
+    std::fill(msg.owner_password.begin(), msg.owner_password.end(), '\0');
+    if (!reply) {
+        emit failed(tr("Could not write “%1”: %2").arg(QFileInfo(output).fileName(), error));
+        return;
+    }
+    (void)ipc::decode_as<ipc::Protected>(*reply);
+    if (cancelled()) {
+        return;
+    }
+    if (const QString why = out.commit(); !why.isEmpty()) {
+        emit failed(tr("Could not write “%1”: %2").arg(output, why));
+        return;
+    }
+    emit finished(lock ? tr("“%1” is password-protected.").arg(QFileInfo(output).fileName())
+                       : tr("“%1” no longer needs a password.").arg(QFileInfo(output).fileName()),
                   {output});
 }
 

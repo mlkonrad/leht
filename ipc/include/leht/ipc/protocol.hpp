@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace leht::ipc {
@@ -71,6 +72,8 @@ enum class MsgType : std::uint16_t {
     MergeBegin = 23,
     MergeAdd = 24,     ///< carries an INPUT file's fd via SCM_RIGHTS
     MergeFinish = 25,  ///< carries the output file's fd via SCM_RIGHTS
+    Protect = 26,      ///< carries the output file's fd via SCM_RIGHTS
+    GetInfo = 27,
 
     // The EU trusted lists: requests 30-39, to leht-worker --trusted-list.
     TrustedListStep = 30,
@@ -102,6 +105,8 @@ enum class MsgType : std::uint16_t {
     PagesWritten = 121,
     MergeAdded = 122,
     Merged = 123,
+    Protected = 124,
+    DocInfo = 125,
 
     // The EU trusted lists: replies 130-139.
     TrustedListProgress = 130,
@@ -110,7 +115,7 @@ enum class MsgType : std::uint16_t {
 /// Whether a frame of `type` may carry a file descriptor: only those that hand
 /// the worker a file to read (Open, MergeAdd) or to write (Save,
 /// PrepareSignature, AddValidationData, PrepareDocTimestamp, Compress,
-/// ExtractPages, MergeFinish).
+/// ExtractPages, MergeFinish, Protect).
 [[nodiscard]] bool takes_fd(MsgType type) noexcept;
 
 /// True for every value in MsgType. Frames with any other type are rejected
@@ -221,6 +226,7 @@ struct Edit {
         MovePages = 14,     ///< pages, page: the one they go before (page count: the end)
         InsertPages = 15,   ///< page: where; data: the source file; pages: its pages ("": all)
         InsertBlank = 16,   ///< page: where; rects[0]: (0, 0, width, height)
+        SetInfo = 17,       ///< name: Title, Author, Subject or Keywords; text: the value ("" removes)
     };
     Kind kind = Kind::Redact;
     int page = 0;
@@ -544,6 +550,45 @@ struct MergeFinish {
     static constexpr MsgType kType = MsgType::MergeFinish;
     void encode(Writer&) const {}
     static MergeFinish decode(Reader&) { return {}; }
+};
+
+/// Writes the open (unlocked) document into the attached fd with a password
+/// (ops::encrypt) or without any (ops::decrypt). The passwords are the new
+/// file's, not the document's: the worker needs them to write it.
+struct Protect {
+    static constexpr MsgType kType = MsgType::Protect;
+    bool encrypt = true;           ///< false: remove the password
+    std::string user_password;     ///< to open; may be empty (permissions only)
+    std::string owner_password;    ///< full rights; empty reuses the user's
+    std::uint8_t method = 2;       ///< ops::Encryption: 0 RC4-128, 1 AES-128, 2 AES-256
+    /// ops::Permissions, one bit each in declaration order: print, modify,
+    /// copy, annotate, fill_forms, assemble, print_high_quality.
+    std::uint8_t permissions = 0x71;
+    void encode(Writer& w) const;
+    static Protect decode(Reader& r);
+};
+
+/// The document's descriptive facts, for File > Document Properties.
+struct GetInfo {
+    static constexpr MsgType kType = MsgType::GetInfo;
+    void encode(Writer&) const {}
+    static GetInfo decode(Reader&) { return {}; }
+};
+
+/// Answers GetInfo: Document::metadata() keys ("format", "encryption",
+/// "info:Title", ...) with their values, only those the document has.
+struct DocInfo {
+    static constexpr MsgType kType = MsgType::DocInfo;
+    std::vector<std::pair<std::string, std::string>> fields;
+    void encode(Writer& w) const;
+    static DocInfo decode(Reader& r);
+};
+
+struct Protected {
+    static constexpr MsgType kType = MsgType::Protected;
+    std::uint64_t bytes = 0;
+    void encode(Writer& w) const;
+    static Protected decode(Reader& r);
 };
 
 struct Compressed {

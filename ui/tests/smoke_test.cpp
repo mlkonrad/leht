@@ -12,6 +12,10 @@
 #include "mode_bar.hpp"
 #include "page_grid.hpp"
 #include "preferences.hpp"
+#include "properties_dialog.hpp"
+#include "protect_dialog.hpp"
+#include <QGroupBox>
+#include <QTimeZone>
 #include "recent_files.hpp"
 #include "sidebar.hpp"
 #include "welcome_view.hpp"
@@ -1302,6 +1306,117 @@ int main(int argc, char** argv) {
         window.modeBar()->setMode(QStringLiteral("read"));
         pump(200);
         check(!grid->isVisible(), "leaving Pages mode shows the pages again");
+    }
+
+    // --- Password Protect and Remove Password -----------------------------
+    {
+        ProtectDialog dialog(&window);
+        QPushButton* ok = nullptr;
+        for (QPushButton* b : dialog.findChildren<QPushButton*>()) {
+            ok = b->text() == QStringLiteral("Protect…") ? b : ok;
+        }
+        const auto field = [&](const char* name) { return dialog.findChild<QLineEdit*>(QLatin1String(name)); };
+        check(ok != nullptr && !ok->isEnabled(), "Protect waits for a password");
+        field("openPassword")->setText(QStringLiteral("salajane"));
+        check(!ok->isEnabled(), "and for it to be typed twice");
+        field("repeatPassword")->setText(QStringLiteral("salajane"));
+        check(ok->isEnabled(), "then it may go ahead");
+        dialog.findChild<QGroupBox*>(QStringLiteral("restrict"))->setChecked(true);
+        check(!ok->isEnabled(), "restrictions need a permissions password of their own");
+        field("permissionsPassword")->setText(QStringLiteral("salajane"));
+        check(!ok->isEnabled(), "one that differs from the password to open");
+        field("permissionsPassword")->setText(QStringLiteral("omanik"));
+        check(ok->isEnabled() && (dialog.permissions() & 1) != 0 && (dialog.permissions() & 4) == 0,
+              "by default printing stays allowed and copying does not");
+
+        // The job, on a FileTools of the test's own (the window's would show
+        // its result in a modal box).
+        QTemporaryDir tmp;
+        const QString locked = tmp.filePath(QStringLiteral("locked copy.pdf"));
+        const QString plain = tmp.filePath(QStringLiteral("plain copy.pdf"));
+        QThread thread;
+        auto* tools = new FileTools();
+        tools->moveToThread(&thread);
+        QObject::connect(&thread, &QThread::finished, tools, &QObject::deleteLater);
+        thread.start();
+        bool done = false;
+        QString failure;
+        QObject::connect(tools, &FileTools::finished, &window, [&](const QString&, const QStringList&) { done = true; });
+        QObject::connect(tools, &FileTools::failed, &window, [&](const QString& why) {
+            failure = why;
+            done = true;
+        });
+        const auto run = [&](auto job) {
+            done = false;
+            failure.clear();
+            QMetaObject::invokeMethod(tools, [tools, job] { job(tools); }, Qt::QueuedConnection);
+            QElapsedTimer t;
+            t.start();
+            while (!done && t.elapsed() < 20000) {
+                pump(50);
+            }
+            return done && failure.isEmpty();
+        };
+        const QString source = QString::fromStdString(doc);
+        check(run([=](FileTools* t) { t->protect(source, {}, locked, true, QStringLiteral("salajane"), {}, 2, 0x7F); }),
+              "Password Protect writes a copy");
+        check(run([=](FileTools* t) { t->protect(locked, QStringLiteral("salajane"), plain, false, {}, {}, 2, 0x7F); }),
+              "Remove Password writes it back without one");
+        thread.quit();
+        thread.wait();
+        leht::Context ctx;
+        try {
+            leht::Document a = leht::Document::open(ctx, locked.toStdString());
+            check(a.needs_password() && a.authenticate("salajane"), "the copy opens only with its password");
+            leht::Document b = leht::Document::open(ctx, plain.toStdString());
+            check(!b.needs_password() && b.page_count() == 10, "and the unprotected one without");
+        } catch (const leht::Error&) {
+            check(false, "the protected files open");
+        }
+    }
+
+    // --- Document Properties ------------------------------------------------
+    {
+        check(parsePdfDate(QStringLiteral("D:20260928143000+03'00'")) ==
+                  QDateTime(QDate(2026, 9, 28), QTime(11, 30), QTimeZone::UTC),
+              "a PDF date with a zone reads right");
+        check(parsePdfDate(QStringLiteral("D:2026")).date() == QDate(2026, 1, 1) &&
+                  !parsePdfDate(QStringLiteral("yesterday")).isValid(),
+              "a bare year reads, and nonsense does not");
+        check(describePageSize(QSizeF(595, 842)) == QStringLiteral("A4, 210 × 297 mm") &&
+                  describePageSize(QSizeF(842, 595)).startsWith(QStringLiteral("A4 landscape")),
+              "page sizes have their names");
+
+        QTemporaryDir tmp;
+        const QString copy = tmp.filePath(QStringLiteral("described.pdf"));
+        QFile::copy(QString::fromStdString(doc), copy);
+        window.openPath(copy);
+        pump(1500);
+        QStringList keys;
+        QStringList values;
+        const auto got = QObject::connect(worker, &RenderWorker::infoReady, &window,
+                                          [&](const QStringList& k, const QStringList& v) {
+                                              keys = k;
+                                              values = v;
+                                          });
+        QMetaObject::invokeMethod(worker, "requestInfo", Qt::QueuedConnection);
+        pump(600);
+        check(keys.contains(QStringLiteral("format")), "the worker describes the document");
+        QMetaObject::invokeMethod(worker, "setInfo", Qt::QueuedConnection,
+                                  Q_ARG(QString, QStringLiteral("Title")),
+                                  Q_ARG(QString, QStringLiteral("Üürileping")));
+        pump(800);
+        check(window.isModified(), "setting the title is an edit");
+        QMetaObject::invokeMethod(worker, "requestInfo", Qt::QueuedConnection);
+        pump(600);
+        check(values.value(keys.indexOf(QStringLiteral("info:Title"))) == QStringLiteral("Üürileping"),
+              "and the worker reports the new title");
+        QObject::disconnect(got);
+        (void)window.save();
+        pump(2000);
+        leht::Context ctx;
+        leht::Document saved = leht::Document::open(ctx, copy.toStdString());
+        check(saved.metadata("info:Title").value_or("") == "Üürileping", "the title is saved");
     }
 
     // --- Editing (M4b) -----------------------------------------------------

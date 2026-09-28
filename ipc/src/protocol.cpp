@@ -202,7 +202,7 @@ bool takes_fd(MsgType type) noexcept {
            type == MsgType::PrepareDocTimestamp ||
 
            type == MsgType::Compress || type == MsgType::ExtractPages ||
-           type == MsgType::MergeAdd || type == MsgType::MergeFinish;
+           type == MsgType::MergeAdd || type == MsgType::MergeFinish || type == MsgType::Protect;
 }
 
 bool is_known(std::uint16_t type) noexcept {
@@ -228,6 +228,8 @@ bool is_known(std::uint16_t type) noexcept {
     case MsgType::Compress: case MsgType::ExtractPages: case MsgType::MergeBegin:
     case MsgType::MergeAdd: case MsgType::MergeFinish: case MsgType::Compressed:
     case MsgType::PagesWritten: case MsgType::MergeAdded: case MsgType::Merged:
+    case MsgType::Protect: case MsgType::Protected:
+    case MsgType::GetInfo: case MsgType::DocInfo:
 
     case MsgType::TrustedListStep: case MsgType::TrustedListProgress:
         return true;
@@ -597,13 +599,17 @@ void Edit::encode(Writer& w) const {
         w.i32(page);
         put_rect(w, rects.empty() ? Rect{} : rects.front());
         break;
+    case Kind::SetInfo:
+        w.str(name);
+        w.str(text);
+        break;
     }
 }
 
 Edit Edit::decode(Reader& r) {
     Edit m;
     const std::uint8_t kind = r.u8();
-    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::InsertBlank)) {
+    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::SetInfo)) {
         throw ProtocolError("unknown edit kind");
     }
     m.kind = static_cast<Kind>(kind);
@@ -719,6 +725,10 @@ Edit Edit::decode(Reader& r) {
         m.page = page_index(r);
         m.rects.push_back(get_rect(r));
         break;
+    case Kind::SetInfo:
+        m.name = r.str(16);  // "Keywords" is the longest
+        m.text = r.str(32768);
+        break;
     }
     return m;
 }
@@ -797,6 +807,60 @@ void MergeAdd::encode(Writer& w) const { w.str(name); }
 MergeAdd MergeAdd::decode(Reader& r) {
     MergeAdd m;
     m.name = r.str(4096);
+    return m;
+}
+
+void Protect::encode(Writer& w) const {
+    w.u8(encrypt ? 1 : 0);
+    w.str(user_password);
+    w.str(owner_password);
+    w.u8(method);
+    w.u8(permissions);
+}
+Protect Protect::decode(Reader& r) {
+    Protect m;
+    m.encrypt = r.boolean();
+    // A PDF password is at most 127 bytes (ops::encrypt refuses longer).
+    m.user_password = r.str(127);
+    m.owner_password = r.str(127);
+    m.method = r.u8();
+    m.permissions = r.u8();
+    if (m.method > 2) {
+        throw ProtocolError("unknown encryption method");
+    }
+    if (m.permissions > 0x7F) {
+        throw ProtocolError("unknown permission bits");
+    }
+    return m;
+}
+
+void DocInfo::encode(Writer& w) const {
+    w.u32(static_cast<std::uint32_t>(fields.size()));
+    for (const auto& [key, value] : fields) {
+        w.str(key);
+        w.str(value);
+    }
+}
+DocInfo DocInfo::decode(Reader& r) {
+    DocInfo m;
+    const std::size_t n = r.count(8);
+    if (n > 64) {
+        throw ProtocolError("too many document properties");
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        std::string key = r.str(64);
+        std::string value = r.str(kMaxString);
+        m.fields.emplace_back(std::move(key), std::move(value));
+    }
+    return m;
+}
+
+void Protected::encode(Writer& w) const {
+    w.u64(bytes);
+}
+Protected Protected::decode(Reader& r) {
+    Protected m;
+    m.bytes = r.u64();
     return m;
 }
 

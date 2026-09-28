@@ -12,6 +12,8 @@
 #include "page_dialogs.hpp"
 #include "file_tools.hpp"
 #include "file_tools_dialogs.hpp"
+#include "properties_dialog.hpp"
+#include "protect_dialog.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "leht/ocr/ocr.hpp"
 #endif
@@ -419,6 +421,39 @@ void MainWindow::buildActions() {
          .themeIcon = QStringLiteral("document-save-as"), .shortcuts = {QKeySequence::SaveAs},
          .tip = tr("Save a copy under another name"), .enabledWhen = open, .group = file},
         [this] { (void)saveAs(); });
+    add({.id = QStringLiteral("properties"), .text = tr("Document P&roperties…"), .icon = QStringLiteral("file-text"),
+         .themeIcon = QStringLiteral("document-properties"), .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_D)},
+         .tip = tr("Title, author and keywords, and what the file is"), .enabledWhen = open, .group = file},
+        [this] {
+            // Asked of the worker; the dialog opens when the answer comes.
+            auto once = std::make_shared<QMetaObject::Connection>();
+            *once = connect(worker_, &RenderWorker::infoReady, this,
+                            [this, once](const QStringList& keys, const QStringList& values) {
+                disconnect(*once);
+                QHash<QString, QString> info;
+                for (int i = 0; i < keys.size() && i < values.size(); ++i) {
+                    info.insert(keys[i], values[i]);
+                }
+                const bool editable = certAllows(2) && info.value(QStringLiteral("format")).startsWith(QLatin1String("PDF"));
+                PropertiesDialog dialog(this, currentPath_, pageCount_, view_->pageSizePoints(0), info, editable);
+                if (dialog.exec() != QDialog::Accepted) {
+                    return;
+                }
+                const auto changes = dialog.changes();
+                if (changes.isEmpty()) {
+                    return;
+                }
+                // One Undo takes back the whole dialog.
+                onWorker([changes](RenderWorker* w) {
+                    w->beginEditGroup();
+                    for (const auto& [key, value] : changes) {
+                        w->setInfo(key, value);
+                    }
+                    w->endEditGroup();
+                });
+            });
+            onWorker([](RenderWorker* w) { w->requestInfo(); });
+        });
     add({.id = QStringLiteral("print"), .text = tr("&Print…"), .icon = QStringLiteral("printer"),
          .themeIcon = QStringLiteral("document-print"), .shortcuts = {QKeySequence::Print},
          .enabledWhen = open, .group = file},
@@ -1223,6 +1258,7 @@ void MainWindow::openPath(const QString& path) {
     modified_ = false;
     pageCount_ = 0;  // nothing to act on until it opens
     signatureCount_ = 0;
+    documentEncrypted_ = false;
     formShown_ = false;
     currentPath_ = QFileInfo(path).absoluteFilePath();
     currentTitle_ = QFileInfo(path).fileName();
@@ -1398,6 +1434,7 @@ void MainWindow::goToPageFromSpin() {
 
 void MainWindow::onPasswordRequired(bool retry) {
     statusBar()->clearMessage();
+    documentEncrypted_ = true;
     bool ok = false;
     const QString prompt =
         retry ? tr("Wrong password. Try again for “%1”:").arg(currentTitle_)
@@ -1510,6 +1547,63 @@ void MainWindow::buildFileTools() {
 
     connect(combine, &QAction::triggered, this, [this] {
         combineFiles(pageCount_ > 0 ? QStringList{currentPath_} : QStringList{});
+    });
+
+    // Password protection: a new file, by default beside this one. Like
+    // Reduce and Split it reads the file on disk, so edits are settled first.
+    const auto isPdf = [this] { return currentPath_.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive); };
+    QAction* protect = actions_->add({.id = QStringLiteral("protect"), .text = tr("Password &Protect…"),
+                                      .icon = QStringLiteral("lock"),
+                                      .tip = tr("Save a copy that asks for a password to open"),
+                                      .enabledWhen = [this, isPdf] { return pageCount_ > 0 && isPdf() && !fileToolBusy_; },
+                                      .group = file});
+    QAction* unprotect = actions_->add({.id = QStringLiteral("unprotect"), .text = tr("Remove Pass&word…"),
+                                        .icon = QStringLiteral("lock-open"),
+                                        .tip = tr("Save a copy that opens without a password"),
+                                        .enabledWhen = [this, isPdf] {
+                                            return pageCount_ > 0 && isPdf() && documentEncrypted_ && !fileToolBusy_;
+                                        },
+                                        .group = file});
+    const auto target = [this](const QString& suffix) {
+        const QFileInfo info(currentPath_);
+        return QFileDialog::getSaveFileName(
+            this, tr("Save as"), info.dir().filePath(tr("%1 (%2).pdf").arg(info.completeBaseName(), suffix)),
+            tr("PDF documents (*.pdf)"));
+    };
+    connect(protect, &QAction::triggered, this, [this, protect, target] {
+        if (pageCount_ <= 0 || !resolveUnsaved([protect] { protect->trigger(); })) {
+            return;
+        }
+        ProtectDialog dialog(this);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        const QString output = target(tr("protected"));
+        if (output.isEmpty()) {
+            return;
+        }
+        const QString input = currentPath_;
+        const QString user = dialog.openPassword();
+        const QString owner = dialog.permissionsPassword();
+        const int method = dialog.method();
+        const int permissions = dialog.permissions();
+        runFileTool(tr("Protecting…"), [=](FileTools* t, const QString& password) {
+            t->protect(input, password, output, true, user, owner, method, permissions);
+        });
+    });
+    connect(unprotect, &QAction::triggered, this, [this, unprotect, target] {
+        if (pageCount_ <= 0 || !resolveUnsaved([unprotect] { unprotect->trigger(); })) {
+            return;
+        }
+        const QString output = target(tr("no password"));
+        if (output.isEmpty()) {
+            return;
+        }
+        const QString input = currentPath_;
+        // The job asks for the current password itself: Leht does not keep it.
+        runFileTool(tr("Removing the password…"), [=](FileTools* t, const QString& password) {
+            t->protect(input, password, output, false, {}, {}, 2, 0x7F);
+        });
     });
 
     // Reduce and Split read the file on disk, so unsaved edits are settled

@@ -18,6 +18,7 @@ add_library(lehtcore
     src/page_cache.cpp
     src/ops/merge.cpp
     src/ops/compress.cpp
+    src/ops/info.cpp
     src/ops/organize.cpp
     src/ops/pages.cpp
     src/ops/encrypt.cpp

@@ -50,6 +50,12 @@ public slots:
     /// Writes the pages `ranges[i]` of `input` to `outputs[i]`, one file each.
     void split(QString input, QString password, QStringList ranges, QStringList outputs);
 
+    /// Writes `input` to `output` with a password (`lock`) or without one.
+    /// `method` is an ops::Encryption, `permissions` ipc::Protect's bits.
+    /// `output` may be `input`: the new file replaces it only when complete.
+    void protect(QString input, QString password, QString output, bool lock, QString userPassword,
+                 QString ownerPassword, int method, int permissions);
+
 signals:
     /// `done` of `total` steps; `what` says which, for display.
     void progress(int done, int total, QString what);

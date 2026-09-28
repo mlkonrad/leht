@@ -65,6 +65,8 @@ private:
     void on_prepare_doc_timestamp(std::uint64_t id, ipc::Frame& frame);
 
     // File tools: merge, compress, split.
+    void on_protect(std::uint64_t id, ipc::Frame& frame);
+    void on_get_info(std::uint64_t id);
     void on_compress(std::uint64_t id, ipc::Frame& frame);
     void on_extract_pages(std::uint64_t id, ipc::Frame& frame);
     void on_merge_begin(std::uint64_t id, const ipc::MergeBegin& m);

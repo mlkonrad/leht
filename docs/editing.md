@@ -215,6 +215,21 @@ document's pages cannot be changed. Deleting a page is not redaction: a signed d
 saved incrementally, so a deleted page's content stays in the earlier revision; to remove it
 for good, redact it.
 
+### Passwords and properties
+
+**File → Password Protect…** saves a copy that asks for a password to open (AES-256 unless
+you choose otherwise), optionally with restrictions — printing, copying, comments, forms,
+changing pages — behind a separate permissions password. The dialog says plainly that
+restrictions are a request readers may ignore; only the password to open encrypts.
+**Remove Password…** saves a copy without one, after asking for the current password (Leht
+does not keep it). Both run like Reduce File Size: in a worker of their own, on the file as
+saved, writing a new file that replaces nothing until it is complete.
+
+**File → Document Properties…** (Ctrl+D) shows what the file is — size, pages, page size,
+PDF version, whether it has a password, when and with what it was made — and edits its
+title, author, subject and keywords (`ops/info.hpp`). The edits go in the log like any
+other; one Undo takes back the whole dialog.
+
 **The edit log is the source of truth.** The viewer keeps every edit since the file was
 opened or last saved:
 

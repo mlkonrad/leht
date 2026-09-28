@@ -1843,6 +1843,34 @@ void RenderWorker::listAnnotations() {
     emit annotationsReady(rows);
 }
 
+void RenderWorker::requestInfo() {
+    QStringList keys;
+    QStringList values;
+    auto reply = proc_.load() ? roundTrip(ipc::GetInfo{}, Phase::Edit, -1) : std::nullopt;
+    try {
+        if (reply && reply->type == ipc::MsgType::DocInfo) {
+            for (const auto& [key, value] : ipc::decode_as<ipc::DocInfo>(*reply).fields) {
+                keys.push_back(QString::fromStdString(key));
+                values.push_back(QString::fromStdString(value));
+            }
+        } else if (reply) {
+            (void)ipc::decode_as<ipc::Failed>(*reply);
+        }
+    } catch (const ipc::ProtocolError&) {
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+    }
+    emit infoReady(keys, values);
+}
+
+void RenderWorker::setInfo(QString key, QString value) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::SetInfo;
+    e.name = key.toStdString();
+    e.text = value.toStdString();
+    applyEdit(e);
+}
+
 void RenderWorker::listFields() {
     QVector<FieldRow> rows;
     auto reply = proc_.load() ? roundTrip(ipc::ListFields{}, Phase::Edit, -1) : std::nullopt;

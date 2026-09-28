@@ -8,6 +8,8 @@
 #include "leht/ops/annotate.hpp"
 #include "leht/ops/compress.hpp"
 #include "leht/ops/crop.hpp"
+#include "leht/ops/encrypt.hpp"
+#include "leht/ops/info.hpp"
 #include "leht/ops/ocr_layer.hpp"
 #include "leht/ops/organize.hpp"
 #include "leht/crypto/crypto.hpp"
@@ -207,6 +209,13 @@ void Session::dispatch(Frame& frame) {
             return;
         case MsgType::MergeFinish:
             on_merge_finish(id, frame);
+            return;
+        case MsgType::Protect:
+            on_protect(id, frame);
+            return;
+        case MsgType::GetInfo:
+            (void)decode_as<GetInfo>(frame);
+            on_get_info(id);
             return;
         default:
             throw ProtocolError("not a request type");
@@ -489,6 +498,9 @@ void Session::on_edit(std::uint64_t id, const Edit& m) {
         out.all_pages = true;
         break;
     }
+    case Edit::Kind::SetInfo:
+        ops::set_info(ctx_, *doc_, m.name, m.text);
+        break;  // no page changes
     case Edit::Kind::InsertBlank:
         if (m.rects.empty()) {
             channel_.send(id, Failed{"no size for the new page"});
@@ -795,6 +807,51 @@ void Session::on_list_fields(std::uint64_t id) {
 //
 // The viewer runs these in a worker of their own (see protocol.hpp), so the
 // document here is the file as it is on disk, not the one on screen.
+
+void Session::on_get_info(std::uint64_t id) {
+    if (!require_document(id)) {
+        return;
+    }
+    DocInfo out;
+    for (const char* key : {"format", "encryption", "info:Title", "info:Author", "info:Subject",
+                            "info:Keywords", "info:Creator", "info:Producer", "info:CreationDate",
+                            "info:ModDate"}) {
+        if (auto value = doc_->metadata(key); value && !value->empty()) {
+            out.fields.emplace_back(key, std::move(*value));
+        }
+    }
+    channel_.send(id, out);
+}
+
+void Session::on_protect(std::uint64_t id, Frame& frame) {
+    const Protect m = decode_as<Protect>(frame);
+    if (!require_document(id)) {
+        return;
+    }
+    if (!frame.fd) {
+        channel_.send(id, Failed{"no file descriptor attached to Protect"});
+        return;
+    }
+    if (!doc_->is_pdf()) {
+        channel_.send(id, Failed{"only a PDF can be password-protected"});
+        return;
+    }
+    if (m.encrypt) {
+        ops::EncryptOptions options;
+        options.user_password = m.user_password;
+        options.owner_password = m.owner_password;
+        options.method = static_cast<ops::Encryption>(m.method);
+        const auto bit = [&](int n) { return (m.permissions >> n & 1) != 0; };
+        options.permissions = {bit(0), bit(1), bit(2), bit(3), bit(4), bit(5), bit(6)};
+        ops::encrypt(ctx_, *doc_, frame.fd.get(), options);
+    } else {
+        ops::decrypt(ctx_, *doc_, frame.fd.get());
+    }
+    struct stat st {};
+    const std::uint64_t bytes =
+        ::fstat(frame.fd.get(), &st) == 0 ? static_cast<std::uint64_t>(st.st_size) : 0;
+    channel_.send(id, Protected{bytes});
+}
 
 void Session::on_compress(std::uint64_t id, Frame& frame) {
     const Compress m = decode_as<Compress>(frame);
