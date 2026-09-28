@@ -22,6 +22,7 @@
 #include "leht/text.hpp"
 #include "leht/renderer.hpp"
 #include "leht/crypto/crypto.hpp"
+#include "leht/trustlist/xml.hpp"
 #include "leht/ops/ocr_layer.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "leht/ocr/ocr.hpp"
@@ -45,6 +46,8 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <sstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -101,9 +104,16 @@ constexpr const char* kUsage =
     "            skipped unless --force. 'leht ocr --languages' lists what is installed\n"
     "  keys      [--pkcs11-module LIB]        list the signing keys on ID cards and\n"
     "            other PKCS#11 tokens, with the URI --pkcs11 takes\n"
-    "  verify    FILE [--trust CA.pem]... [--online] [--json]\n"
+    "  verify    FILE [--trust CA.pem]... [--online] [--no-trusted-list]\n"
+    "            [--require-qualified] [--json]\n"
     "            check every signature: exits 4 broken, 5 untrusted, 6 changed after\n"
-    "            signing, 7 changed in a way a certification or field lock forbids\n"
+    "            signing, 7 changed in a way a certification or field lock forbids,\n"
+    "            8 not a qualified electronic signature (with --require-qualified)\n"
+    "  trusted-list update | status\n"
+    "            the EU trusted lists, which make qualified CAs and timestamp\n"
+    "            authorities trusted and say what is qualified: update fetches and\n"
+    "            verifies them (network; nothing else ever fetches them), status\n"
+    "            shows what is cached\n"
     "\n"
     "options:\n"
     "  -o PATH        output file or pattern\n"
@@ -162,6 +172,8 @@ constexpr const char* kUsage =
     "  --tsa URL      timestamp the signature with this RFC 3161 authority (B-T)\n"
     "  --ltv          sign: then embed validation data for it (B-LT); needs --tsa\n"
     "  --lta          sign: that, and a document timestamp on top (B-LTA)\n"
+    "  --no-trusted-list  verify, ltv: leave the EU trusted lists out\n"
+    "  --require-qualified  verify: exit 8 unless every signature is a QES\n"
     "  --online       verify: also fetch current revocation data (OCSP, CRL) over\n"
     "                 the network; only certificate hashes and serials are sent\n"
     "  --trust FILE   also trust the certificates in this PEM file, on top of the\n"
@@ -256,7 +268,7 @@ bool takes_value(const std::string& name) {
         "--angle", "--size", "--color", "--highlight", "--underline", "--strike",
         "--note", "--stamp", "--delete", "--author", "--move", "--set-text", "--freetext",
         "--p12", "--password-fd", "--field", "--image", "--name", "--reason",
-        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module", "--lang", "--dpi", "--certify", "--doc-password-fd"};
+        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module", "--lang", "--dpi", "--certify", "--doc-password-fd", "--anchor"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -1091,14 +1103,195 @@ void write_beside(const std::string& output, const std::function<void(int fd)>& 
     }
 }
 
-/// The system's CA bundle plus every --trust file.
+// --- the EU trusted lists (queue M5) --------------------------------------------
+
+std::string host_of(const std::string& url);
+std::string count_of(std::size_t n, const char* one, const char* many);
+
+/// Where `leht trusted-list update` keeps the verified lists: Leht's compact
+/// form, not the XML. A cache: deleting it only means updating again.
+fs::path trusted_list_path() { return leht::trustlist::default_cache_path(); }
+
+/// The cached lists, or nullopt when there are none (or --no-trusted-list).
+/// A damaged cache is reported and ignored.
+std::optional<leht::trustlist::TrustedList> load_trusted_list(const Args& args) {
+    if (args.has_switch("--no-trusted-list")) {
+        return std::nullopt;
+    }
+    const fs::path path = trusted_list_path();
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
+        return std::nullopt;
+    }
+    try {
+        const auto bytes = read_bytes(path.string(), std::size_t{256} << 20);
+        return leht::trustlist::decode(leht::trustlist::Bytes(bytes.begin(), bytes.end()));
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "leht: warning: the cached trusted list is unusable (%s); run "
+                             "leht trusted-list update\n", e.what());
+        return std::nullopt;
+    }
+}
+
+/// The system's CA bundle, every --trust file, and the EU trusted lists when
+/// they have been fetched.
 leht::crypto::TrustStore trust_from(const Args& args) {
     leht::crypto::TrustStore trust = leht::crypto::TrustStore::system();
     for (const std::string& path : args.values("--trust")) {
         const auto bytes = read_bytes(path, std::size_t{16} << 20);
         trust.add_pem(std::string(bytes.begin(), bytes.end()));
     }
+    if (auto list = load_trusted_list(args)) {
+        trust.add_trusted_list(std::move(*list));
+    }
     return trust;
+}
+
+/// --anchor FILE: another List of Trusted Lists and who may sign it, for a
+/// private trust scheme or a test. Lines: "lotl URL", "oj URL", "sha256 HEX".
+leht::trustlist::Anchor anchor_from(const Args& args) {
+    const std::string file = args.flag("--anchor");
+    if (file.empty()) {
+        return leht::trustlist::eu_anchor();
+    }
+    const auto bytes = read_bytes(file, 1 << 20);
+    std::istringstream in(std::string(bytes.begin(), bytes.end()));
+    leht::trustlist::Anchor a;
+    std::string key;
+    std::string value;
+    while (in >> key >> value) {
+        if (key == "lotl") {
+            a.lotl_url = value;
+        } else if (key == "oj") {
+            a.oj_url = value;
+        } else if (key == "sha256") {
+            a.sha256.push_back(value);
+        } else {
+            throw leht::Error(0, file + ": unknown line '" + key + "'");
+        }
+    }
+    if (a.lotl_url.empty() || a.oj_url.empty() || a.sha256.empty()) {
+        throw leht::Error(0, file + " needs a lotl, an oj and at least one sha256 line");
+    }
+    std::fprintf(stderr, "leht: note: using the trust anchor in %s, not the EU's\n", file.c_str());
+    return a;
+}
+
+std::string date_of(std::int64_t t) { return t != 0 ? local_time(t).substr(0, 10) : "?"; }
+
+int trusted_list_update(const Args& args) {
+    const leht::trustlist::Anchor anchor = anchor_from(args);
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    std::fprintf(stderr, "leht: fetching the List of Trusted Lists from %s\n",
+                 host_of(anchor.lotl_url).c_str());
+    const leht::crypto::Bytes lotl = leht::crypto::http_get(anchor.lotl_url, std::size_t{32} << 20, 60);
+    std::vector<leht::trustlist::Fetched> fetched;
+    leht::trustlist::Step step = leht::trustlist::advance(anchor, lotl, fetched, now);
+    while (!step.done) {
+        std::vector<std::string> hosts;
+        for (const std::string& url : step.need) {
+            const std::string h = host_of(url);
+            if (std::find(hosts.begin(), hosts.end(), h) == hosts.end()) {
+                hosts.push_back(h);
+            }
+        }
+        std::string joined;
+        for (const std::string& h : hosts) {
+            joined += (joined.empty() ? "" : ", ") + h;
+        }
+        std::fprintf(stderr, "leht: fetching %zu list%s from %s\n", step.need.size(),
+                     step.need.size() == 1 ? "" : "s", joined.c_str());
+        for (const std::string& url : step.need) {
+            leht::trustlist::Fetched f;
+            f.url = url;
+            try {
+                f.body = leht::crypto::http_get(url, std::size_t{32} << 20, 60);
+            } catch (const leht::Error& e) {
+                f.error = e.what();
+            }
+            fetched.push_back(std::move(f));
+        }
+        step = leht::trustlist::advance(anchor, lotl, fetched, now);
+    }
+    const leht::trustlist::TrustedList& list = step.result;
+    if (!list.lotl.verified) {
+        // Keep what is cached: an unverifiable update is no update.
+        throw leht::Error(0, list.lotl.problem);
+    }
+    const fs::path path = trusted_list_path();
+    fs::create_directories(path.parent_path());
+    const leht::trustlist::Bytes blob = leht::trustlist::encode(list);
+    write_beside(path.string(), [&blob](int fd) {
+        for (std::size_t off = 0; off < blob.size();) {
+            const ssize_t n = ::write(fd, blob.data() + off, blob.size() - off);
+            if (n <= 0) {
+                throw leht::Error(0, std::string("cannot write the trusted list: ") +
+                                         std::strerror(errno));
+            }
+            off += static_cast<std::size_t>(n);
+        }
+    });
+    std::size_t ok = 0;
+    for (const auto& l : list.lists) {
+        ok += l.verified ? 1 : 0;
+    }
+    std::printf("EU trusted lists -> %s\n", path.string().c_str());
+    std::printf("  anchor:    %s\n", anchor.oj_url.c_str());
+    std::printf("  LOTL:      sequence %u, issued %s, next update %s\n", list.lotl.sequence,
+                date_of(list.lotl.issued).c_str(), date_of(list.lotl.next_update).c_str());
+    std::printf("  lists:     %zu of %zu verified, %s\n", ok, list.lists.size(),
+                count_of(list.services.size(), "qualified service", "qualified services").c_str());
+    for (const auto& l : list.lists) {
+        if (!l.verified) {
+            std::printf("  %-10s %s\n", (l.territory + ":").c_str(), l.problem.c_str());
+        }
+    }
+    return ok == list.lists.size() ? 0 : 1;
+}
+
+int trusted_list_status(const Args& args) {
+    const auto list = load_trusted_list(args);
+    if (!list) {
+        std::printf("no EU trusted list is cached (%s); leht trusted-list update fetches it\n",
+                    trusted_list_path().string().c_str());
+        return 1;
+    }
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    std::printf("EU trusted lists, verified %s (%s)\n", local_time(list->built).c_str(),
+                trusted_list_path().string().c_str());
+    std::printf("  LOTL:      sequence %u, issued %s, next update %s%s\n", list->lotl.sequence,
+                date_of(list->lotl.issued).c_str(), date_of(list->lotl.next_update).c_str(),
+                list->lotl.next_update != 0 && list->lotl.next_update < now ? "  (OVERDUE)" : "");
+    int stale = 0;
+    for (const auto& l : list->lists) {
+        if (!l.verified) {
+            std::printf("  %-3s FAILED  %s\n", l.territory.c_str(), l.problem.c_str());
+            continue;
+        }
+        const bool overdue = l.next_update != 0 && l.next_update < now;
+        stale += overdue ? 1 : 0;
+        std::printf("  %-3s ok      sequence %u, issued %s, next %s, %s%s\n",
+                    l.territory.c_str(), l.sequence, date_of(l.issued).c_str(),
+                    date_of(l.next_update).c_str(),
+                    count_of(l.services, "service", "services").c_str(),
+                    overdue ? "  (OVERDUE)" : "");
+    }
+    if (stale > 0) {
+        std::printf("%d list%s past its next update: run leht trusted-list update\n", stale,
+                    stale == 1 ? " is" : "s are");
+    }
+    return 0;
+}
+
+int cmd_trusted_list(const Args& args) {
+    const std::string sub = args.positional.empty() ? "" : args.positional.front();
+    if (sub == "update") {
+        return trusted_list_update(args);
+    }
+    if (sub == "status") {
+        return trusted_list_status(args);
+    }
+    throw leht::Error(0, "trusted-list takes update or status");
 }
 
 /// Opens `path`, asking for its password when it is encrypted
@@ -1526,6 +1719,54 @@ int cmd_ocr(const leht::Context& ctx, const Args& args) {
 #endif
 }
 
+/// It verifies, but it is not a qualified electronic signature, and
+/// --require-qualified asked for one.
+constexpr int kExitNotQualified = 8;
+
+std::string qualified_words(const leht::crypto::QualifiedReport& q) {
+    using Level = leht::crypto::QualifiedReport::Level;
+    switch (q.level) {
+        case Level::Qes: return "qualified electronic signature (QES)";
+        case Level::QualifiedSeal: return "qualified electronic seal";
+        case Level::AdvancedQc: return "advanced, with a qualified certificate";
+        case Level::QualifiedTimestamp: return "qualified timestamp";
+        case Level::NotQualified: return "not qualified";
+        case Level::NotChecked: return "not checked";
+    }
+    return "not checked";
+}
+
+std::string qualified_slug(const leht::crypto::QualifiedReport& q) {
+    using Level = leht::crypto::QualifiedReport::Level;
+    switch (q.level) {
+        case Level::Qes: return "qes";
+        case Level::QualifiedSeal: return "qualified_seal";
+        case Level::AdvancedQc: return "advanced_qc";
+        case Level::QualifiedTimestamp: return "qualified_timestamp";
+        case Level::NotQualified: return "not_qualified";
+        case Level::NotChecked: return "not_checked";
+    }
+    return "not_checked";
+}
+
+std::string qualified_json(const leht::crypto::QualifiedReport& q) {
+    return "{\"level\":\"" + qualified_slug(q) + "\",\"service\":" + json_string(q.service) +
+           ",\"territory\":" + json_string(q.territory) + ",\"detail\":" + json_string(q.detail) +
+           "}";
+}
+
+void print_qualified(const leht::crypto::QualifiedReport& q, bool have_list) {
+    if (q.level == leht::crypto::QualifiedReport::Level::NotChecked) {
+        if (!have_list) {
+            std::printf("  %-10s not checked: no EU trusted list (leht trusted-list update "
+                        "fetches it)\n", "qualified");
+        }
+        return;
+    }
+    std::printf("  %-10s %s%s%s\n", "qualified", qualified_words(q).c_str(),
+                q.detail.empty() ? "" : ": ", q.detail.c_str());
+}
+
 void print_changes(const leht::ops::SignatureInfo& s) {
     if (!s.changed_after_signing) {
         return;
@@ -1569,6 +1810,7 @@ int verify_timestamp_row(const leht::Context& ctx, leht::Document& doc,
                 ",\"only_validation_data_after\":" +
                 (s.only_validation_data_after ? "true" : "false") +
                 ",\"revocation\":" + revocation_json(t.revocation) +
+                ",\"qualified\":" + qualified_json(t.qualified) +
                 (t.problem.empty() ? "" : ",\"problem\":" + json_string(t.problem)) + "}";
         return code;
     }
@@ -1588,6 +1830,7 @@ int verify_timestamp_row(const leht::Context& ctx, leht::Document& doc,
     std::printf("  %-10s %s (%s)%s%s\n", "authority", t.authority.subject.c_str(),
                 trust_word(t.trust).c_str(), why.empty() ? "" : ": ", why.c_str());
     print_revocation(t.revocation, "revocation");
+    print_qualified(t.qualified, trust.trusted_list() != nullptr);
     const bool unknown = std::any_of(t.revocation.begin(), t.revocation.end(), [](const auto& c) {
         return c.status == leht::crypto::RevocationStatus::Unknown;
     });
@@ -1645,6 +1888,10 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
         const bool intact = s.range_ok && r.intact();
         const bool trusted = intact && r.trust == leht::crypto::Trust::Trusted;
         const bool forbidden = s.changes_judged && !s.changes_permitted;
+        if (intact && args.has_switch("--require-qualified") &&
+            r.qualified.level != leht::crypto::QualifiedReport::Level::Qes) {
+            worst = std::max(worst, kExitNotQualified);
+        }
         if (!intact) {
             worst = std::max(worst, kExitBroken);
         } else if (forbidden) {
@@ -1669,6 +1916,7 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                               ",\"only_validation_data_after\":" +
                               (s.only_validation_data_after ? "true" : "false") +
                               ",\"revocation\":" + revocation_json(r.revocation) +
+                              ",\"qualified\":" + qualified_json(r.qualified) +
                               ",\"certification\":" + std::to_string(s.certification) +
                               ",\"locks\":" + json_string(s.locks) +
                               ",\"page\":" + std::to_string(s.page + 1);
@@ -1685,7 +1933,8 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                        ",\"time\":" + std::to_string(r.timestamp->time) +
                        ",\"authority\":" + json_string(r.timestamp->authority.subject) +
                        ",\"trust\":" + json_string(trust_word(r.timestamp->trust)) +
-                       ",\"revocation\":" + revocation_json(r.timestamp->revocation) + "}";
+                       ",\"revocation\":" + revocation_json(r.timestamp->revocation) +
+                       ",\"qualified\":" + qualified_json(r.timestamp->qualified) + "}";
             }
             const std::string problem = !s.range_ok ? s.range_problem : r.problem;
             if (!problem.empty()) {
@@ -1710,6 +1959,7 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                     r.trust_detail.empty() ? "" : ": ", r.trust_detail.c_str());
         if (intact) {
             print_revocation(r.revocation, "revocation");
+            print_qualified(r.qualified, trust.trusted_list() != nullptr);
         }
         std::printf("  %-10s %s, %s\n", "algorithm", r.digest.c_str(), s.subfilter.c_str());
         if (!s.claimed_time.empty()) {
@@ -1722,7 +1972,12 @@ int cmd_verify(const leht::Context& ctx, const Args& args) {
                         r.timestamp->valid ? local_time(r.timestamp->time).c_str()
                                            : r.timestamp->problem.c_str(),
                         r.timestamp->authority.common_name.c_str(),
-                        trust_word(r.timestamp->trust).c_str());
+                        (trust_word(r.timestamp->trust) +
+                         (r.timestamp->qualified.level ==
+                                  leht::crypto::QualifiedReport::Level::QualifiedTimestamp
+                              ? ", qualified"
+                              : ""))
+                            .c_str());
             if (r.timestamp->valid && !r.timestamp->revocation.empty()) {
                 print_revocation(r.timestamp->revocation, "tsa");
             }
@@ -2097,6 +2352,7 @@ int main(int argc, char** argv) {
         if (cmd == "sign")     { return cmd_sign(ctx, args); }
         if (cmd == "verify")   { return cmd_verify(ctx, args); }
         if (cmd == "ltv")      { return cmd_ltv(ctx, args); }
+        if (cmd == "trusted-list") { return cmd_trusted_list(args); }
         if (cmd == "keys")     { return cmd_keys(args); }
         if (cmd == "ocr")      { return cmd_ocr(ctx, args); }
 

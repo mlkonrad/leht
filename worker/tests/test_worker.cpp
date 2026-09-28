@@ -20,6 +20,7 @@
 #include "leht/crypto/crypto.hpp"
 #include "leht/error.hpp"
 #include "leht/ops/sign.hpp"
+#include "leht/trustlist/model.hpp"
 #include "edit_harness.hpp"
 #include "test_pki.hpp"
 
@@ -1007,6 +1008,142 @@ void long_term_validation_through_the_worker() {
     }
 }
 
+// --- the EU trusted lists (queue M5) -----------------------------------------------
+
+std::vector<std::uint8_t> tl_fixture(const char* name) {
+    const std::string s = leht::test::read_file(std::string(LEHT_TL_FIXTURES) + "/" + name);
+    return {s.begin(), s.end()};
+}
+
+/// The viewer's loop over leht-worker --trusted-list, with the real LOTL and
+/// Estonia's real list, and every other list "not fetched". Returns the last
+/// reply's frame.
+Frame trusted_list_round(WorkerProcess& w) {
+    TrustedListStep step;
+    step.lotl = tl_fixture("eu-lotl.xml");
+    w.channel().send(2, step);
+    Frame reply = next(w);
+    CHECK(reply.type == MsgType::TrustedListProgress);
+    const auto first = decode_as<TrustedListProgress>(reply);
+    CHECK(!first.done && first.need.size() >= 25);
+    for (const std::string& url : first.need) {
+        FetchedRow f;
+        f.url = url;
+        if (url == "https://sr.riik.ee/tsl/estonian-tsl.xml") {
+            f.body = tl_fixture("estonian-tsl.xml");
+        } else {
+            f.error = "not fetched in this test";
+        }
+        step.fetched.push_back(std::move(f));
+    }
+    w.channel().send(3, step);
+    return next(w);
+}
+
+void the_trusted_list_worker_verifies_lists_in_its_sandbox() {
+    auto w = WorkerProcess::spawn(LEHT_WORKER_EXE, {"--trusted-list"});
+    w->handshake();
+    const auto done = decode_as<TrustedListProgress>(trusted_list_round(*w));
+    CHECK(done.done && done.problem.empty() && !done.blob.empty());
+    const auto list = leht::trustlist::decode(done.blob);
+    CHECK(list.lotl.verified && list.lotl.sequence == 395);
+    bool ee = false;
+    for (const auto& l : list.lists) {
+        ee = ee || (l.territory == "EE" && l.verified && l.services > 0);
+    }
+    CHECK(ee);
+    // It reads lists and nothing else: a document request is refused.
+    w->channel().send(4, ListAnnots{});
+    CHECK(next(*w).type == MsgType::Failed);
+}
+
+/// The order in trustlist_worker.cpp is load-bearing: OpenSSL's algorithms,
+/// libxml2, xmlsec1 and glibc's time zone all open files the first time, so
+/// they are initialised before the sandbox. Asked to do it after (only this
+/// test asks), the worker is killed before it can answer the Hello.
+void the_trusted_list_worker_must_initialise_before_its_sandbox() {
+#if defined(__SANITIZE_ADDRESS__)
+    std::printf("      SKIP sanitizer build runs the worker unsandboxed\n");
+    return;
+#else
+    if (::getenv("LEHT_WORKER_NO_SANDBOX") != nullptr) {
+        std::printf("      SKIP the sandbox is off in this environment\n");
+        return;
+    }
+    ::setenv("LEHT_WORKER_NO_PRELOAD", "1", 1);
+    auto w = WorkerProcess::spawn(LEHT_WORKER_EXE, {"--trusted-list"});
+    ::unsetenv("LEHT_WORKER_NO_PRELOAD");
+    bool handshook = true;
+    try {
+        w->handshake();
+    } catch (const std::exception&) {
+        handshook = false;
+    }
+    CHECK(!handshook);
+    const auto status = w->wait_for(std::chrono::seconds(5));
+    CHECK(status.has_value() && status->signaled);
+#endif
+}
+
+void qualified_verdicts_through_the_worker() {
+    // A test CA that a trusted list names, and a card-like signer under it
+    // whose certificate claims nothing: the list's qualifiers decide.
+    static const leht::test::Pki pki;
+    leht::trustlist::TrustedList tl;
+    leht::trustlist::Service svc;
+    svc.type = leht::trustlist::Service::Type::CaQc;
+    svc.territory = "EE";
+    svc.name = "Test qualified CA";
+    unsigned char* der = nullptr;
+    const int n = i2d_X509(pki.ca.p, &der);
+    svc.certs = {std::vector<std::uint8_t>(der, der + n)};
+    OPENSSL_free(der);
+    leht::trustlist::Phase phase;
+    phase.since = 0;
+    phase.granted = true;
+    leht::trustlist::Qualification q;
+    q.qualifiers = leht::trustlist::QcStatement | leht::trustlist::QcForEsig |
+                   leht::trustlist::QcWithQscd;
+    q.criteria.assert = leht::trustlist::Criteria::Assert::AtLeastOne;
+    q.criteria.key_usage = {{{"nonRepudiation", true}}};
+    phase.qualifications = {q};
+    svc.phases = {phase};
+    tl.services = {svc};
+
+    const leht::crypto::Identity id = pki.identity(pki.rsa, pki.rsa_cert);
+    const leht::test::TempPath out("worker_qualified.pdf");
+    {
+        auto w = start();
+        (void)open_ok(*w, corpus("text_10p.pdf"));
+        leht::ops::SignatureRequest request;
+        request.reserve = leht::crypto::estimate_signature_size(id, {});
+        const int fd = ::open(out.str().c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        CHECK(fd >= 0);
+        w->channel().send(2, PrepareSignature{request}, fd);
+        const auto prepared = decode_as<SignaturePrepared>(next(*w));
+        (void)leht::crypto::sign_prepared(fd, prepared.range, id, {});
+        ::close(fd);
+    }
+    auto w = start();
+    (void)open_ok(*w, out.str());
+    // No trust_pem at all: the list is the only anchor.
+    w->channel().send(2, ListSignatures{"", {}, leht::trustlist::encode(tl)});
+    const auto with = decode_as<SignatureList>(next(*w));
+    CHECK(with.rows.size() == 1);
+    CHECK(with.rows[0].trust == static_cast<std::uint8_t>(leht::crypto::Trust::Trusted));
+    CHECK(with.rows[0].qualified ==
+          static_cast<std::uint8_t>(leht::crypto::QualifiedReport::Level::Qes));
+    CHECK(with.rows[0].qualified_territory == "EE");
+    // Without it: untrusted, and nothing said about qualified.
+    w->channel().send(3, ListSignatures{"", {}, {}});
+    const auto without = decode_as<SignatureList>(next(*w));
+    CHECK(without.rows[0].trust == static_cast<std::uint8_t>(leht::crypto::Trust::Untrusted));
+    CHECK(without.rows[0].qualified == 0);
+    // A damaged blob is ignored, not fatal.
+    w->channel().send(4, ListSignatures{"", {}, {1, 2, 3}});
+    CHECK(decode_as<SignatureList>(next(*w)).rows.size() == 1);
+}
+
 /// The preload in leht-worker's main() is load-bearing, not belt and braces:
 /// without it OpenSSL fetches an algorithm the first time it verifies, that
 /// fetch opens a file, and seccomp kills the process. Proving it here keeps
@@ -1207,6 +1344,9 @@ int main() {
     RUN(edits_on_a_non_pdf_fail_cleanly);
     RUN(signing_through_the_worker);
     RUN(long_term_validation_through_the_worker);
+    RUN(the_trusted_list_worker_verifies_lists_in_its_sandbox);
+    RUN(the_trusted_list_worker_must_initialise_before_its_sandbox);
+    RUN(qualified_verdicts_through_the_worker);
     RUN(verification_needs_the_preload_inside_the_sandbox);
     RUN(a_broken_signature_is_reported_not_fatal);
     RUN(clean_shutdown);

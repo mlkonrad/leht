@@ -331,6 +331,12 @@ SignatureList sample_signature_list() {
     row.revocation = {RevocationRow{"Kati Karu", 1, "OCSP, embedded", 1'789'000'000,
                                     1'790'000'000, ""}};
     row.timestamp_revocation = {RevocationRow{"TSA", 2, "", 0, 0, "no data"}};
+    row.qualified = 2;  // QualifiedReport::Level::Qes
+    row.qualified_service = "ESTEID";
+    row.qualified_territory = "EE";
+    row.qualified_detail = "qualified certificate for e-signatures";
+    row.timestamp_qualified = 5;
+    row.timestamp_qualified_detail = "from SK TSA";
     row.field = "Signature1";
     row.page = 0;
     row.rect = {1, 2, 3, 4};
@@ -391,6 +397,10 @@ void test_signature_messages_round_trip() {
     CHECK(l.rows[0].has_timestamp && l.rows[0].timestamp_time == 1'790'000'001);
     CHECK(l.rows[0].later_signature_covers_changes);
     CHECK(l.rows[0].document_timestamp && l.rows[0].only_validation_data_after);
+    CHECK(l.rows[0].qualified == 2 && l.rows[0].qualified_territory == "EE" &&
+          l.rows[0].qualified_service == "ESTEID" && l.rows[0].timestamp_qualified == 5 &&
+          l.rows[0].timestamp_qualified_detail == "from SK TSA");
+    CHECK(round_trip(ListSignatures{"pem", {}, {1, 2}}).trusted_list.size() == 2);
     CHECK(l.rows[0].revocation.size() == 1 && l.rows[0].revocation[0].status == 1 &&
           l.rows[0].revocation[0].revoked_at == 1'790'000'000 &&
           l.rows[0].revocation[0].source == "OCSP, embedded");
@@ -463,6 +473,28 @@ void test_signature_messages_reject_hostile_input() {
     check_truncations(RevocationQueryList{{QueryRow{0, "http://x/", {1}, "s"}}});
     check_truncations(AddValidationData{"p", {FetchedRow{0, "http://x/", {1}, ""}}});
     check_truncations(ValidationDataAdded{1, 2, 3});
+
+    // The EU trusted lists (v10). A worker naming anything but http(s) for
+    // the viewer to fetch is refused, like a revocation query.
+    const auto step = round_trip(TrustedListStep{{1, 2, 3}, {FetchedRow{0, "https://tl.test/ee.xml", {4, 5}, ""},
+                                                             FetchedRow{0, "https://tl.test/pt.xml", {}, "timeout"}}});
+    CHECK(step.lotl.size() == 3 && step.fetched.size() == 2 && step.fetched[1].error == "timeout");
+    const auto progress = round_trip(TrustedListProgress{{"https://tl.test/a.xml"}, false, {}, ""});
+    CHECK(progress.need.size() == 1 && !progress.done);
+    const auto done = round_trip(TrustedListProgress{{}, true, {9, 8, 7}, ""});
+    CHECK(done.done && done.blob.size() == 3);
+    for (const char* url : {"file:///etc/passwd", "ftp://tl.test/x", "gopher://x", ""}) {
+        CHECK(rejects<TrustedListProgress>(
+            make_frame(1, TrustedListProgress{{url}, false, {}, ""}).payload));
+    }
+    {
+        SignatureList m = sample_signature_list();
+        m.rows[0].qualified = 6;  // past QualifiedReport::Level's last value
+        CHECK(rejects<SignatureList>(make_frame(1, m).payload));
+    }
+    CHECK(!takes_fd(MsgType::TrustedListStep));
+    check_truncations(TrustedListStep{{1}, {FetchedRow{0, "https://x/", {1}, ""}}});
+    check_truncations(TrustedListProgress{{"https://x/"}, true, {1}, "p"});
 }
 
 

@@ -154,9 +154,13 @@ constexpr std::size_t kMaxLines = 64;            ///< text lines in an appearanc
 constexpr std::size_t kMaxCerts = 64;            ///< certificates in a chain
 constexpr std::size_t kMaxSignatures = 4096;
 constexpr std::size_t kMaxQueries = 256;          ///< revocation fetches per document
-constexpr std::size_t kMaxFetched = std::size_t{16} << 20;  ///< one fetched response (a CRL)
 constexpr std::size_t kMaxRevocationRows = 64;
 constexpr std::uint8_t kMaxTrust = 5;  ///< crypto::Trust::Revoked, the last value
+constexpr std::uint8_t kMaxQualified = 5;  ///< crypto::QualifiedReport::Level's last value
+/// The trusted lists: one list's XML (Germany's is 5.4 MB), and the compact
+/// form of all of them (a few MB).
+constexpr std::size_t kMaxTrustedListXml = std::size_t{32} << 20;
+constexpr std::size_t kMaxTrustedListBlob = std::size_t{64} << 20;
 /// A signature hole: crypto::estimate_signature_size() asks for far less.
 constexpr std::size_t kMaxReserve = std::size_t{1} << 20;
 
@@ -223,6 +227,8 @@ bool is_known(std::uint16_t type) noexcept {
     case MsgType::Compress: case MsgType::ExtractPages: case MsgType::MergeBegin:
     case MsgType::MergeAdd: case MsgType::MergeFinish: case MsgType::Compressed:
     case MsgType::PagesWritten: case MsgType::MergeAdded: case MsgType::Merged:
+
+    case MsgType::TrustedListStep: case MsgType::TrustedListProgress:
         return true;
     }
     return false;
@@ -900,7 +906,7 @@ std::vector<FetchedRow> get_fetched(Reader& r) {
             throw ProtocolError("unknown revocation data kind");
         }
         f.url = r.str(kMaxName);
-        f.body = r.bytes(kMaxFetched);
+        f.body = r.bytes(kMaxTrustedListXml);
         f.error = r.str(kMaxName);
     }
     return out;
@@ -943,11 +949,53 @@ std::vector<RevocationRow> get_revocation(Reader& r) {
 void ListSignatures::encode(Writer& w) const {
     w.str(trust_pem);
     put_fetched(w, online);
+    w.bytes(trusted_list);
 }
 ListSignatures ListSignatures::decode(Reader& r) {
     ListSignatures m;
     m.trust_pem = r.str(kMaxString);
     m.online = get_fetched(r);
+    m.trusted_list = r.bytes(kMaxTrustedListBlob);
+    return m;
+}
+
+void TrustedListStep::encode(Writer& w) const {
+    w.bytes(lotl);
+    put_fetched(w, fetched);
+}
+TrustedListStep TrustedListStep::decode(Reader& r) {
+    TrustedListStep m;
+    m.lotl = r.bytes(kMaxTrustedListXml);
+    m.fetched = get_fetched(r);
+    return m;
+}
+
+void TrustedListProgress::encode(Writer& w) const {
+    w.u32(static_cast<std::uint32_t>(need.size()));
+    for (const std::string& u : need) {
+        w.str(u);
+    }
+    w.u8(done ? 1 : 0);
+    w.bytes(blob);
+    w.str(problem);
+}
+TrustedListProgress TrustedListProgress::decode(Reader& r) {
+    TrustedListProgress m;
+    const std::size_t n = r.count(4);
+    if (n > kMaxQueries) {
+        throw ProtocolError("too many trusted lists to fetch");
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        std::string u = r.str(kMaxName);
+        // The viewer fetches these: http(s) only, whatever a worker says.
+        if (u.rfind("https://", 0) != 0 && u.rfind("http://", 0) != 0) {
+            throw ProtocolError("a trusted list to fetch that is not http(s)");
+        }
+        m.need.push_back(std::move(u));
+    }
+    m.done = r.boolean();
+    m.blob = r.bytes(kMaxTrustedListBlob);
+    m.problem = r.str(kMaxString);
     return m;
 }
 
@@ -1093,6 +1141,12 @@ void SignatureList::encode(Writer& w) const {
         w.u8(s.only_validation_data_after ? 1 : 0);
         put_revocation(w, s.revocation);
         put_revocation(w, s.timestamp_revocation);
+        w.u8(s.qualified);
+        w.str(s.qualified_service);
+        w.str(s.qualified_territory);
+        w.str(s.qualified_detail);
+        w.u8(s.timestamp_qualified);
+        w.str(s.timestamp_qualified_detail);
     }
 }
 
@@ -1168,6 +1222,15 @@ SignatureList SignatureList::decode(Reader& r) {
         s.only_validation_data_after = r.boolean();
         s.revocation = get_revocation(r);
         s.timestamp_revocation = get_revocation(r);
+        s.qualified = r.u8();
+        s.qualified_service = r.str(kMaxString);
+        s.qualified_territory = r.str(kMaxName);
+        s.qualified_detail = r.str(kMaxString);
+        s.timestamp_qualified = r.u8();
+        s.timestamp_qualified_detail = r.str(kMaxString);
+        if (s.qualified > kMaxQualified || s.timestamp_qualified > kMaxQualified) {
+            throw ProtocolError("qualified verdict out of range");
+        }
         m.rows.push_back(std::move(s));
     }
     return m;

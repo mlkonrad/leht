@@ -32,7 +32,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 9;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split
+inline constexpr std::uint32_t kProtocolVersion = 10;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split; 10: trusted lists
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -72,6 +72,9 @@ enum class MsgType : std::uint16_t {
     MergeAdd = 24,     ///< carries an INPUT file's fd via SCM_RIGHTS
     MergeFinish = 25,  ///< carries the output file's fd via SCM_RIGHTS
 
+    // The EU trusted lists: requests 30-39, to leht-worker --trusted-list.
+    TrustedListStep = 30,
+
     // worker -> viewer
     HelloAck = 100,
     NeedsPassword = 101,
@@ -99,6 +102,9 @@ enum class MsgType : std::uint16_t {
     PagesWritten = 121,
     MergeAdded = 122,
     Merged = 123,
+
+    // The EU trusted lists: replies 130-139.
+    TrustedListProgress = 130,
 };
 
 /// Whether a frame of `type` may carry a file descriptor: only those that hand
@@ -313,12 +319,38 @@ struct PrepareDocTimestamp {
     static PrepareDocTimestamp decode(Reader& r);
 };
 
+/// One step of updating the EU trusted lists, in leht-worker --trusted-list:
+/// the LOTL and everything fetched so far, as bytes the viewer did not read.
+/// The worker runs trustlist::advance() and says what to fetch next, or
+/// returns the verified result in Leht's compact form.
+struct TrustedListStep {
+    static constexpr MsgType kType = MsgType::TrustedListStep;
+    std::vector<std::uint8_t> lotl;
+    std::vector<FetchedRow> fetched;  ///< `kind` unused
+    void encode(Writer& w) const;
+    static TrustedListStep decode(Reader& r);
+};
+
+struct TrustedListProgress {
+    static constexpr MsgType kType = MsgType::TrustedListProgress;
+    std::vector<std::string> need;  ///< http(s) URLs to fetch next; empty when done
+    bool done = false;
+    /// When done and the LOTL verified: trustlist::encode() of the result.
+    std::vector<std::uint8_t> blob;
+    std::string problem;  ///< when done without a verified LOTL: why
+    void encode(Writer& w) const;
+    static TrustedListProgress decode(Reader& r);
+};
+
 struct ListSignatures {
     static constexpr MsgType kType = MsgType::ListSignatures;
     std::string trust_pem;
     /// Responses fetched just now (Check Revocation Online), to check against
     /// along with the document's own; not embedded.
     std::vector<FetchedRow> online{};
+    /// The cached EU trusted lists (trustlist::encode), or empty: they then
+    /// anchor trust and decide the "qualified" verdicts.
+    std::vector<std::uint8_t> trusted_list{};
     void encode(Writer& w) const;
     static ListSignatures decode(Reader& r);
 };
@@ -665,6 +697,13 @@ struct SignatureRow {
     /// Empty when no revocation data was there to check against.
     std::vector<RevocationRow> revocation;
     std::vector<RevocationRow> timestamp_revocation;
+
+    // The trusted lists' verdicts (crypto::QualifiedReport; Level as u8):
+    // the signer's, and its timestamp's. 0 is "not checked".
+    std::uint8_t qualified = 0;
+    std::string qualified_service, qualified_territory, qualified_detail;
+    std::uint8_t timestamp_qualified = 0;
+    std::string timestamp_qualified_detail;
 };
 
 struct SignatureList {

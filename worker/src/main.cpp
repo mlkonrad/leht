@@ -10,6 +10,7 @@
 // Not meant to be run by hand: it expects its socket on fd 3.
 
 #include "sandbox.hpp"
+#include "trustlist_worker.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "ocr_worker.hpp"
 #endif
@@ -81,6 +82,7 @@ int main(int argc, char** argv) {
 
     bool sandbox = !env_set("LEHT_WORKER_NO_SANDBOX");
     std::string ocr_languages;  ///< --ocr=LANGS: read pages, do not parse documents
+    bool trusted_list = false;  ///< --trusted-list: read the EU trusted lists, nothing else
     leht::worker::SandboxOptions options;
     options.debug = env_set("LEHT_WORKER_SECCOMP_DEBUG");
 
@@ -94,6 +96,8 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "leht-worker: --ocr needs the languages, e.g. est+eng\n");
                 return 2;
             }
+        } else if (arg == "--trusted-list") {
+            trusted_list = true;
         } else if (arg.starts_with("--selftest-sandbox=")) {
             return selftest(arg.substr(std::string_view("--selftest-sandbox=").size()));
         } else {
@@ -118,6 +122,13 @@ int main(int argc, char** argv) {
     ::close_range(leht::ipc::kWorkerSocketFd + 1, ~0U, 0);
 
     try {
+        if (trusted_list) {
+            // Bytes the viewer fetched, never a descriptor.
+            leht::ipc::Channel tl_channel(leht::ipc::UniqueFd(leht::ipc::kWorkerSocketFd),
+                                          /*accept_fds=*/false);
+            return leht::worker::run_trustlist_worker(tl_channel, sandbox, options,
+                                                      env_set("LEHT_WORKER_NO_PRELOAD"));
+        }
         if (!ocr_languages.empty()) {
 #ifdef LEHT_HAVE_OCR
             // Pixels only: no descriptor is ever accepted.

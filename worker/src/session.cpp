@@ -644,7 +644,14 @@ void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& ms
     if (!require_document(id)) {
         return;
     }
-    const crypto::TrustStore trust = trust_of(msg.trust_pem);
+    crypto::TrustStore trust = trust_of(msg.trust_pem);
+    if (!msg.trusted_list.empty()) {
+        try {
+            trust.add_trusted_list(trustlist::decode(msg.trusted_list));
+        } catch (const std::runtime_error&) {
+            // A damaged cache is the viewer's to replace; verify without it.
+        }
+    }
     const auto sigs = ops::list_signatures(ctx_, *doc_);
     const crypto::RevocationData embedded = ops::read_dss(ctx_, *doc_);
     crypto::RevocationData online;
@@ -690,6 +697,8 @@ void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& ms
             row.timestamp_trust = static_cast<std::uint8_t>(t.trust);
             row.timestamp_problem = t.problem;
             row.revocation = to_rows(t.revocation);
+            row.timestamp_qualified = static_cast<std::uint8_t>(t.qualified.level);
+            row.timestamp_qualified_detail = t.qualified.detail;
         } else if (s.range_ok) {
             // Hostile DER, parsed here rather than in the viewer. That is the
             // whole reason verification happens in the sandbox.
@@ -715,8 +724,14 @@ void Session::on_list_signatures(std::uint64_t id, const ipc::ListSignatures& ms
                 row.timestamp_trust = static_cast<std::uint8_t>(r.timestamp->trust);
                 row.timestamp_problem = r.timestamp->problem;
                 row.timestamp_revocation = to_rows(r.timestamp->revocation);
+                row.timestamp_qualified = static_cast<std::uint8_t>(r.timestamp->qualified.level);
+                row.timestamp_qualified_detail = r.timestamp->qualified.detail;
             }
             row.revocation = to_rows(r.revocation);
+            row.qualified = static_cast<std::uint8_t>(r.qualified.level);
+            row.qualified_service = r.qualified.service;
+            row.qualified_territory = r.qualified.territory;
+            row.qualified_detail = r.qualified.detail;
         }
         out.rows.push_back(std::move(row));
     }

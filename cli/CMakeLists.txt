@@ -2,6 +2,8 @@ add_executable(leht_cli src/main.cpp)
 # leht::crypto for sign/verify: the CLI is the trusted process, so it is where
 # the private key lives.
 target_link_libraries(leht_cli PRIVATE leht::core leht::crypto leht::warnings)
+# The EU trusted lists: `leht trusted-list update` reads and verifies their XML.
+target_link_libraries(leht_cli PRIVATE leht::trustlist_xml)
 if(LEHT_WITH_OCR)
     target_link_libraries(leht_cli PRIVATE leht::ocr)
     target_compile_definitions(leht_cli PRIVATE LEHT_HAVE_OCR)

@@ -1,6 +1,7 @@
 # leht-worker: the sandboxed process that parses documents for the viewer (M3).
 add_executable(leht_worker
     src/main.cpp
+    src/trustlist_worker.cpp
     src/session.cpp
     src/sandbox.cpp
 )
@@ -12,6 +13,8 @@ pkg_check_modules(SECCOMP REQUIRED IMPORTED_TARGET libseccomp)
 # signing key never comes near this process.
 target_link_libraries(leht_worker PRIVATE leht::core leht::crypto leht::ipc leht::warnings
                       PkgConfig::SECCOMP)
+# --trusted-list: libxml2 and xmlsec1, for the EU trusted lists (queue M5).
+target_link_libraries(leht_worker PRIVATE leht::trustlist_xml)
 # --ocr=LANGS: the same binary, reading page images for the viewer's OCR.
 if(LEHT_WITH_OCR)
     target_sources(leht_worker PRIVATE src/ocr_worker.cpp)
@@ -31,7 +34,8 @@ if(LEHT_BUILD_TESTS)
     target_link_libraries(test_worker PRIVATE OpenSSL::Crypto)
     target_compile_definitions(test_worker PRIVATE
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus"
-        LEHT_WORKER_EXE="$<TARGET_FILE:leht_worker>")
+        LEHT_WORKER_EXE="$<TARGET_FILE:leht_worker>"
+        LEHT_TL_FIXTURES="${CMAKE_BINARY_DIR}/trustlist/fixtures")
     add_dependencies(test_worker leht_worker)
     if(LEHT_WITH_OCR)
         target_link_libraries(test_worker PRIVATE leht::ocr)
