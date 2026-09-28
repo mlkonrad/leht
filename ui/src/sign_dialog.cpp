@@ -5,6 +5,9 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QImage>
+#include <QHBoxLayout>
+#include <QDate>
 #include <QDialogButtonBox>
 #include <QFile>
 #include <QFileDialog>
@@ -23,6 +26,8 @@
 #include <QStackedWidget>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 DrawPad::DrawPad(QWidget* parent) : QWidget(parent) {
     setCursor(Qt::CrossCursor);
     setMinimumSize(200, 80);
@@ -35,6 +40,7 @@ DrawPad::DrawPad(QWidget* parent) : QWidget(parent) {
 void DrawPad::clear() {
     strokes_.clear();
     update();
+    emit changed();
 }
 
 void DrawPad::mousePressEvent(QMouseEvent* event) {
@@ -58,6 +64,7 @@ void DrawPad::mouseReleaseEvent(QMouseEvent* /*event*/) {
         strokes_.pop_back();
         update();
     }
+    emit changed();
 }
 
 void DrawPad::paintEvent(QPaintEvent* /*event*/) {
@@ -75,15 +82,158 @@ void DrawPad::paintEvent(QPaintEvent* /*event*/) {
     }
 }
 
+SignaturePreview::SignaturePreview(QWidget* parent) : QWidget(parent) {
+    setObjectName(QStringLiteral("signaturePreview"));
+    setMinimumHeight(80);
+    setAccessibleName(tr("Preview of the signature"));
+}
+
+void SignaturePreview::show(QSizeF box, const QVector<QPolygonF>& strokes, QSizeF canvas, const QImage& image,
+                            const QStringList& lines) {
+    box_ = box;
+    strokes_ = strokes;
+    canvas_ = canvas;
+    image_ = image;
+    lines_ = lines;
+    setAccessibleDescription(lines.join(QStringLiteral(", ")));
+    update();
+}
+
+void SignaturePreview::paintEvent(QPaintEvent* /*event*/) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    // The box as the page will have it: its proportions, fitted here.
+    const QSizeF want = box_.isEmpty() ? QSizeF(3, 1) : box_;
+    const QSizeF fitted = want.scaled(QSizeF(size()) - QSizeF(8, 8), Qt::KeepAspectRatio);
+    const QRectF frame(QPointF((width() - fitted.width()) / 2, (height() - fitted.height()) / 2), fitted);
+    p.fillRect(frame, Qt::white);
+    p.setPen(QPen(QColor(30, 90, 200), 1, Qt::DashLine));
+    p.drawRect(frame);
+
+    const bool graphic = !strokes_.isEmpty() || !image_.isNull();
+    const QRectF left(frame.left() + 4, frame.top() + 4, graphic ? frame.width() / 2 - 8 : 0, frame.height() - 8);
+    const QRectF text(graphic ? frame.center().x() + 4 : frame.left() + 6, frame.top() + 4,
+                      graphic ? frame.width() / 2 - 10 : frame.width() - 12, frame.height() - 8);
+    if (!image_.isNull()) {
+        const QSizeF s = QSizeF(image_.size()).scaled(left.size(), Qt::KeepAspectRatio);
+        p.drawImage(QRectF(left.center() - QPointF(s.width() / 2, s.height() / 2), s), image_);
+    } else if (!strokes_.isEmpty() && !canvas_.isEmpty()) {
+        const double k = std::min(left.width() / canvas_.width(), left.height() / canvas_.height());
+        p.save();
+        p.translate(left.center() - QPointF(canvas_.width() * k / 2, canvas_.height() * k / 2));
+        p.scale(k, k);
+        p.setPen(QPen(QColor(13, 26, 90), 2.0 / k, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        for (const QPolygonF& stroke : strokes_) {
+            p.drawPolyline(stroke);
+        }
+        p.restore();
+    }
+    p.setPen(Qt::black);
+    QFont f = font();
+    f.setPointSizeF(std::max(6.0, std::min(11.0, text.height() / std::max<qsizetype>(3, lines_.size()) * 0.55)));
+    p.setFont(f);
+    p.drawText(text, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap, lines_.join(QLatin1Char('\n')));
+}
+
 SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggestedField,
-                       bool canCertify)
-    : QDialog(parent), page_(page), rect_(rect), field_(std::move(suggestedField)) {
+                       bool canCertify, QVector<FieldRow> emptyFields)
+    : QDialog(parent), page_(page), rect_(rect), emptyFields_(std::move(emptyFields)) {
     setWindowTitle(tr("Sign document"));
     QSettings settings;
 
     auto* layout = new QVBoxLayout(this);
+    // Steps: a header saying where one is, the pages, then Back/Next/Sign.
+    // The header is numbered in showPlace(), which knows whether Look counts.
+    auto* header = new QHBoxLayout;
+    for (int i = 0; i < 4; ++i) {
+        auto* label = new QLabel(this);
+        label->setObjectName(QStringLiteral("stepLabel"));
+        stepLabels_.push_back(label);
+        header->addWidget(label);
+        if (i < 3) {
+            auto* arrow = new QLabel(QStringLiteral("›"), this);
+            arrow->setEnabled(false);
+            stepArrows_.push_back(arrow);
+            header->addWidget(arrow);
+        }
+    }
+    header->addStretch(1);
+    layout->addLayout(header);
+    steps_ = new QStackedWidget(this);
+    steps_->setObjectName(QStringLiteral("signSteps"));
+    layout->addWidget(steps_, 1);
+
+    // Where: the box drawn, an empty field of the form, a box to draw now,
+    // or nowhere at all.
+    auto* wherePage = new QWidget(steps_);
+    auto* whereLayout = new QVBoxLayout(wherePage);
+    whereLayout->setContentsMargins(0, 8, 0, 0);
+    if (!rect_.isEmpty()) {
+        placeDrawn_ = new QRadioButton(tr("In the box you drew on page %1").arg(page_ + 1), wherePage);
+        whereLayout->addWidget(placeDrawn_);
+    }
+    if (!emptyFields_.isEmpty()) {
+        placeField_ = new QRadioButton(tr("In a signature field of the form:"), wherePage);
+        whereLayout->addWidget(placeField_);
+        fields_ = new QComboBox(wherePage);
+        fields_->setObjectName(QStringLiteral("signFields"));
+        for (const FieldRow& f : emptyFields_) {
+            fields_->addItem(tr("%1, page %2").arg(f.name).arg(f.page + 1), f.name);
+        }
+        auto* indent = new QHBoxLayout;
+        indent->setContentsMargins(24, 0, 0, 0);
+        indent->addWidget(fields_, 1);
+        whereLayout->addLayout(indent);
+        connect(fields_, &QComboBox::currentIndexChanged, this, [this] {
+            placeField_->setChecked(true);
+            showPlace();
+        });
+    }
+    if (rect_.isEmpty()) {
+        placeNewBox_ = new QRadioButton(tr("In a box I draw on the page"), wherePage);
+        placeNewBox_->setToolTip(tr("Closes this window; drag a box on the page, and it opens again"));
+        whereLayout->addWidget(placeNewBox_);
+    }
+    placeInvisible_ = new QRadioButton(tr("Invisible: it protects the file without marking a page"), wherePage);
+    whereLayout->addWidget(placeInvisible_);
+    whereLayout->addStretch(1);
+    steps_->addWidget(wherePage);
+    // What it starts on: the field asked for, else the box drawn, else (from
+    // Sign Invisibly) invisible.
+    const int suggested = fields_ != nullptr ? fields_->findData(suggestedField) : -1;
+    if (suggested >= 0) {
+        fields_->setCurrentIndex(suggested);
+        placeField_->setChecked(true);
+    } else if (placeDrawn_ != nullptr) {
+        placeDrawn_->setChecked(true);
+    } else {
+        placeInvisible_->setChecked(true);
+    }
+    for (QRadioButton* b : {placeDrawn_, placeField_, placeNewBox_, placeInvisible_}) {
+        if (b != nullptr) {
+            connect(b, &QRadioButton::toggled, this, &SignDialog::showPlace);
+        }
+    }
+
+    auto* howPage = new QWidget(steps_);
+    auto* howLayout = new QVBoxLayout(howPage);
+    howLayout->setContentsMargins(0, 8, 0, 0);
     auto* form = new QFormLayout;
     form_ = form;
+    howLayout->addLayout(form);
+    howLayout->addStretch(1);
+    steps_->addWidget(howPage);
+
+    auto* lookPage = new QWidget(steps_);
+    auto* lookLayout = new QVBoxLayout(lookPage);
+    lookLayout->setContentsMargins(0, 8, 0, 0);
+    steps_->addWidget(lookPage);
+    auto* detailsPage = new QWidget(steps_);
+    auto* detailsLayout = new QVBoxLayout(detailsPage);
+    detailsLayout->setContentsMargins(0, 8, 0, 0);
+    auto* details = new QFormLayout;
+    detailsLayout->addLayout(details);
+    steps_->addWidget(detailsPage);
 
     // Where the key is: a .p12 file, a card that keeps it, or a phone.
     fromFile_ = new QRadioButton(tr("Key file"), this);
@@ -191,11 +341,11 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
 
     name_ = new QLineEdit(settings.value(QStringLiteral("signing/name")).toString(), this);
     name_->setPlaceholderText(tr("taken from the certificate when left empty"));
-    form->addRow(tr("Name:"), name_);
+    details->addRow(tr("Name:"), name_);
     reason_ = new QLineEdit(this);
-    form->addRow(tr("Reason:"), reason_);
+    details->addRow(tr("Reason:"), reason_);
     location_ = new QLineEdit(settings.value(QStringLiteral("signing/location")).toString(), this);
-    form->addRow(tr("Location:"), location_);
+    details->addRow(tr("Location:"), location_);
     // Certifying says what may still be done to the document after this
     // signature; only the first signature can.
     certify_ = new QComboBox(this);
@@ -208,10 +358,27 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
                              ? tr("A certification is the author's signature: it says what "
                                   "others may still change without breaking it.")
                              : tr("Only a document's first signature can certify it."));
-    form->addRow(tr("Certify:"), certify_);
-    layout->addLayout(form);
+    details->addRow(tr("Certify:"), certify_);
+    // What each level means, in words, under the choice.
+    auto* certifyNote = new QLabel(detailsPage);
+    certifyNote->setWordWrap(true);
+    certifyNote->setEnabled(false);
+    const auto explainCertify = [this, certifyNote] {
+        switch (certify_->currentData().toInt()) {
+            case 1: certifyNote->setText(tr("Nothing may be changed after this signature: no comments, no "
+                                            "form filling, no further signatures.")); break;
+            case 2: certifyNote->setText(tr("Others may still fill in the form and sign; anything else "
+                                            "breaks the certification.")); break;
+            case 3: certifyNote->setText(tr("Others may still fill in the form, sign, and add comments.")); break;
+            default: certifyNote->setText(tr("Anyone may still add to the document; each later change shows "
+                                             "as made after this signature.")); break;
+        }
+    };
+    connect(certify_, &QComboBox::currentIndexChanged, this, explainCertify);
+    explainCertify();
+    details->addRow(QString(), certifyNote);
 
-    if (!rect_.isEmpty()) {
+    {
         auto* box = new QGroupBox(tr("What the signature shows"), this);
         auto* boxLayout = new QVBoxLayout(box);
         auto* choices = new QHBoxLayout;
@@ -266,12 +433,15 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
                 appearance_->setCurrentIndex(2);
             }
         });
-        layout->addWidget(box);
-    } else {
-        auto* note = new QLabel(tr("This signature will be invisible: it protects the file "
-                                   "without marking a page."), this);
-        note->setWordWrap(true);
-        layout->addWidget(note);
+        lookLayout->addWidget(box);
+        auto* previewTitle = new QLabel(tr("Preview"), lookPage);
+        lookLayout->addWidget(previewTitle);
+        preview_ = new SignaturePreview(lookPage);
+        lookLayout->addWidget(preview_, 1);
+        connect(pad_, &DrawPad::changed, this, &SignDialog::updatePreview);
+        for (QRadioButton* b : {textOnly_, drawn_, imported_}) {
+            connect(b, &QRadioButton::toggled, this, &SignDialog::updatePreview);
+        }
     }
 
     useTsa_ = new QCheckBox(tr("Timestamp the signature (PAdES B-T)"), this);
@@ -292,61 +462,44 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
                         "the certificate expires. Only certificate identifiers are sent, "
                         "never the document."));
     connect(useTsa_, &QCheckBox::toggled, ltv_, &QCheckBox::setEnabled);
-    layout->addWidget(useTsa_);
-    layout->addWidget(tsa_);
-    layout->addWidget(ltv_);
+    auto* proof = new QGroupBox(tr("Proof of time"), detailsPage);
+    auto* proofLayout = new QVBoxLayout(proof);
+    proofLayout->addWidget(useTsa_);
+    proofLayout->addWidget(tsa_);
+    proofLayout->addWidget(ltv_);
+    detailsLayout->addWidget(proof);
+    detailsLayout->addStretch(1);
+    connect(name_, &QLineEdit::textChanged, this, &SignDialog::updatePreview);
+    connect(reason_, &QLineEdit::textChanged, this, &SignDialog::updatePreview);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    buttons->button(QDialogButtonBox::Ok)->setText(tr("Sign"));
+    sign_ = buttons->button(QDialogButtonBox::Ok);
+    sign_->setText(tr("Sign"));
+    sign_->setObjectName(QStringLiteral("signButton"));
+    back_ = buttons->addButton(tr("Back"), QDialogButtonBox::ActionRole);
+    back_->setObjectName(QStringLiteral("backButton"));
+    next_ = buttons->addButton(tr("Next"), QDialogButtonBox::ActionRole);
+    next_->setObjectName(QStringLiteral("nextButton"));
+    connect(back_, &QPushButton::clicked, this, [this] { goToStep(stepFrom(steps_->currentIndex(), -1)); });
+    connect(next_, &QPushButton::clicked, this, [this] {
+        const int at = steps_->currentIndex();
+        if (at == Where && placeNewBox_ != nullptr && placeNewBox_->isChecked()) {
+            done(PlaceBox);
+            return;
+        }
+        if (at == How && !keyIsReady()) {
+            return;
+        }
+        goToStep(stepFrom(at, +1));
+    });
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        if (!keyIsReady()) {
+            goToStep(How);
+            return;
+        }
         const int at = cardKeys_->currentIndex();
         const leht::crypto::TokenKey* key =
             at >= 0 && at < static_cast<int>(tokenKeys_.size()) ? &tokenKeys_[at] : nullptr;
-        if (fromFile_->isChecked() && keyPath_->text().trimmed().isEmpty()) {
-            QMessageBox::warning(this, tr("Sign document"),
-                                 tr("Choose the .p12 file holding your signing key."));
-            return;
-        }
-        if (fromCard_->isChecked()) {
-            if (key == nullptr) {
-                QMessageBox::warning(this, tr("Sign document"),
-                                     tr("No card key is chosen. Insert the card, press "
-                                        "Refresh, and choose its signing key."));
-                return;
-            }
-            if (key->pin_locked) {
-                QMessageBox::warning(this, tr("Sign document"), cardStatus_->text());
-                return;
-            }
-            if (!key->pinpad && pin_->text().isEmpty()) {
-                QMessageBox::warning(this, tr("Sign document"), tr("Enter the card's PIN."));
-                return;
-            }
-        }
-        if (fromSmartId_->isChecked() && smartIdHow_->currentIndex() == 1) {
-            static const QRegularExpression code(QStringLiteral("^[0-9]{6,20}(-[0-9]+)?$"));
-            if (!code.match(smartIdCode_->text().trimmed()).hasMatch()) {
-                QMessageBox::warning(this, tr("Sign document"),
-                                     tr("Enter the personal code of the Smart-ID account, or "
-                                        "sign by scanning a QR code instead."));
-                return;
-            }
-        }
-        if (fromMobileId_->isChecked()) {
-            static const QRegularExpression phone(QStringLiteral("^\\+[0-9]{7,15}$"));
-            static const QRegularExpression code(QStringLiteral("^[0-9]{6,20}$"));
-            if (!phone.match(mobilePhone_->text().trimmed()).hasMatch()) {
-                QMessageBox::warning(this, tr("Sign document"),
-                                     tr("Enter the phone number with its country code, e.g. "
-                                        "+37268000769."));
-                return;
-            }
-            if (!code.match(mobileCode_->text().trimmed()).hasMatch()) {
-                QMessageBox::warning(this, tr("Sign document"),
-                                     tr("Enter the personal code the number is registered to."));
-                return;
-            }
-        }
         if (useTsa_->isChecked() && tsa_->text().trimmed().isEmpty()) {
             QMessageBox::warning(this, tr("Sign document"),
                                  tr("Give the timestamp authority's URL, or turn timestamping "
@@ -378,6 +531,153 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
     showSource();
+    showPlace();
+    goToStep(Where);
+}
+
+int SignDialog::chosenPage() const {
+    if (placeField_ != nullptr && placeField_->isChecked()) {
+        return emptyFields_.value(fields_->currentIndex()).page;
+    }
+    return page_;
+}
+
+QRectF SignDialog::chosenRect() const {
+    if (placeField_ != nullptr && placeField_->isChecked()) {
+        return emptyFields_.value(fields_->currentIndex()).rect;  // empty for an invisible field
+    }
+    if (placeDrawn_ != nullptr && placeDrawn_->isChecked()) {
+        return rect_;
+    }
+    return {};
+}
+
+QString SignDialog::chosenField() const {
+    if (placeField_ != nullptr && placeField_->isChecked()) {
+        return fields_->currentData().toString();
+    }
+    return {};
+}
+
+int SignDialog::stepFrom(int from, int delta) const {
+    int to = from + delta;
+    if (to == Look && chosenRect().isEmpty()) {
+        to += delta;  // nothing to look at
+    }
+    return std::clamp(to, 0, steps_->count() - 1);
+}
+
+void SignDialog::showPlace() {
+    // The header counts only the steps this signature has.
+    const bool look = !chosenRect().isEmpty();
+    const QString names[4] = {tr("Where"), tr("How"), tr("Look"), tr("Details")};
+    int number = 1;
+    for (int i = 0; i < 4; ++i) {
+        const bool shown = i != Look || look;
+        stepLabels_[i]->setVisible(shown);
+        if (i > 0) {
+            stepArrows_[i - 1]->setVisible(shown);
+        }
+        if (shown) {
+            stepLabels_[i]->setText(QStringLiteral("%1  %2").arg(number++).arg(names[i]));
+        }
+    }
+    if (steps_->currentIndex() == Where && next_ != nullptr) {
+        next_->setText(placeNewBox_ != nullptr && placeNewBox_->isChecked() ? tr("Draw the Box")
+                                                                             : tr("Next"));
+    }
+    updatePreview();
+}
+
+bool SignDialog::keyIsReady() {
+    const int at = cardKeys_->currentIndex();
+    const leht::crypto::TokenKey* key =
+        at >= 0 && at < static_cast<int>(tokenKeys_.size()) ? &tokenKeys_[at] : nullptr;
+    if (fromFile_->isChecked() && keyPath_->text().trimmed().isEmpty()) {
+        QMessageBox::warning(this, tr("Sign document"),
+                             tr("Choose the .p12 file holding your signing key."));
+        return false;
+    }
+    if (fromCard_->isChecked()) {
+        if (key == nullptr) {
+            QMessageBox::warning(this, tr("Sign document"),
+                                 tr("No card key is chosen. Insert the card, press "
+                                    "Refresh, and choose its signing key."));
+            return false;
+        }
+        if (key->pin_locked) {
+            QMessageBox::warning(this, tr("Sign document"), cardStatus_->text());
+            return false;
+        }
+        if (!key->pinpad && pin_->text().isEmpty()) {
+            QMessageBox::warning(this, tr("Sign document"), tr("Enter the card's PIN."));
+            return false;
+        }
+    }
+    if (fromSmartId_->isChecked() && smartIdHow_->currentIndex() == 1) {
+        static const QRegularExpression code(QStringLiteral("^[0-9]{6,20}(-[0-9]+)?$"));
+        if (!code.match(smartIdCode_->text().trimmed()).hasMatch()) {
+            QMessageBox::warning(this, tr("Sign document"),
+                                 tr("Enter the personal code of the Smart-ID account, or "
+                                    "sign by scanning a QR code instead."));
+            return false;
+        }
+    }
+    if (fromMobileId_->isChecked()) {
+        static const QRegularExpression phone(QStringLiteral("^\\+[0-9]{7,15}$"));
+        static const QRegularExpression code(QStringLiteral("^[0-9]{6,20}$"));
+        if (!phone.match(mobilePhone_->text().trimmed()).hasMatch()) {
+            QMessageBox::warning(this, tr("Sign document"),
+                                 tr("Enter the phone number with its country code, e.g. "
+                                    "+37268000769."));
+            return false;
+        }
+        if (!code.match(mobileCode_->text().trimmed()).hasMatch()) {
+            QMessageBox::warning(this, tr("Sign document"),
+                                 tr("Enter the personal code the number is registered to."));
+            return false;
+        }
+    }
+    return true;
+}
+
+void SignDialog::goToStep(int index) {
+    index = std::clamp(index, 0, steps_->count() - 1);
+    steps_->setCurrentIndex(index);
+    for (int i = 0; i < stepLabels_.size(); ++i) {
+        QFont f = stepLabels_[i]->font();
+        f.setWeight(i == index ? QFont::DemiBold : QFont::Normal);
+        stepLabels_[i]->setFont(f);
+        stepLabels_[i]->setEnabled(i <= index);
+    }
+    const bool last = index == steps_->count() - 1;
+    back_->setVisible(index > 0);
+    next_->setVisible(!last);
+    next_->setText(index == Where && placeNewBox_ != nullptr && placeNewBox_->isChecked() ? tr("Draw the Box")
+                                                                                            : tr("Next"));
+    sign_->setVisible(last);
+    (last ? sign_ : next_)->setDefault(true);
+    updatePreview();
+}
+
+void SignDialog::updatePreview() {
+    if (preview_ == nullptr) {
+        return;
+    }
+    // As the engine will draw it: the graphic, and the name and date beside it.
+    const QString name = name_->text().trimmed().isEmpty() ? tr("Name from the certificate")
+                                                           : name_->text().trimmed();
+    QStringList lines{name, QDate::currentDate().toString(Qt::ISODate)};
+    if (!reason_->text().trimmed().isEmpty()) {
+        lines << reason_->text().trimmed();
+    }
+    QImage image;
+    if (imported_->isChecked() && !image_.isEmpty()) {
+        image.loadFromData(image_);
+    }
+    const bool drawing = drawn_->isChecked() && !pad_->isEmpty();
+    preview_->show(chosenRect().size(), drawing ? pad_->strokes() : QVector<QPolygonF>{}, QSizeF(pad_->size()), image,
+                   lines);
 }
 
 void SignDialog::showSource() {
@@ -534,9 +834,9 @@ SignSpec SignDialog::spec() const {
         spec.password = password_->text();
     }
     spec.certify = certify_->currentData().toInt();
-    spec.field = field_;
-    spec.page = page_;
-    spec.rect = rect_;
+    spec.field = chosenField();
+    spec.page = chosenPage();
+    spec.rect = chosenRect();
     spec.name = name_->text().trimmed();
     spec.reason = reason_->text().trimmed();
     spec.location = location_->text().trimmed();
@@ -544,7 +844,7 @@ SignSpec SignDialog::spec() const {
         spec.tsaUrl = tsa_->text().trimmed();
         spec.ltv = ltv_->isChecked();
     }
-    if (rect_.isEmpty()) {
+    if (spec.rect.isEmpty()) {
         return spec;  // invisible: no appearance at all
     }
     if (drawn_->isChecked() && !pad_->isEmpty()) {

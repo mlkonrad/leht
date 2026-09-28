@@ -239,9 +239,7 @@ void FormPanel::rebuild() {
             break;
         }
         case FieldType::Signature: {
-            auto* note = new QLabel(isEmptyValue(row) ? tr("Signature field: sign it from Fill & Sign.")
-                                                      : tr("Signed."),
-                                    box);
+            auto* note = new QLabel(tr("Signature field: when you sign, choose it under Where."), box);
             note->setWordWrap(true);
             e.editor = note;
             break;

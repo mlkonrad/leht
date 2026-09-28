@@ -25,6 +25,7 @@
 #include "welcome_view.hpp"
 #include <QKeyEvent>
 #include <QListWidget>
+#include <QStackedWidget>
 #include <QPointer>
 #include <QMenuBar>
 
@@ -1561,6 +1562,109 @@ int main(int argc, char** argv) {
         stranger.trust = static_cast<int>(leht::crypto::Trust::Untrusted);
         check(judgeSignature(stranger).headline == QStringLiteral("Signer not trusted"),
               "an unknown signer is said to be not trusted");
+    }
+
+    // --- The Sign dialog, in steps -------------------------------------------
+    {
+        FieldRow field;
+        field.name = QStringLiteral("Buyer");
+        field.type = static_cast<int>(leht::ops::FieldType::Signature);
+        field.page = 1;
+        field.rect = QRectF(300, 700, 180, 50);
+        SignDialog dialog(&window, 0, QRectF(72, 600, 200, 60), QString(), true, {field});
+        dialog.show();
+        pump(50);
+        auto* steps = dialog.findChild<QStackedWidget*>(QStringLiteral("signSteps"));
+        auto* next = dialog.findChild<QPushButton*>(QStringLiteral("nextButton"));
+        auto* back = dialog.findChild<QPushButton*>(QStringLiteral("backButton"));
+        auto* sign = dialog.findChild<QPushButton*>(QStringLiteral("signButton"));
+        check(steps != nullptr && steps->count() == 4 && steps->currentIndex() == 0,
+              "signing is four steps, starting with where the signature goes");
+        check(next != nullptr && next->isVisible() && sign != nullptr && !sign->isVisible() &&
+                  back != nullptr && !back->isVisible(),
+              "the first step offers Next, not Sign");
+        const auto radio = [&dialog](const QString& text) -> QRadioButton* {
+            for (auto* b : dialog.findChildren<QRadioButton*>()) {
+                if (b->text().startsWith(text)) {
+                    return b;
+                }
+            }
+            return nullptr;
+        };
+        check(radio(QStringLiteral("In the box you drew on page 1")) != nullptr &&
+                  radio(QStringLiteral("In the box you drew"))->isChecked() &&
+                  radio(QStringLiteral("In a signature field")) != nullptr &&
+                  radio(QStringLiteral("In a box I draw")) == nullptr,
+              "Where starts on the box drawn, and offers the form's empty signature field");
+        next->click();
+        pump(50);
+        check(steps->currentIndex() == 1, "Next goes on to the key");
+        if (auto* file = radio(QStringLiteral("Key file"))) {
+            file->setChecked(true);
+        }
+        for (auto* e : dialog.findChildren<QLineEdit*>()) {
+            if (e->placeholderText() == QStringLiteral("a .p12 or .pfx file")) {
+                e->setText(QStringLiteral("/tmp/some.p12"));
+            }
+        }
+        next->click();
+        pump(50);
+        check(steps->currentIndex() == 2 && dialog.findChild<SignaturePreview*>() != nullptr &&
+                  dialog.findChild<SignaturePreview*>()->isVisible(),
+              "then how it looks, with a preview");
+        next->click();
+        pump(50);
+        check(steps->currentIndex() == 3 && sign->isVisible() && !next->isVisible() && back->isVisible(),
+              "the last step signs");
+        back->click();
+        pump(50);
+        check(steps->currentIndex() == 2, "and Back goes back");
+        shot(&dialog, "ux-sign-wizard");
+        SignSpec drawn = dialog.spec();
+        check(drawn.field.isEmpty() && drawn.rect == QRectF(72, 600, 200, 60) && drawn.page == 0,
+              "the box drawn is where it signs");
+
+        // The field instead: its page and box, and its name for the engine.
+        back->click();
+        back->click();
+        pump(50);
+        radio(QStringLiteral("In a signature field"))->setChecked(true);
+        const SignSpec inField = dialog.spec();
+        check(inField.field == QStringLiteral("Buyer") && inField.page == 1 &&
+                  inField.rect == QRectF(300, 700, 180, 50),
+              "choosing the empty field signs in it");
+
+        // Invisible: Look is skipped both ways.
+        radio(QStringLiteral("Invisible"))->setChecked(true);
+        next->click();
+        pump(50);
+        next->click();
+        pump(50);
+        check(steps->currentIndex() == 3 && dialog.spec().rect.isEmpty(),
+              "an invisible signature skips the look");
+        back->click();
+        pump(50);
+        check(steps->currentIndex() == 1, "and so does Back");
+        dialog.reject();
+
+        // From the menu, with no box yet: drawing one is offered, and closes
+        // the dialog so it can be drawn.
+        SignDialog fromMenu(&window, 0, QRectF(), QString());
+        fromMenu.show();
+        pump(50);
+        QRadioButton* newBox = nullptr;
+        for (auto* b : fromMenu.findChildren<QRadioButton*>()) {
+            if (b->text().startsWith(QStringLiteral("In a box I draw"))) {
+                newBox = b;
+            }
+        }
+        check(newBox != nullptr, "from the menu, drawing a box is offered");
+        if (newBox != nullptr) {
+            newBox->setChecked(true);
+            fromMenu.findChild<QPushButton*>(QStringLiteral("nextButton"))->click();
+            pump(50);
+        }
+        check(fromMenu.result() == SignDialog::PlaceBox, "and choosing it hands back to the page");
     }
 
     // --- Editing (M4b) -----------------------------------------------------

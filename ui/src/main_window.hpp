@@ -229,6 +229,8 @@ private:
     QAction* redoAction_ = nullptr;
     QActionGroup* tools_ = nullptr;
     FormPanel* form_ = nullptr;
+    QVector<FieldRow> fieldRows_;  ///< the latest field list, for the Sign dialog's Where step
+    QStringList signedFields_;     ///< the fields that hold a signature already
     QTreeWidget* signatures_ = nullptr;
     QToolBar* signatureBanner_ = nullptr;
     QLabel* signatureBannerLabel_ = nullptr;

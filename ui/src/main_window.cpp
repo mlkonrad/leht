@@ -1001,6 +1001,10 @@ QString localTime(qint64 unix_seconds) {
 
 void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     signatureCount_ = static_cast<int>(rows.size());
+    signedFields_.clear();
+    for (const SigRow& r : rows) {
+        signedFields_.push_back(r.field);
+    }
     signatures_->clear();
     signatureCards_->setRows({}, true);
     sidebar_->setPanelAvailable(QStringLiteral("signatures"), !rows.isEmpty());
@@ -1268,8 +1272,25 @@ void MainWindow::startSigning(int page, QRectF rect) {
     if (pageCount_ == 0) {
         return;
     }
-    SignDialog dialog(this, page, rect, QString(), signatureCount_ == 0);
-    if (dialog.exec() != QDialog::Accepted) {
+    // The form's unsigned signature fields are offered as places to sign.
+    QVector<FieldRow> emptyFields;
+    for (const FieldRow& f : fieldRows_) {
+        if (static_cast<leht::ops::FieldType>(f.type) == leht::ops::FieldType::Signature &&
+            !f.readOnly && !signedFields_.contains(f.name)) {
+            emptyFields.push_back(f);
+        }
+    }
+    SignDialog dialog(this, page, rect, QString(), signatureCount_ == 0, emptyFields);
+    const int answer = dialog.exec();
+    if (answer == SignDialog::PlaceBox) {
+        if (QAction* sign = actions_->find(QStringLiteral("toolSign")); sign != nullptr && sign->isEnabled()) {
+            modes_->setMode(QStringLiteral("sign"));
+            sign->trigger();
+            statusBar()->showMessage(tr("Drag a box where the signature should go."), 12000);
+        }
+        return;
+    }
+    if (answer != QDialog::Accepted) {
         return;
     }
     SignSpec spec = dialog.spec();
@@ -1351,6 +1372,7 @@ void MainWindow::updateTitle() {
 }
 
 void MainWindow::onFieldsReady(const QVector<FieldRow>& rows) {
+    fieldRows_ = rows;
     form_->setFields(rows);
     view_->setFormFields(rows);
     actions_->refresh();  // Flatten Form follows whether there are fields

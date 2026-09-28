@@ -542,12 +542,20 @@ Our own code agreeing with itself proves little about a format this old, so:
 
 ## In the viewer
 
-The **Sign** tool drags a box for a visible signature; *Sign → Sign Invisibly…* skips the
-box. The dialog takes the `.p12` and its password — or a key on an ID card and its PIN,
-listed from the cards in the readers, or Smart-ID or Mobile-ID — what the signature should
-show — the
-name and date, an image, or a signature **drawn** on a small canvas — the reason and
-location, and optionally a timestamp authority (remembered between sessions).
+The **Sign** tool drags a box for a visible signature; *Sign → Sign Invisibly…* opens the
+same dialog without one. The dialog has four steps:
+
+1. **Where:** the box you drew, an **empty signature field** of the form (the engine
+   signs an existing unsigned field by name, and the dialog lists the ones not yet
+   signed), a box to draw now (the dialog closes and the Sign tool takes over), or
+   invisible.
+2. **How:** the `.p12` and its password, a key on an ID card and its PIN (listed from the
+   cards in the readers), or Smart-ID or Mobile-ID. Next checks this step before moving on.
+3. **Look:** what a visible signature shows, with a preview in the box's own proportions:
+   the name and date, an image, or a signature **drawn** on a small canvas. An invisible
+   signature skips this step.
+4. **Details:** name, reason, location, certification, and optionally a timestamp
+   authority and long-term validation (remembered between sessions).
 
 Signing is a save: any unsaved edits go into the same revision the signature covers, the
 signed file becomes the document, and the edit log restarts from it. **Undo does not reach
