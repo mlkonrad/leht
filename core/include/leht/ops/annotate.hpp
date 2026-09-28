@@ -65,10 +65,18 @@ struct AnnotInfo {
     bool movable = false;
     /// It can also be resized. A note's icon has a fixed size: movable only.
     bool resizable = false;
-    /// Free text: the font size in points and the text colour (RGB, 0 to 1),
-    /// so an editor can show it as it will look. 0 and black otherwise.
+    /// Free text: the font size in points, so an editor can show it as it
+    /// will look. 0 otherwise.
     float font_size = 0;
+    /// RGB, 0 to 1: free text's text colour, otherwise the annotation's own
+    /// (a highlight's, an ink stroke's). Black when it has none.
     float color[3] = {0, 0, 0};
+    float opacity = 1;
+    /// Ink, shapes and lines: the line width in points. 0 for other kinds.
+    float line_width = 0;
+    /// set_annotation_style() accepts it: its appearance can be drawn again.
+    /// Stamps, attachments, links and the like keep the picture they have.
+    bool styleable = false;
 };
 
 /// Adds an annotation to `page` (0-based) and generates its appearance, so it
@@ -103,6 +111,14 @@ bool move_annotation(const Context& ctx, Document& doc, AnnotId id, const Rect& 
 /// leht::Error for any other kind, or text over the length limit.
 bool set_annotation_contents(const Context& ctx, Document& doc, AnnotId id,
                              const std::string& text);
+
+/// Changes how the annotation `id` looks, and draws it again: `style.color`,
+/// `style.opacity` and `style.author` always; `style.line_width` for ink,
+/// shapes and lines; `style.font_size` for free text (whose colour is its
+/// text's). The other fields of `style` are ignored. Returns false if there
+/// is no such annotation; throws leht::Error for one that is not styleable
+/// (see AnnotInfo::styleable) or a value out of range.
+bool set_annotation_style(const Context& ctx, Document& doc, AnnotId id, const AnnotSpec& style);
 
 /// Deletes the annotation `id`, with its popup. Returns false if there is no
 /// such annotation (or it is a form field, which forms own).

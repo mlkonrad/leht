@@ -212,6 +212,19 @@ void test_edit_messages_round_trip() {
     const Edit t2 = round_trip(retext);
     CHECK(t2.annot_id == 11 && t2.text == "new words");
 
+    Edit style;
+    style.kind = Edit::Kind::SetAnnotStyle;
+    style.annot_id = 12;
+    style.annot.color[1] = 0.5F;
+    style.annot.opacity = 0.75F;
+    style.annot.line_width = 2;
+    style.annot.font_size = 16;
+    style.annot.author = "Mari";
+    const Edit st2 = round_trip(style);
+    CHECK(st2.annot_id == 12 && st2.annot.color[1] == 0.5F && st2.annot.opacity == 0.75F &&
+          st2.annot.line_width == 2.0F && st2.annot.font_size == 16.0F &&
+          st2.annot.author == "Mari");
+
     Edit box;
     box.kind = Edit::Kind::CropBox;
     box.pages = "2-";
@@ -299,7 +312,12 @@ void test_edit_messages_round_trip() {
     info.resizable = true;
     info.font_size = 14;
     info.color[0] = 0.5F;
+    info.opacity = 0.25F;
+    info.line_width = 3;
+    info.styleable = true;
     const AnnotList al = round_trip(AnnotList{{info}});
+    CHECK(al.items[0].opacity == 0.25F && al.items[0].line_width == 3.0F &&
+          al.items[0].styleable);
     CHECK(al.items.size() == 1 && al.items[0].id == 7 && al.items[0].type == "FreeText" &&
           al.items[0].rect.x1 == 3.0F && al.items[0].author == "a" && al.items[0].movable &&
           al.items[0].resizable && al.items[0].font_size == 14.0F &&
@@ -551,6 +569,11 @@ void test_edit_messages_reject_hostile_input() {
         retext.annot_id = 11;
         retext.text = "new words";
         check_truncations(retext);
+        Edit style;
+        style.kind = Edit::Kind::SetAnnotStyle;
+        style.annot_id = 12;
+        style.annot.author = "Mari";
+        check_truncations(style);
         Edit box;
         box.kind = Edit::Kind::CropBox;
         box.rects = {{5, 6, 500, 700}};

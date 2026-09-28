@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "protect_dialog.hpp"
+#include "contrast.hpp"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -112,7 +113,7 @@ ProtectDialog::ProtectDialog(QWidget* parent) : QDialog(parent) {
     problem_ = new QLabel(this);
     problem_->setWordWrap(true);
     QPalette warn = problem_->palette();
-    warn.setColor(QPalette::WindowText, QColor(200, 30, 30));
+    warn.setColor(QPalette::WindowText, contrast::readableOn(QColor(200, 30, 30), warn.color(QPalette::Window)));
     problem_->setPalette(warn);
     layout->addWidget(problem_);
 
@@ -142,7 +143,7 @@ void ProtectDialog::update() {
     const QString word = strengthWord(password_->text(), colour);
     strength_->setText(word);
     QPalette pal = strength_->palette();
-    pal.setColor(QPalette::WindowText, colour);
+    pal.setColor(QPalette::WindowText, contrast::readableOn(colour, pal.color(QPalette::Window)));
     strength_->setPalette(pal);
 
     QString problem;

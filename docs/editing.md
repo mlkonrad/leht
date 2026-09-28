@@ -204,7 +204,9 @@ from a few named colours or any other. Comments carry the name set in *Edit → 
 Name on comments*, if any. The left
 sidebar has tabs for Pages, Outline, Comments (every annotation by page, with a filter; click
 one to go to it, double-click a note to edit it), Form and Signatures; a tab shows only when
-the document has something for it.
+the document has something for it. Below the comment list, the chosen comment's colour,
+opacity, line width (drawings and shapes), text size (text boxes) and author can be changed;
+each change is one step for Undo. Stamps and attached files keep the look they were given.
 
 *Tools → Redact Text…*, *Pages → Watermark…* and *Pages → Crop Margins…* open dialogs. The Watermark dialog
 has everything `leht watermark` has — pages, size or fit, opacity, angle, colour, under or
@@ -215,7 +217,11 @@ radio groups and choice fields. The tools work on the unrotated view (Ctrl+R to 
 back) and say so otherwise.
 
 F6 and Shift+F6 move the keyboard between the toolbar, the mode bar, the sidebar and the page;
-every control has a name a screen reader says ("Page 3 of 10", "Note on page 2: …"). The first
+every control has a name a screen reader says ("Page 3 of 10", "Note on page 2: …"), and the
+page itself reads as a document holding the shown page's words, fetched from the worker only
+while a screen reader is listening. Status words (a signature's verdict, a password's strength)
+keep their red, amber or green but are darkened or lightened to a 4.5:1 contrast with the
+theme's background, so they read in dark and high-contrast themes too. The first
 time Leht runs, a short tour points out the start screen, and another the first document's mode
 bar and sidebar; each shows once, and Escape ends it.
 

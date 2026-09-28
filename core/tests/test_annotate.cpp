@@ -33,6 +33,7 @@ using leht::ops::list_annotations;
 using leht::ops::mark_text;
 using leht::ops::move_annotation;
 using leht::ops::set_annotation_contents;
+using leht::ops::set_annotation_style;
 using leht::test::capture;
 using leht::test::corpus;
 using leht::test::have_tool;
@@ -414,6 +415,58 @@ void what_cannot_move_says_so() {
     CHECK(!set_annotation_contents(ctx, doc, 999999, "x"));
 }
 
+void style_changes_colour_width_and_author() {
+    const Context ctx;
+    const TempPath out("annotate_style.pdf");
+    Document doc = Document::open(ctx, corpus("text_10p.pdf"));
+    AnnotSpec sq = spec_for(AnnotKind::Square);
+    sq.color[0] = 0;
+    sq.color[1] = 0;
+    sq.color[2] = 1;
+    const AnnotId id = add_annotation(ctx, doc, 0, sq);
+    AnnotInfo info = info_of(ctx, doc, id);
+    CHECK(info.styleable && info.color[2] == 1 && info.color[0] == 0);
+    CHECK(info.opacity == 1 && info.line_width == 1.5F);
+    CHECK(pixels_in(ctx, doc, info.rect, reddish) == 0);
+
+    AnnotSpec style;
+    style.color[0] = 1;
+    style.color[1] = 0;
+    style.color[2] = 0;
+    style.opacity = 0.9F;
+    style.line_width = 4;
+    style.author = "Mari";
+    CHECK(set_annotation_style(ctx, doc, id, style));
+    info = info_of(ctx, doc, id);
+    CHECK(info.color[0] == 1 && info.color[2] == 0);
+    CHECK(info.line_width == 4 && info.author == "Mari");
+    CHECK(info.opacity > 0.89F && info.opacity < 0.91F);
+    CHECK(pixels_in(ctx, doc, info.rect, reddish) > 100);  // drawn again, in red
+
+    // Free text: the colour is its text's, and the size changes too.
+    AnnotSpec ft = spec_for(AnnotKind::FreeText);
+    ft.contents = "Leht";
+    ft.color[0] = ft.color[1] = ft.color[2] = 0;
+    const AnnotId text = add_annotation(ctx, doc, 1, ft);
+    style.font_size = 20;
+    CHECK(set_annotation_style(ctx, doc, text, style));
+    CHECK(info_of(ctx, doc, text).font_size == 20 && info_of(ctx, doc, text).color[0] == 1);
+
+    // A stamp may be a picture: it keeps its look. Bad values are refused.
+    const AnnotId stamp = add_annotation(ctx, doc, 0, spec_for(AnnotKind::Stamp));
+    CHECK(!info_of(ctx, doc, stamp).styleable);
+    CHECK(throws([&] { set_annotation_style(ctx, doc, stamp, style); }));
+    AnnotSpec bad = style;
+    bad.line_width = 0;
+    CHECK(throws([&] { set_annotation_style(ctx, doc, id, bad); }));
+    bad = style;
+    bad.opacity = 0;
+    CHECK(throws([&] { set_annotation_style(ctx, doc, id, bad); }));
+    CHECK(!set_annotation_style(ctx, doc, 999999, style));
+    doc.save(out.str(), SaveOptions{});
+    CHECK(qpdf_check(out.str()));
+}
+
 int main() {
     RUN(every_kind_round_trips);
     RUN(a_highlight_is_drawn);
@@ -426,5 +479,6 @@ int main() {
     RUN(free_text_reflows_and_takes_new_words);
     RUN(a_move_on_a_rotated_page_lands_where_asked);
     RUN(what_cannot_move_says_so);
+    RUN(style_changes_colour_width_and_author);
     return 0;
 }

@@ -140,7 +140,8 @@ void Sidebar::setExpanded(bool expanded) {
         it->button->setChecked(expanded);
     }
     // Folded, only the rail is left: the splitter should not keep the width.
-    setMaximumWidth(expanded ? QWIDGETSIZE_MAX : sizeHint().width());
+    // The rail's own width: sizeHint() would still count the body just hidden.
+    setMaximumWidth(expanded ? QWIDGETSIZE_MAX : rail_->parentWidget()->sizeHint().width());
     emit expandedChanged(expanded);
     emit panelChanged(currentPanel());
 }

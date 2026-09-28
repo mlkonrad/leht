@@ -444,18 +444,23 @@ void Session::on_edit(std::uint64_t id, const Edit& m) {
         out.pages = page_set(m.pages, doc_->page_count());
         break;
     case Edit::Kind::MoveAnnot:
-    case Edit::Kind::SetAnnotContents: {
+    case Edit::Kind::SetAnnotContents:
+    case Edit::Kind::SetAnnotStyle: {
         int page = -1;
         for (const ops::AnnotInfo& a : ops::list_annotations(ctx_, *doc_)) {
             if (a.id == m.annot_id) {
                 page = a.page;
             }
         }
-        const bool done =
-            page >= 0 && (m.kind == Edit::Kind::MoveAnnot
-                              ? !m.rects.empty() &&
-                                    ops::move_annotation(ctx_, *doc_, m.annot_id, m.rects.front())
-                              : ops::set_annotation_contents(ctx_, *doc_, m.annot_id, m.text));
+        bool done = page >= 0;
+        if (done && m.kind == Edit::Kind::MoveAnnot) {
+            done = !m.rects.empty() &&
+                   ops::move_annotation(ctx_, *doc_, m.annot_id, m.rects.front());
+        } else if (done && m.kind == Edit::Kind::SetAnnotStyle) {
+            done = ops::set_annotation_style(ctx_, *doc_, m.annot_id, m.annot);
+        } else if (done) {
+            done = ops::set_annotation_contents(ctx_, *doc_, m.annot_id, m.text);
+        }
         if (!done) {
             channel_.send(id, Failed{"no annotation with that id"});
             return;

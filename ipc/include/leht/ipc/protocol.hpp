@@ -33,7 +33,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 12;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split; 10: trusted lists; 11: organising pages; 12: form flattening
+inline constexpr std::uint32_t kProtocolVersion = 13;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split; 10: trusted lists; 11: organising pages; 12: form flattening; 13: annotation style
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let
@@ -230,6 +230,7 @@ struct Edit {
         InsertBlank = 16,   ///< page: where; rects[0]: (0, 0, width, height)
         SetInfo = 17,       ///< name: Title, Author, Subject or Keywords; text: the value ("" removes)
         FlattenForm = 18,   ///< no fields: every form field becomes part of its page
+        SetAnnotStyle = 19, ///< annot_id, annot: color, opacity, line_width, font_size, author
     };
     Kind kind = Kind::Redact;
     int page = 0;

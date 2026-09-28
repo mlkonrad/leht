@@ -24,7 +24,11 @@ struct AnnotRow {
     bool movable = false;    ///< the Move tool may pick it up
     bool resizable = false;  ///< ...and resize it (a note's icon cannot be)
     double fontSize = 0;     ///< free text: its size in points
-    QColor color;            ///< free text: its colour
+    QColor color;            ///< its colour (free text: its text's)
+    QString author;
+    double opacity = 1;
+    double lineWidth = 0;    ///< ink, shapes and lines; 0 otherwise
+    bool styleable = false;  ///< its colour and the rest can be changed
 };
 
 /// One form field, for the Form panel and the outlines on the page. `type` is

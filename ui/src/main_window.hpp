@@ -255,12 +255,13 @@ private:
     bool settlePendingRedactions();
     /// Save As without the questions save() and saveAs() have already asked.
     bool saveToChosenPath();
-    bool rearranged_ = false;
+    bool rearranged_ = false;  ///< the next documentEdited follows a page rearrangement
     ColorSwatches* swatches_ = nullptr;
     /// Moves focus to the next (+1) or previous (-1) part of the window:
     /// toolbar, mode bar, sidebar, page.
     void focusRegion(int step);
-    bool sidebarBeforeGrid_ = true;  ///< whether the sidebar was open before the grid showed  ///< the next documentEdited follows a page rearrangement
+    int sidebarWidth_ = 0;  ///< its width before it last folded
+    bool sidebarBeforeGrid_ = true;  ///< whether the sidebar was open before the grid showed
     QVector<int> gridSelectionAfterEdit_;  ///< what the grid selects once the edit lands
     QWidget* signaturePanel_ = nullptr;
     SignatureCards* signatureCards_ = nullptr;

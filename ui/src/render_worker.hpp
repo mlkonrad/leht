@@ -147,6 +147,9 @@ public slots:
     void addFreeText(int page, QRectF box, QString text, double size, QColor color);
     /// New words for a free-text annotation or a note.
     void setAnnotationText(int id, QString text);
+    /// A comment's colour, opacity, line width, text size and author.
+    void setAnnotationStyle(int id, QColor color, double opacity, double lineWidth,
+                            double fontSize, QString author);
     /// `pages` is a page-range spec; empty means every page.
     void addWatermark(QString pages, leht::ops::WatermarkOptions options);
     void cropMargins(QString pages, leht::ops::Margins margins);
@@ -164,6 +167,9 @@ public slots:
     void requestInfo();
     /// File > Export > Text: answered by textReady(), one string per page.
     void extractText(QString pages);
+    /// One page's text for a screen reader: answered by pageTextRead(), apart
+    /// from textReady() so it never lands in an export.
+    void readPageText(int page);
     /// Sets Title, Author, Subject or Keywords ("" removes it), as an edit.
     void setInfo(QString key, QString value);
 
@@ -293,6 +299,7 @@ signals:
     void infoReady(QStringList keys, QStringList values);
     /// `texts[i]` is page `pages[i]`'s text (0-based); empty lists on failure.
     void textReady(QVector<int> pages, QStringList texts);
+    void pageTextRead(int page, QString text);
     void documentEdited(QVector<int> pages, bool allPages, QVector<QSize> baseSizes);
     /// `modified`: there are edits since the file was opened or last saved.
     void editStateChanged(bool canUndo, bool canRedo, bool modified);

@@ -6,6 +6,7 @@ qt_standard_project_setup()
 # headless smoke test link the exact same code.
 qt_add_library(leht_viewer_lib STATIC
     src/actions.cpp
+    src/annotation_properties.cpp
     src/color_swatches.cpp
     src/comments_panel.cpp
     src/export_dialog.cpp
@@ -20,6 +21,7 @@ qt_add_library(leht_viewer_lib STATIC
     src/page_dialogs.cpp
     src/page_grid.cpp
     src/page_view.cpp
+    src/page_view_accessible.cpp
     src/phone_sign_dialog.cpp
     src/preferences.cpp
     src/properties_dialog.cpp

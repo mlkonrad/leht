@@ -12,6 +12,7 @@
 
 #include "page_grid.hpp"
 #include "page_view.hpp"
+#include "page_view_accessible.hpp"
 #include "page_dialogs.hpp"
 #include "file_tools.hpp"
 #include "file_tools_dialogs.hpp"
@@ -31,6 +32,7 @@
 
 #include <algorithm>
 
+#include <QAccessible>
 #include <QApplication>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -66,6 +68,7 @@
 
 #include "actions.hpp"
 #include "comments_panel.hpp"
+#include "contrast.hpp"
 #include "icons.hpp"
 #include "mode_bar.hpp"
 #include "outline_model.hpp"
@@ -154,6 +157,19 @@ MainWindow::MainWindow() {
 
     connect(view_, &PageView::currentPageChanged, this,
             &MainWindow::onCurrentPageChanged);
+    // A screen reader reads the page shown; its words are fetched only while
+    // one is listening.
+    pagereading::install();
+    const auto readCurrentPage = [this] {
+        const int page = view_->currentPage();
+        if (QAccessible::isActive() && page >= 0) {
+            onWorker([page](RenderWorker* w) { w->readPageText(page); });
+        }
+    };
+    connect(view_, &PageView::currentPageChanged, this, readCurrentPage);
+    connect(worker_, &RenderWorker::documentEdited, this, readCurrentPage);
+    connect(worker_, &RenderWorker::pageTextRead, this,
+            [this](int page, const QString& text) { pagereading::setPageText(view_, page, text); });
 
     // Editing: the view's tools -> worker edits; worker changes -> view.
     // Before the view hears of the edit: its pictures are of the wrong pages.
@@ -1030,7 +1046,7 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
                          : row.signerCommonName.isEmpty() ? row.field
                                                           : row.signerCommonName);
         item->setText(1, word);
-        item->setForeground(1, colour);
+        item->setForeground(1, contrast::readableOn(colour, signatures_->palette().color(QPalette::Base)));
         item->setData(0, Qt::UserRole, row.page);
         const auto add = [item](const QString& key, const QString& value) {
             if (!value.isEmpty()) {

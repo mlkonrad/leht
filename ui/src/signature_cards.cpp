@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "signature_cards.hpp"
+#include "contrast.hpp"
 
 #include "icons.hpp"
 #include "properties_dialog.hpp"  // parsePdfDate
@@ -122,7 +123,7 @@ void SignatureCards::setRows(const QVector<SigRow>& rows, bool haveTrustedList) 
         titles->addWidget(name);
         auto* headline = new QLabel(v.headline, card);
         QPalette pal = headline->palette();
-        pal.setColor(QPalette::WindowText, colour);
+        pal.setColor(QPalette::WindowText, contrast::readableOn(colour, pal.color(QPalette::Window)));
         headline->setPalette(pal);
         headline->setFont(bold);
         titles->addWidget(headline);
@@ -176,8 +177,10 @@ void SignatureCards::setRows(const QVector<SigRow>& rows, bool haveTrustedList) 
                                                                  : tr("%1 (%2)").arg(row.qualifiedService,
                                                                                      row.qualifiedDetail));
                 const bool yes = row.qualified >= 2;
-                badge->setStyleSheet(yes ? QStringLiteral("QLabel { border: 1px solid rgb(30,120,200); color: "
-                                                          "rgb(30,120,200); border-radius: 8px; padding: 1px 8px; }")
+                const QColor blue = contrast::readableOn(QColor(30, 120, 200), badge->palette().color(QPalette::Window));
+                badge->setStyleSheet(yes ? QStringLiteral("QLabel { border: 1px solid %1; color: %1;"
+                                                          " border-radius: 8px; padding: 1px 8px; }")
+                                               .arg(blue.name())
                                          : QStringLiteral("QLabel { border: 1px solid palette(mid); border-radius: "
                                                           "8px; padding: 1px 8px; }"));
                 badges->addWidget(badge);

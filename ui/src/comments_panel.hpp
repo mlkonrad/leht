@@ -7,14 +7,16 @@
 
 #include "edit_model.hpp"
 
+class AnnotationProperties;
+class QColor;
 class QLabel;
 class QLineEdit;
 class QTreeWidget;
 class QTreeWidgetItem;
 
 /// The Comments tab: every annotation in the document, by page, with a filter.
-/// Clicking one shows it on the page; notes and text boxes can be edited or
-/// deleted from here. It edits nothing itself: it asks, and the window sends
+/// Clicking one shows it on the page, and its colour, opacity and author
+/// below the list; notes and text boxes can be edited or deleted from here. It edits nothing itself: it asks, and the window sends
 /// the request to the worker like any other edit.
 class CommentsPanel : public QWidget {
     Q_OBJECT
@@ -31,6 +33,8 @@ signals:
     void showRequested(int page, QRectF rect);
     void editRequested(int id, const QString& current);
     void deleteRequested(int id);
+    void styleRequested(int id, QColor color, double opacity, double lineWidth, double fontSize,
+                        QString author);
 
 private:
     void rebuild();
@@ -39,6 +43,7 @@ private:
     QLineEdit* filter_ = nullptr;
     QTreeWidget* tree_ = nullptr;
     QLabel* empty_ = nullptr;
+    AnnotationProperties* properties_ = nullptr;
     QVector<AnnotRow> rows_;
     bool editable_ = true;
 };

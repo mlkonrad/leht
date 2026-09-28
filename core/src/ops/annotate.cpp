@@ -173,6 +173,34 @@ bool icon_type(enum pdf_annot_type t) {
     return t == PDF_ANNOT_TEXT || t == PDF_ANNOT_FILE_ATTACHMENT || t == PDF_ANNOT_SOUND;
 }
 
+/// Kinds whose appearance MuPDF draws from the dictionary alone, so a new
+/// colour or width loses nothing. A stamp or an attachment may be a picture.
+bool styleable_type(enum pdf_annot_type t) {
+    switch (t) {
+        case PDF_ANNOT_HIGHLIGHT:
+        case PDF_ANNOT_UNDERLINE:
+        case PDF_ANNOT_STRIKE_OUT:
+        case PDF_ANNOT_SQUIGGLY:
+        case PDF_ANNOT_TEXT:
+        case PDF_ANNOT_FREE_TEXT:
+        case PDF_ANNOT_INK:
+        case PDF_ANNOT_SQUARE:
+        case PDF_ANNOT_CIRCLE:
+        case PDF_ANNOT_LINE:
+        case PDF_ANNOT_POLYGON:
+        case PDF_ANNOT_POLY_LINE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// Of those, the ones drawn with a line whose width can be set.
+bool line_type(enum pdf_annot_type t) {
+    return t == PDF_ANNOT_INK || t == PDF_ANNOT_SQUARE || t == PDF_ANNOT_CIRCLE ||
+           t == PDF_ANNOT_LINE || t == PDF_ANNOT_POLYGON || t == PDF_ANNOT_POLY_LINE;
+}
+
 /// Calls `f(page, annot)` for the annotation `id`; returns false when there is
 /// none. The page stays loaded for the duration of the call.
 template <typename F>
@@ -340,6 +368,8 @@ std::vector<AnnotInfo> list_annotations(const Context& ctx, Document& doc) {
             float size = 0;
             int n = 0;
             float color[4] = {0, 0, 0, 0};
+            float opacity = 1;
+            float line_width = 0;
             guarded(c, [&](fz_context* g) {
                 kind = pdf_annot_type(g, a);
                 type = pdf_string_from_annot_type(g, kind);
@@ -352,18 +382,31 @@ std::vector<AnnotInfo> list_annotations(const Context& ctx, Document& doc) {
                 if (kind == PDF_ANNOT_FREE_TEXT) {
                     const char* font = nullptr;
                     pdf_annot_default_appearance(g, a, &font, &size, &n, color);
+                } else if (styleable_type(kind)) {
+                    pdf_annot_color(g, a, &n, color);
+                }
+                opacity = pdf_annot_opacity(g, a);
+                if (line_type(kind)) {
+                    line_width = pdf_annot_border_width(g, a);
                 }
             });
             AnnotInfo info{num, index, or_empty(type), Rect{r.x0, r.y0, r.x1, r.y1},
                            or_empty(contents), or_empty(author)};
             info.movable = movable_type(kind);
             info.resizable = info.movable && !icon_type(kind);
+            info.styleable = styleable_type(kind);
+            info.opacity = opacity;
+            info.line_width = line_width;
             if (kind == PDF_ANNOT_FREE_TEXT) {
                 info.font_size = size;
-                if (n == 1) {
-                    info.color[0] = info.color[1] = info.color[2] = color[0];
-                } else if (n == 3) {
-                    std::copy(color, color + 3, info.color);
+            }
+            if (n == 1) {
+                info.color[0] = info.color[1] = info.color[2] = color[0];
+            } else if (n == 3) {
+                std::copy(color, color + 3, info.color);
+            } else if (n == 4) {  // CMYK, roughly
+                for (int i = 0; i < 3; ++i) {
+                    info.color[i] = (1 - color[i]) * (1 - color[3]);
                 }
             }
             out.push_back(std::move(info));
@@ -461,6 +504,66 @@ bool set_annotation_contents(const Context& ctx, Document& doc, AnnotId id,
             // Rich text would still say the old words to readers that prefer it.
             pdf_dict_del(g, pdf_annot_obj(g, a), PDF_NAME(RC));
             pdf_set_annot_contents(g, a, value);
+            pdf_update_annot(g, a);
+        });
+    });
+}
+
+bool set_annotation_style(const Context& ctx, Document& doc, AnnotId id, const AnnotSpec& style) {
+    fz_context* c = ctx.raw();
+    (void)detail::require_pdf(c, doc);
+    for (const float v : style.color) {
+        if (!(v >= 0 && v <= 1)) {
+            throw Error(0, "annotation colour components must be 0 to 1");
+        }
+    }
+    if (!(style.opacity > 0 && style.opacity <= 1)) {
+        throw Error(0, "annotation opacity must be above 0 and at most 1");
+    }
+    if (style.author.size() > kMaxText) {
+        throw Error(0, "annotation text is too long");
+    }
+    const float* color = style.color;
+    const float opacity = style.opacity;
+    const float line_width = style.line_width;
+    const float font_size = style.font_size;
+    const char* author = style.author.c_str();
+    return with_annot(c, doc, id, [&](pdf_page*, pdf_annot* a) {
+        enum pdf_annot_type kind = PDF_ANNOT_UNKNOWN;
+        guarded(c, [&](fz_context* g) { kind = pdf_annot_type(g, a); });
+        if (!styleable_type(kind)) {
+            throw Error(0, "this kind of annotation keeps the look it has");
+        }
+        if (line_type(kind) && !(line_width > 0 && line_width <= 100)) {
+            throw Error(0, "annotation line width must be above 0 and at most 100");
+        }
+        if (kind == PDF_ANNOT_FREE_TEXT && !(font_size >= 1 && font_size <= 1000)) {
+            throw Error(0, "free text size must be 1 to 1000 points");
+        }
+        guarded(c, [&](fz_context* g) {
+            if (kind == PDF_ANNOT_FREE_TEXT) {
+                // Keep the font it names; only the size and colour change.
+                char font[64] = "Helv";
+                const char* current = nullptr;
+                float size = 0;
+                int n = 0;
+                float old[4] = {0, 0, 0, 0};
+                pdf_annot_default_appearance(g, a, &current, &size, &n, old);
+                if (current != nullptr && *current != '\0') {
+                    fz_strlcpy(font, current, sizeof font);
+                }
+                pdf_set_annot_default_appearance(g, a, font, font_size, 3, color);
+            } else {
+                pdf_set_annot_color(g, a, 3, color);
+            }
+            if (line_type(kind)) {
+                pdf_set_annot_border_width(g, a, line_width);
+            }
+            pdf_set_annot_opacity(g, a, opacity);
+            if (pdf_annot_has_author(g, a)) {
+                pdf_set_annot_author(g, a, author);
+            }
+            pdf_dirty_annot(g, a);
             pdf_update_annot(g, a);
         });
     });

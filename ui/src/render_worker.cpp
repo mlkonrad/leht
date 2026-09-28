@@ -893,6 +893,19 @@ void RenderWorker::setAnnotationText(int id, QString text) {
     applyEdit(e);
 }
 
+void RenderWorker::setAnnotationStyle(int id, QColor color, double opacity, double lineWidth,
+                                      double fontSize, QString author) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::SetAnnotStyle;
+    e.annot_id = id;
+    setColor(e.annot.color, color);
+    e.annot.opacity = static_cast<float>(opacity);
+    e.annot.line_width = static_cast<float>(lineWidth);
+    e.annot.font_size = static_cast<float>(fontSize);
+    e.annot.author = author.toStdString();
+    applyEdit(e);
+}
+
 void RenderWorker::addWatermark(QString pages, leht::ops::WatermarkOptions options) {
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::Watermark;
@@ -1946,6 +1959,10 @@ void RenderWorker::listAnnotations() {
                 row.resizable = a.resizable;
                 row.fontSize = a.font_size;
                 row.color = QColor::fromRgbF(a.color[0], a.color[1], a.color[2]);
+                row.author = QString::fromStdString(a.author);
+                row.opacity = a.opacity;
+                row.lineWidth = a.line_width;
+                row.styleable = a.styleable;
                 rows.push_back(row);
             }
         } else if (reply) {
@@ -1998,6 +2015,27 @@ void RenderWorker::extractText(QString pages) {
         (void)workerLost(Phase::Edit, -1);
     }
     emit textReady(numbers, texts);
+}
+
+void RenderWorker::readPageText(int page) {
+    QString text;
+    auto reply = proc_.load() ? roundTrip(ipc::ExtractText{std::to_string(page + 1)}, Phase::Edit, -1)
+                              : std::nullopt;
+    try {
+        if (reply && reply->type == ipc::MsgType::DocText) {
+            const ipc::DocText d = ipc::decode_as<ipc::DocText>(*reply);
+            if (!d.texts.empty()) {
+                text = QString::fromStdString(d.texts.front());
+            }
+        } else if (reply) {
+            (void)ipc::decode_as<ipc::Failed>(*reply);
+        }
+    } catch (const ipc::ProtocolError&) {
+        distrust();
+        (void)workerLost(Phase::Edit, -1);
+        return;
+    }
+    emit pageTextRead(page, text);
 }
 
 void RenderWorker::setInfo(QString key, QString value) {

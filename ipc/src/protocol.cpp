@@ -606,13 +606,23 @@ void Edit::encode(Writer& w) const {
         break;
     case Kind::FlattenForm:
         break;
+    case Kind::SetAnnotStyle:
+        w.i32(annot_id);
+        for (const float c : annot.color) {
+            w.f32(c);
+        }
+        w.f32(annot.opacity);
+        w.f32(annot.line_width);
+        w.f32(annot.font_size);
+        w.str(annot.author);
+        break;
     }
 }
 
 Edit Edit::decode(Reader& r) {
     Edit m;
     const std::uint8_t kind = r.u8();
-    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::FlattenForm)) {
+    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::SetAnnotStyle)) {
         throw ProtocolError("unknown edit kind");
     }
     m.kind = static_cast<Kind>(kind);
@@ -733,6 +743,16 @@ Edit Edit::decode(Reader& r) {
         m.text = r.str(32768);
         break;
     case Kind::FlattenForm:
+        break;
+    case Kind::SetAnnotStyle:
+        m.annot_id = r.i32();
+        for (float& c : m.annot.color) {
+            c = unit(r);
+        }
+        m.annot.opacity = unit(r);
+        m.annot.line_width = points(r);
+        m.annot.font_size = points(r);
+        m.annot.author = r.str(kMaxName);
         break;
     }
     return m;
@@ -1392,10 +1412,13 @@ void AnnotList::encode(Writer& w) const {
         for (const float c : a.color) {
             w.f32(c);
         }
+        w.f32(a.opacity);
+        w.f32(a.line_width);
+        w.u8(a.styleable ? 1 : 0);
     }
 }
 AnnotList AnnotList::decode(Reader& r) {
-    const std::size_t n = r.count(54);
+    const std::size_t n = r.count(63);
     AnnotList m;
     m.items.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
@@ -1418,6 +1441,9 @@ AnnotList AnnotList::decode(Reader& r) {
         for (float& c : a.color) {
             c = unit(r);
         }
+        a.opacity = unit(r);
+        a.line_width = points(r);
+        a.styleable = r.boolean();
         m.items.push_back(std::move(a));
     }
     return m;

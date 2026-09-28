@@ -696,6 +696,13 @@ void moves_new_words_and_crop_boxes_replay() {
         retext.annot_id = id;
         retext.text = "second";
         CHECK(edit_ok(*w, retext).pages == std::vector<int>({0}));
+        Edit style;
+        style.kind = Edit::Kind::SetAnnotStyle;
+        style.annot_id = id;
+        style.annot.color[0] = 0.8F;
+        style.annot.font_size = 20;
+        style.annot.author = "Mari";
+        CHECK(edit_ok(*w, style).pages == std::vector<int>({0}));
         Edit box;
         box.kind = Edit::Kind::CropBox;
         box.pages = "2-3";
@@ -721,6 +728,7 @@ void moves_new_words_and_crop_boxes_replay() {
         CHECK(seen[0][i].id == seen[1][i].id);
         CHECK(seen[0][i].rect.x0 == seen[1][i].rect.x0 && seen[0][i].rect.y1 == seen[1][i].rect.y1);
         CHECK(seen[0][i].contents == seen[1][i].contents);
+        CHECK(seen[0][i].author == seen[1][i].author && seen[0][i].color[0] == seen[1][i].color[0]);
     }
     const auto& ft = seen[0][0];
     CHECK(ft.type == "FreeText" && ft.contents == "second" && ft.movable && ft.resizable);

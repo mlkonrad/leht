@@ -155,6 +155,13 @@ void MainWindow::buildLayout() {
             onWorker([=](RenderWorker* w) { w->setAnnotationText(id, text); });
         }
     });
+    connect(comments_, &CommentsPanel::styleRequested, this,
+            [this](int id, const QColor& color, double opacity, double lineWidth, double fontSize,
+                   const QString& author) {
+                onWorker([=](RenderWorker* w) {
+                    w->setAnnotationStyle(id, color, opacity, lineWidth, fontSize, author);
+                });
+            });
 
     // Form panel: one labelled editor per field, in reading order. The page
     // outlines the fields; a click on one goes to its editor, and the editor
@@ -328,6 +335,18 @@ void MainWindow::buildLayout() {
     splitter->setCollapsible(0, false);
     splitter->setCollapsible(1, false);
     splitter->setSizes({250, 900});
+    // Folded, the sidebar is only its rail: the page takes the width it gave
+    // up, and gets it back to the same size when it unfolds.
+    connect(sidebar_, &Sidebar::expandedChanged, splitter, [this, splitter](bool expanded) {
+        const QList<int> sizes = splitter->sizes();
+        const int total = sizes.value(0) + sizes.value(1);
+        if (!expanded) {
+            sidebarWidth_ = std::max(sizes.value(0), 150);
+            splitter->setSizes({sidebar_->maximumWidth(), total - sidebar_->maximumWidth()});
+        } else if (sidebarWidth_ > 0) {
+            splitter->setSizes({sidebarWidth_, std::max(0, total - sidebarWidth_)});
+        }
+    });
 
     documentPage_ = new QWidget(this);
     documentPage_->setObjectName(QStringLiteral("documentPage"));

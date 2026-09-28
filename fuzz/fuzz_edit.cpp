@@ -128,6 +128,18 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
                 (void)leht::ops::set_annotation_contents(ctx, doc, a.id, "fuzz again");
             } catch (const leht::Error&) {
             }
+            try {
+                // Whatever the file's annotations are: a new colour, width and size.
+                leht::ops::AnnotSpec style;
+                style.color[0] = 0.2F;
+                style.opacity = 0.6F;
+                style.line_width = 3;
+                style.font_size = 14;
+                style.author = "fuzz";
+                (void)leht::ops::set_annotation_style(ctx, doc, a.id, style);
+            } catch (const leht::Error&) {
+                // Not styleable: refused, go on.
+            }
         }
         for (const auto& a : leht::ops::list_annotations(ctx, doc)) {
             (void)leht::ops::delete_annotation(ctx, doc, a.id);

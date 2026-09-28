@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "comments_panel.hpp"
 
+#include "annotation_properties.hpp"
 #include "icons.hpp"
 
 #include <QCoreApplication>
@@ -8,6 +9,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QSignalBlocker>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -85,8 +87,13 @@ CommentsPanel::CommentsPanel(QWidget* parent) : QWidget(parent) {
                         this);
     empty_->setWordWrap(true);
     empty_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-    empty_->setEnabled(false);
     layout->addWidget(empty_, 1);
+    properties_ = new AnnotationProperties(this);
+    layout->addWidget(properties_);
+    connect(properties_, &AnnotationProperties::styleRequested, this,
+            &CommentsPanel::styleRequested);
+    connect(tree_, &QTreeWidget::currentItemChanged, this,
+            [this](QTreeWidgetItem* item) { properties_->setAnnotation(rowFor(item)); });
 
     connect(filter_, &QLineEdit::textChanged, this, &CommentsPanel::rebuild);
     connect(tree_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item) {
@@ -141,6 +148,7 @@ void CommentsPanel::setAnnotations(const QVector<AnnotRow>& rows) {
 
 void CommentsPanel::setEditable(bool editable) {
     editable_ = editable;
+    properties_->setEditable(editable);
 }
 
 const AnnotRow* CommentsPanel::rowFor(const QTreeWidgetItem* item) const {
@@ -152,6 +160,10 @@ const AnnotRow* CommentsPanel::rowFor(const QTreeWidgetItem* item) const {
 }
 
 void CommentsPanel::rebuild() {
+    // The chosen comment stays chosen across a refresh (after its own edit).
+    const int chosen = properties_->annotationId();
+    QTreeWidgetItem* again = nullptr;
+    const QSignalBlocker quiet(tree_);
     tree_->clear();
     const QString needle = filter_->text().trimmed();
     QTreeWidgetItem* pageItem = nullptr;
@@ -184,13 +196,19 @@ void CommentsPanel::rebuild() {
                                      : tr("%1 on page %2: %3").arg(typeName).arg(r.page + 1).arg(text));
         item->setIcon(0, icons::named(annotationTypeIcon(r.type)));
         item->setData(0, Qt::UserRole, i);
+        if (r.id == chosen) {
+            again = item;
+        }
         item->setToolTip(0, text.isEmpty() ? typeName : typeName + QStringLiteral(": ") + r.contents);
         ++shown;
     }
     tree_->expandAll();
+    tree_->setCurrentItem(again);
+    properties_->setAnnotation(rowFor(again));
     empty_->setText(rows_.isEmpty() ? tr("No comments yet. Use the Comment tools to highlight text or add notes.")
                                     : tr("No comments match “%1”.").arg(needle));
     empty_->setVisible(shown == 0);
     tree_->setVisible(shown > 0);
+    properties_->setVisible(shown > 0);
     filter_->setVisible(!rows_.isEmpty());
 }

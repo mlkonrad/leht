@@ -8,7 +8,11 @@
 #include "main_window.hpp"
 #include "page_view.hpp"
 #include "actions.hpp"
+#include "annotation_properties.hpp"
 #include "comments_panel.hpp"
+#include "contrast.hpp"
+#include <QDoubleSpinBox>
+#include <QTreeWidget>
 #include "mode_bar.hpp"
 #include "page_grid.hpp"
 #include "preferences.hpp"
@@ -23,6 +27,7 @@
 #include "form_panel.hpp"
 #include "signature_cards.hpp"
 #include "welcome_view.hpp"
+#include <QAccessible>
 #include <QKeyEvent>
 #include <QListWidget>
 #include <QStackedWidget>
@@ -239,6 +244,65 @@ int main(int argc, char** argv) {
     }
 
     check(view->pageCount() == 10, "opened 10 pages");
+
+    // A screen reader sees the page view as a document holding the shown
+    // page's words, fetched only while one is listening.
+    {
+        QAccessible::setActive(true);
+        view->goToPage(1);
+        pump(600);
+        view->goToPage(0);
+        pump(800);
+        QAccessibleInterface* iface = QAccessible::queryAccessibleInterface(view);
+        QAccessibleTextInterface* text = iface != nullptr ? iface->textInterface() : nullptr;
+        check(iface != nullptr && iface->role() == QAccessible::Document &&
+                  iface->text(QAccessible::Description) == QStringLiteral("Page 1 of 10"),
+              "a screen reader hears a document, and which page");
+        check(text != nullptr && text->characterCount() > 100 &&
+                  text->text(0, text->characterCount()).contains(QStringLiteral("page 1 - line 0")),
+              "and can read the page's words");
+        if (text != nullptr) {
+            int start = 0;
+            int end = 0;
+            check(text->textAtOffset(0, QAccessible::WordBoundary, &start, &end) == QStringLiteral("leht"),
+                  "word by word");
+        }
+        QAccessible::setActive(false);
+    }
+
+    // High contrast: status colours are made readable on any background, and
+    // the window still draws with a black-and-white palette.
+    {
+        const QColor amber(210, 130, 0);
+        bool readable = true;
+        for (const QColor& bg : {QColor(Qt::white), QColor(Qt::black), QColor(40, 40, 40)}) {
+            readable = readable && contrast::ratio(contrast::readableOn(amber, bg), bg) >= 4.5;
+        }
+        check(readable, "status colours reach 4.5:1 on white, black and dark grey");
+        const QPalette saved = QApplication::palette();
+        QPalette high(Qt::white, Qt::black);  // window text white on black
+        high.setColor(QPalette::Base, Qt::black);
+        high.setColor(QPalette::Text, Qt::white);
+        high.setColor(QPalette::Button, Qt::black);
+        high.setColor(QPalette::ButtonText, Qt::white);
+        high.setColor(QPalette::Highlight, QColor(255, 255, 0));
+        high.setColor(QPalette::HighlightedText, Qt::black);
+        high.setColor(QPalette::AlternateBase, QColor(40, 40, 40));
+        high.setColor(QPalette::Mid, QColor(160, 160, 160));
+        QApplication::setPalette(high);
+        {
+            // A theme is chosen before Leht starts: a new window, built in it.
+            MainWindow contrasted;
+            contrasted.resize(800, 1000);
+            contrasted.show();
+            contrasted.openPath(QString::fromStdString(doc));
+            pump(2000);
+            check(inkSamples(grabView(contrasted)) > 200, "pages still render under a high-contrast palette");
+            shot(&contrasted, "ux-high-contrast");
+        }
+        QApplication::setPalette(saved);
+        pump(200);
+    }
 
     const QImage first = grabView(window);
     const long firstInk = inkSamples(first);
@@ -1368,6 +1432,8 @@ int main(int argc, char** argv) {
         auto* grid = window.findChild<PageGrid*>();
         check(grid != nullptr && grid->isVisible() && grid->count() == 10,
               "Pages mode shows a grid of the 10 pages");
+        check(window.findChild<Sidebar*>()->width() < 80 && grid->x() + grid->parentWidget()->x() < 100,
+              "the sidebar folds to its rail beside the grid, leaving no empty column");
         shot(&window, "ux-page-grid");
         const auto act = [&](const char* id) { window.actions()->find(QLatin1String(id))->trigger(); };
 
@@ -1759,6 +1825,51 @@ int main(int argc, char** argv) {
         }
         check(QFile::exists(copy) && QDir(tmp.path()).entryList(QDir::Hidden | QDir::Files).size() == 1,
               "no temporary file is left beside the saved one");
+
+        // The Comments tab's properties: the drawing gets a wider line.
+        {
+            window.findChild<Sidebar*>()->showPanel(QStringLiteral("comments"));
+            pump(50);
+            auto* tree = window.findChild<QTreeWidget*>(QStringLiteral("commentsTree"));
+            auto* props = window.findChild<AnnotationProperties*>();
+            auto* width = props != nullptr ? props->findChild<QDoubleSpinBox*>(QStringLiteral("propertyLineWidth"))
+                                           : nullptr;
+            const auto found = tree != nullptr ? tree->findItems(QStringLiteral("Drawing"),
+                                                                 Qt::MatchExactly | Qt::MatchRecursive)
+                                               : QList<QTreeWidgetItem*>{};
+            check(props != nullptr && props->annotationId() == 0 && width != nullptr &&
+                      !width->isVisibleTo(props),
+                  "with no comment chosen, the properties offer nothing to change");
+            check(found.size() == 1, "the drawing is listed by what it is");
+            if (props != nullptr && width != nullptr && found.size() == 1) {
+                tree->setCurrentItem(found.first());
+                pump(50);
+                const int id = props->annotationId();
+                check(id != 0 && width->isVisibleTo(props) && width->isEnabled() &&
+                          std::abs(width->value() - 1.5) < 0.01,
+                      "choosing the drawing shows its line width");
+                shot(&window, "ux-comment-properties");
+                width->setValue(4);
+                pump(1200);
+                check(window.isModified(), "a new line width is an edit");
+                check(props->annotationId() == id && std::abs(width->value() - 4) < 0.01,
+                      "the drawing stays chosen when the list comes back");
+                QMetaObject::invokeMethod(worker, "undo", Qt::QueuedConnection);
+                pump(1200);
+                check(!window.isModified() && std::abs(width->value() - 1.5) < 0.01,
+                      "undo puts the old width back, in the panel too");
+                QMetaObject::invokeMethod(worker, "redo", Qt::QueuedConnection);
+                pump(1200);
+                check(window.save(), "save starts");
+                pump(2000);
+                leht::Document saved = leht::Document::open(ctx, copy.toStdString());
+                bool wide = false;
+                for (const auto& a : leht::ops::list_annotations(ctx, saved)) {
+                    wide = wide || (a.type == "Ink" && std::abs(a.line_width - 4) < 0.01);
+                }
+                check(wide, "the saved drawing has the new width");
+            }
+        }
 
         // Redact a box over the first line, then save and look for the text.
         emit view->redactRequested(0, boxes.first().adjusted(-1, -1, 1, 1));
