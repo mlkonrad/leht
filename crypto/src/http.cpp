@@ -15,6 +15,7 @@
 #include <openssl/ssl.h>
 
 #include <array>
+#include <ctime>
 
 namespace leht::crypto::detail {
 
@@ -32,12 +33,11 @@ struct TlsArg {
 BIO* tls_wrap(BIO* bio, void* arg, int connect, int detail) {
     auto* tls = static_cast<TlsArg*>(arg);
     if (connect == 0 || detail == 0) {
-        // Disconnecting, or connecting without TLS: nothing to add or remove.
-        if (connect == 0 && detail != 0) {
-            BIO* ssl = bio;
-            bio = BIO_pop(ssl);
-            BIO_free(ssl);
-        }
+        // Disconnecting, or connecting without TLS: leave the chain as it is.
+        // It must not be taken apart here: for a reply that is streamed, not
+        // read whole, OpenSSL disconnects before the caller has read it, and
+        // the TLS BIO freed here is the one the caller is about to read from.
+        // OpenSSL frees the chain itself.
         return bio;
     }
     BIO* sbio = BIO_new_ssl(tls->ctx, 1);
@@ -59,6 +59,26 @@ BIO* tls_wrap(BIO* bio, void* arg, int connect, int detail) {
 
 }  // namespace
 
+}  // namespace leht::crypto::detail
+
+namespace leht::crypto {
+
+Bytes http_get(const std::string& url, std::size_t max_size, int timeout_seconds) {
+    detail::HttpRequest r;
+    r.url = url;
+    r.what = "the server";
+    r.max_size = max_size;
+    r.timeout_seconds = timeout_seconds;
+    // The trusted lists' addresses come from the signed LOTL, and what they
+    // serve is verified by signature: a redirect cannot smuggle anything in.
+    r.max_redirects = 3;
+    return detail::http_transfer(r);
+}
+
+}  // namespace leht::crypto
+
+namespace leht::crypto::detail {
+
 std::string url_host(const std::string& url) {
     char* host = nullptr;
     if (OSSL_HTTP_parse_url(url.c_str(), nullptr, nullptr, &host, nullptr, nullptr, nullptr,
@@ -71,18 +91,62 @@ std::string url_host(const std::string& url) {
     return out;
 }
 
-Bytes http_transfer(const HttpRequest& r) {
-    if (r.url.rfind("https://", 0) != 0 && r.url.rfind("http://", 0) != 0) {
-        throw Error(0, r.what + " must be an http:// or https:// URL, not " + r.url);
+namespace {
+
+struct CtxClose {
+    void operator()(OSSL_HTTP_REQ_CTX* c) const noexcept { (void)OSSL_HTTP_close(c, 1); }
+};
+using ReqCtxPtr = std::unique_ptr<OSSL_HTTP_REQ_CTX, CtxClose>;
+
+/// Reads a reply to the end: a memory BIO for ASN.1, a stream otherwise, where
+/// a slow server's first empty read is not its end.
+Bytes read_reply(BIO* reply, const HttpRequest& r, const std::string& url) {
+    Bytes out;
+    std::array<unsigned char, 16384> buf{};
+    const time_t deadline = std::time(nullptr) + (r.timeout_seconds > 0 ? r.timeout_seconds : 60);
+    // A memory BIO (an ASN.1 reply, read whole) says "retry" at its end by
+    // default; its end is simply the end.
+    const bool memory = BIO_method_type(reply) == BIO_TYPE_MEM;
+    for (;;) {
+        const int n = BIO_read(reply, buf.data(), static_cast<int>(buf.size()));
+        if (n <= 0) {
+            if (!memory && BIO_should_retry(reply) != 0) {
+                const int ready = BIO_wait(reply, deadline, 100);
+                if (ready > 0) {
+                    continue;
+                }
+                throw Error(0, r.what + " at " + url +
+                                   (ready == 0 ? " took too long to answer" : " broke off"));
+            }
+            break;
+        }
+        out.insert(out.end(), buf.data(), buf.data() + n);
+        if (out.size() > r.max_size) {
+            throw Error(0, r.what + " at " + url + " sent more than " +
+                               std::to_string(r.max_size) + " bytes");
+        }
+    }
+    ERR_clear_error();
+    if (out.empty()) {
+        throw Error(0, r.what + " at " + url + " sent an empty reply");
+    }
+    return out;
+}
+
+/// One request to `url`. Returns the body, or sets `*redirect` and returns
+/// nothing when the server points elsewhere.
+Bytes one_hop(const HttpRequest& r, const std::string& url, std::string* redirect) {
+    if (url.rfind("https://", 0) != 0 && url.rfind("http://", 0) != 0) {
+        throw Error(0, r.what + " must be an http:// or https:// URL, not " + url);
     }
     int use_ssl = 0;
     char* host = nullptr;
     char* port = nullptr;
     char* path = nullptr;
     char* query = nullptr;
-    if (OSSL_HTTP_parse_url(r.url.c_str(), &use_ssl, nullptr, &host, &port, nullptr, &path,
-                            &query, nullptr) != 1) {
-        fail("cannot parse the URL of " + r.what + ": " + r.url);
+    if (OSSL_HTTP_parse_url(url.c_str(), &use_ssl, nullptr, &host, &port, nullptr, &path, &query,
+                            nullptr) != 1) {
+        fail("cannot parse the URL of " + r.what + ": " + url);
     }
     const std::string h = host;
     const std::string p = port;
@@ -106,7 +170,12 @@ Bytes http_transfer(const HttpRequest& r) {
         tls.host = h;
         tls.ctx = ssl_ctx.get();
     }
-
+    ReqCtxPtr rctx{OSSL_HTTP_open(h.c_str(), p.c_str(), nullptr, nullptr, use_ssl, nullptr,
+                                  nullptr, use_ssl != 0 ? tls_wrap : nullptr,
+                                  use_ssl != 0 ? &tls : nullptr, 0, r.timeout_seconds)};
+    if (!rctx) {
+        fail(r.what + " at " + url + " did not answer");
+    }
     BioPtr body;
     if (r.post != nullptr) {
         body.reset(BIO_new_mem_buf(r.post->data(), static_cast<int>(r.post->size())));
@@ -115,32 +184,56 @@ Bytes http_transfer(const HttpRequest& r) {
         }
     }
     // A null request body makes this a GET.
-    BioPtr reply{OSSL_HTTP_transfer(
-        nullptr, h.c_str(), p.c_str(), target.c_str(), use_ssl, nullptr, nullptr, nullptr,
-        nullptr, use_ssl != 0 ? tls_wrap : nullptr, use_ssl != 0 ? &tls : nullptr, 0, nullptr,
-        r.post != nullptr ? r.content_type : nullptr, body.get(), r.expected_type,
-        r.expect_asn1 ? 1 : 0, r.max_size, r.timeout_seconds, 0)};
+    if (OSSL_HTTP_set1_request(rctx.get(), target.c_str(), nullptr,
+                               r.post != nullptr ? r.content_type : nullptr, body.get(),
+                               r.expected_type, r.expect_asn1 ? 1 : 0, r.max_size,
+                               r.timeout_seconds, 0) != 1) {
+        fail("cannot send the request to " + r.what);
+    }
+    char* location = nullptr;
+    // OSSL_HTTP_exchange() hands back its own reference to the reply BIO:
+    // ours to release with BIO_free (never BIO_free_all -- the chain beneath
+    // a streamed reply is the connection, which the context frees on close).
+    // Declared after rctx, so released before the context closes.
+    struct Unref {
+        void operator()(BIO* b) const noexcept { BIO_free(b); }
+    };
+    const std::unique_ptr<BIO, Unref> reply{
+        OSSL_HTTP_exchange(rctx.get(), r.max_redirects > 0 ? &location : nullptr)};
     if (!reply) {
-        fail(r.what + " at " + r.url + " did not answer");
-    }
-    Bytes out;
-    std::array<unsigned char, 16384> buf{};
-    for (;;) {
-        const int n = BIO_read(reply.get(), buf.data(), static_cast<int>(buf.size()));
-        if (n <= 0) {
-            break;
+        if (location != nullptr) {
+            *redirect = location;
+            OPENSSL_free(location);
+            ERR_clear_error();
+            return {};
         }
-        out.insert(out.end(), buf.data(), buf.data() + n);
-        if (out.size() > r.max_size) {
-            throw Error(0, r.what + " at " + r.url + " sent more than " +
-                               std::to_string(r.max_size) + " bytes");
+        fail(r.what + " at " + url + " did not answer");
+    }
+    // Read before the context closes: a streamed reply is its connection.
+    return read_reply(reply.get(), r, url);
+}
+
+}  // namespace
+
+Bytes http_transfer(const HttpRequest& r) {
+    std::string url = r.url;
+    for (int hop = 0;; ++hop) {
+        std::string redirect;
+        Bytes out = one_hop(r, url, &redirect);
+        if (redirect.empty()) {
+            return out;
         }
+        if (hop >= r.max_redirects) {
+            throw Error(0, r.what + " at " + r.url + " redirects too often");
+        }
+        if (redirect.front() == '/') {
+            // A path on the same server: keep its scheme, host and port.
+            const std::size_t start = url.find("://");
+            const std::size_t end = url.find('/', start + 3);
+            redirect = url.substr(0, end) + redirect;
+        }
+        url = redirect;
     }
-    ERR_clear_error();
-    if (out.empty()) {
-        throw Error(0, r.what + " at " + r.url + " sent an empty reply");
-    }
-    return out;
 }
 
 }  // namespace leht::crypto::detail

@@ -48,6 +48,8 @@ add_subdirectory(core)
 # The viewer <-> leht-worker wire format (M3). Always built: it is small,
 # has no dependency beyond core/, and its tests guard the process boundary.
 add_subdirectory(ipc)
+# The EU trusted lists (queue M5): the model, and reading the lists' XML.
+add_subdirectory(trustlist)
 # Signing and verification (M5): OpenSSL, kept out of core/.
 add_subdirectory(crypto)
 # Reading text off scanned pages: Tesseract, kept out of core/ the same way.

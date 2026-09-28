@@ -54,8 +54,14 @@ std::int64_t to_unix(const ASN1_TIME* t);
 /// "SHA-256" for an EVP_MD.
 std::string digest_name(const EVP_MD* md);
 
-/// Builds an X509_STORE from the store's certificates.
-StorePtr make_store(const TrustStore& trust);
+/// What a chain is being built for: a trusted list's qualified CAs anchor
+/// signers, its qualified TSAs anchor timestamps, and neither the other.
+enum class Purpose { Signature, Timestamp };
+
+/// Builds an X509_STORE from the store's certificates, plus the trusted
+/// list's services of the kind `purpose` needs that were granted at `when`.
+StorePtr make_store(const TrustStore& trust, Purpose purpose = Purpose::Signature,
+                    std::int64_t when = 0);
 
 struct TimestampToken {
     Bytes der;              ///< the TimeStampToken (a CMS SignedData)
@@ -82,6 +88,9 @@ struct HttpRequest {
     bool expect_asn1 = false;
     std::size_t max_size = std::size_t{1} << 20;
     int timeout_seconds = 20;
+    /// Redirects to follow (http or https only). Zero for anything whose
+    /// address a document supplied: OCSP, CRLs.
+    int max_redirects = 0;
 };
 
 /// One HTTP(S) exchange (http.cpp). Throws leht::Error when the URL is not
@@ -96,7 +105,15 @@ std::string url_host(const std::string& url);
 /// when no chain to a trust anchor could be built -- and `detail` OpenSSL's
 /// reason when the result is not Trusted.
 Trust evaluate_chain(X509* leaf, STACK_OF(X509)* untrusted, const TrustStore& trust,
-                     std::int64_t when, X509StackPtr* chain, std::string* detail);
+                     std::int64_t when, X509StackPtr* chain, std::string* detail,
+                     Purpose purpose = Purpose::Signature);
+
+/// The trusted lists' verdict on `signer` (whose chain is `chain`, signer
+/// first) at `when` (qualified.cpp).
+QualifiedReport qualify_signer(X509* signer, STACK_OF(X509)* chain, const TrustStore& trust,
+                               std::int64_t when);
+/// The same for a timestamp authority's certificate at the token's time.
+QualifiedReport qualify_timestamp(X509* tsa, const TrustStore& trust, std::int64_t when);
 
 /// Each certificate of `chain` (signer first) but a self-signed last one,
 /// checked for revocation at `when` against `embedded` and `online`
@@ -134,6 +151,13 @@ struct Identity::Impl {
 
 struct TrustStore::Impl {
     std::vector<detail::X509Ptr> certs;
+    /// The trusted list, and each of its services' certificates parsed once.
+    std::shared_ptr<const trustlist::TrustedList> list;
+    struct ListCert {
+        const trustlist::Service* service;
+        detail::X509Ptr cert;
+    };
+    std::vector<ListCert> list_certs;
 };
 
 }  // namespace leht::crypto

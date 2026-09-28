@@ -193,7 +193,9 @@ TimestampReport check_token(const unsigned char* der, long len, const ImprintOf&
     detail::add_certs(online, untrusted.get());
     detail::X509StackPtr chain;
     std::string why;
-    ts.trust = detail::evaluate_chain(tsa, untrusted.get(), trust, ts.time, &chain, &why);
+    ts.trust = detail::evaluate_chain(tsa, untrusted.get(), trust, ts.time, &chain, &why,
+                                      detail::Purpose::Timestamp);
+    ts.qualified = detail::qualify_timestamp(tsa, trust, ts.time);
     ts.revocation = detail::check_revocation(chain.get(), ts.time, embedded, online);
     if (ts.trust == Trust::Trusted && revoked(ts.revocation, &why)) {
         ts.trust = Trust::Revoked;
@@ -345,6 +347,16 @@ CmsReport verify_cms(const Bytes& der, const ContentReader& content, const Trust
     if (r.trust == Trust::Trusted && revoked(r.revocation, &r.trust_detail)) {
         r.trust = Trust::Revoked;
     }
+    // 5. Qualified, by the trusted lists -- for a signature that is trusted
+    //    and not revoked; anything less cannot be a qualified one.
+    if (trust.trusted_list() != nullptr) {
+        if (r.trust == Trust::Trusted) {
+            r.qualified = detail::qualify_signer(signer, chain.get(), trust, when);
+        } else {
+            r.qualified.level = QualifiedReport::Level::NotQualified;
+            r.qualified.detail = "the signature is not trusted";
+        }
+    }
     ERR_clear_error();
     return r;
 }
@@ -375,8 +387,9 @@ TimestampReport verify_document_timestamp(const Bytes& der, const ContentReader&
 namespace detail {
 
 Trust evaluate_chain(X509* leaf, STACK_OF(X509)* untrusted, const TrustStore& trust,
-                     std::int64_t when, X509StackPtr* chain, std::string* detail) {
-    StorePtr store = make_store(trust);
+                     std::int64_t when, X509StackPtr* chain, std::string* detail,
+                     Purpose purpose) {
+    StorePtr store = make_store(trust, purpose, when);
     StoreCtxPtr ctx{X509_STORE_CTX_new()};
     if (!ctx || X509_STORE_CTX_init(ctx.get(), store.get(), leaf, untrusted) != 1) {
         *detail = "cannot evaluate the certificate chain";

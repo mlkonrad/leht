@@ -14,6 +14,7 @@ add_library(lehtcrypto
     src/http.cpp
     src/identity.cpp
     src/pkcs11.cpp
+    src/qualified.cpp
     src/revocation.cpp
     src/sign.cpp
     src/tsa.cpp
@@ -27,7 +28,7 @@ target_include_directories(lehtcrypto
 # OpenSSL is PRIVATE for the same reason MuPDF is in core/: no public header
 # names an OpenSSL type.
 target_link_libraries(lehtcrypto
-    PUBLIC  leht::core
+    PUBLIC  leht::core leht::trustlist
     PRIVATE OpenSSL::Crypto OpenSSL::SSL PkgConfig::P11KIT leht::warnings)
 set_target_properties(lehtcrypto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -61,6 +62,15 @@ if(LEHT_BUILD_TESTS)
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
     add_test(NAME test_pdf_sign COMMAND test_pdf_sign)
 
+    # Qualified or not, per the EU trusted lists (queue M5).
+    add_executable(test_qualified tests/test_qualified.cpp)
+    target_link_libraries(test_qualified PRIVATE leht::crypto OpenSSL::Crypto leht::warnings)
+    target_include_directories(test_qualified PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_compile_definitions(test_qualified PRIVATE
+        LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
+    add_test(NAME test_qualified COMMAND test_qualified)
+
     # Long-term validation on real PDFs: /DSS and document timestamps.
     add_executable(test_pdf_ltv tests/test_pdf_ltv.cpp)
     target_link_libraries(test_pdf_ltv PRIVATE leht::crypto OpenSSL::Crypto leht::warnings)
@@ -93,7 +103,7 @@ if(LEHT_BUILD_TESTS)
     set_tests_properties(test_pkcs11 PROPERTIES SKIP_RETURN_CODE 77)
 
     if(LEHT_SANITIZE)
-        set_tests_properties(test_crypto test_revocation test_pdf_sign test_pdf_ltv test_pkcs11 PROPERTIES
+        set_tests_properties(test_crypto test_revocation test_qualified test_pdf_sign test_pdf_ltv test_pkcs11 PROPERTIES
             ENVIRONMENT "${LEHT_SANITIZER_ENV}")
     endif()
 endif()

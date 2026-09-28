@@ -16,6 +16,7 @@
 //     inside the sandboxed worker. See verify_cms().
 
 #include "leht/ops/sign.hpp"
+#include "leht/trustlist/model.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -168,6 +169,14 @@ public:
     /// Adds one DER certificate.
     void add_der(const Bytes& der);
 
+    /// Adds the EU trusted lists (leht::trustlist): their qualified CAs anchor
+    /// signers' chains, and their qualified timestamp authorities anchor
+    /// timestamps -- each only while its service was granted at the time that
+    /// matters. They also decide the "qualified" verdict. Not part of pem().
+    void add_trusted_list(trustlist::TrustedList list);
+    /// The trusted list added, or null.
+    [[nodiscard]] const trustlist::TrustedList* trusted_list() const;
+
     [[nodiscard]] int size() const;
     /// All certificates as PEM: how the viewer hands the store to the worker.
     [[nodiscard]] std::string pem() const;
@@ -254,6 +263,23 @@ struct RevocationCheck {
     std::string problem;  ///< for Unknown: why no data could be used
 };
 
+/// Whether a signature (or timestamp) is qualified under eIDAS, as the EU
+/// trusted lists say: ETSI TS 119 615, simplified (see qualified.cpp).
+struct QualifiedReport {
+    enum class Level : std::uint8_t {
+        NotChecked,     ///< no trusted list was given
+        NotQualified,   ///< `detail` says why
+        Qes,            ///< qualified electronic signature
+        QualifiedSeal,  ///< qualified electronic seal
+        AdvancedQc,     ///< advanced, with a qualified certificate (not on a QSCD)
+        QualifiedTimestamp,
+    };
+    Level level = Level::NotChecked;
+    std::string service;    ///< the qualified CA or TSA, as its list names it
+    std::string territory;  ///< its country
+    std::string detail;     ///< why not qualified, or what the verdict rests on
+};
+
 struct TimestampReport {
     bool valid = false;         ///< token signature and imprint check out
     std::int64_t time = 0;      ///< genTime, Unix seconds
@@ -263,6 +289,9 @@ struct TimestampReport {
     /// The authority's chain, checked at genTime. Empty when no revocation
     /// data at all was given to the verification.
     std::vector<RevocationCheck> revocation;
+    /// QualifiedTimestamp when the authority is a qualified one, granted at
+    /// genTime, on a trusted list.
+    QualifiedReport qualified;
 };
 
 struct CmsReport {
@@ -288,6 +317,9 @@ struct CmsReport {
     /// at the trusted time. Empty when no revocation data at all was given:
     /// then revocation was not checked, which is not the same as Unknown.
     std::vector<RevocationCheck> revocation;
+    /// What the trusted lists make of the signer's certificate, at the trusted
+    /// time. NotChecked without a trusted list.
+    QualifiedReport qualified;
 
     /// Integrity: the bytes are what was signed, by the key in the certificate.
     [[nodiscard]] bool intact() const { return parsed && digest_matches && signature_valid; }
@@ -372,6 +404,12 @@ struct FetchedRevocation {
                                              const TrustStore& trust,
                                              const std::vector<FetchedRevocation>& fetched,
                                              const RevocationData& embedded = {});
+
+/// Network: one GET of `url` (http:// or https://, up to three redirects),
+/// at most `max_size` bytes. Throws leht::Error. For the trusted lists, whose
+/// content is verified by signature whatever server it came from.
+[[nodiscard]] Bytes http_get(const std::string& url, std::size_t max_size,
+                             int timeout_seconds = 30);
 
 /// Hole size for a document timestamp: a token with the TSA's chain.
 [[nodiscard]] std::size_t estimate_timestamp_size();

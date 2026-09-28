@@ -102,6 +102,8 @@ struct CertSpec {
     const char* ext_key_usage = nullptr;
     std::string ocsp_url{};  ///< authorityInfoAccess OCSP, when set
     std::string crl_url{};   ///< crlDistributionPoints, when set
+    std::string qc_statements{};  ///< qcStatements extension value, as DER in hex
+    std::string policies{};       ///< certificatePolicies, OIDs separated by commas
 };
 
 /// Issues a certificate for `key` from `issuer` (self-signed when null).
@@ -145,6 +147,57 @@ inline Cert issue(const Key& key, const CertSpec& spec, const Cert* issuer = nul
     }
     if (!spec.crl_url.empty()) {
         add(NID_crl_distribution_points, ("URI:" + spec.crl_url).c_str());
+    }
+    if (!spec.policies.empty()) {
+        // certificatePolicies from config text needs a config database; the
+        // DER is simple enough to write: SEQUENCE OF SEQUENCE { OID }.
+        std::string body;
+        std::size_t at = 0;
+        while (at <= spec.policies.size()) {
+            const std::size_t end = spec.policies.find(',', at);
+            const std::string text = spec.policies.substr(at, end == std::string::npos ? end : end - at);
+            ASN1_OBJECT* obj = OBJ_txt2obj(text.c_str(), 1);
+            unsigned char* der = nullptr;
+            const int n = obj != nullptr ? i2d_ASN1_OBJECT(obj, &der) : 0;
+            ASN1_OBJECT_free(obj);
+            if (n <= 0 || n > 120) {
+                die("certificatePolicies OID");
+            }
+            body += '\x30';
+            body += static_cast<char>(n);
+            body.append(reinterpret_cast<char*>(der), static_cast<std::size_t>(n));
+            OPENSSL_free(der);
+            if (end == std::string::npos) {
+                break;
+            }
+            at = end + 1;
+        }
+        std::string value = "DER:30" ;
+        static const char digits[] = "0123456789ABCDEF";
+        const auto hex = [&](unsigned char b) {
+            value += digits[b >> 4];
+            value += digits[b & 0x0F];
+        };
+        hex(static_cast<unsigned char>(body.size()));
+        for (const char b : body) {
+            hex(static_cast<unsigned char>(b));
+        }
+        X509_EXTENSION* ext = X509V3_EXT_conf(nullptr, &ctx, "2.5.29.32", value.c_str());
+        if (ext == nullptr) {
+            die("certificatePolicies extension");
+        }
+        X509_add_ext(c, ext, -1);
+        X509_EXTENSION_free(ext);
+    }
+    if (!spec.qc_statements.empty()) {
+        // No config syntax for qcStatements: the raw value, by OID.
+        X509_EXTENSION* ext = X509V3_EXT_conf(nullptr, &ctx, "1.3.6.1.5.5.7.1.3",
+                                              ("DER:" + spec.qc_statements).c_str());
+        if (ext == nullptr) {
+            die("qcStatements extension");
+        }
+        X509_add_ext(c, ext, -1);
+        X509_EXTENSION_free(ext);
     }
     if (X509_sign(c, issuer_key != nullptr ? issuer_key->p : key.p, EVP_sha256()) == 0) {
         die("X509_sign");

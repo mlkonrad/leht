@@ -12,6 +12,7 @@ set -eu
 dnf -y install --setopt=install_weak_deps=False --disablerepo=fedora-cisco-openh264 \
     gcc-c++ make cmake ninja-build curl binutils \
     mupdf-devel openssl-devel libseccomp-devel p11-kit-devel \
+    libxml2-devel xmlsec1-devel xmlsec1-openssl-devel libtool-ltdl-devel \
     tesseract-devel leptonica-devel \
     qt6-qtbase-devel qt6-qtsvg \
     mupdf qpdf ghostscript poppler-utils openssl softhsm \

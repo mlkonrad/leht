@@ -155,13 +155,30 @@ CertInfo info(X509* cert) {
     return out;
 }
 
-StorePtr make_store(const TrustStore& trust) {
+StorePtr make_store(const TrustStore& trust, Purpose purpose, std::int64_t when) {
     StorePtr store{X509_STORE_new()};
     if (!store) {
         fail("cannot create a certificate store");
     }
     for (const X509Ptr& c : trust.impl().certs) {
         (void)X509_STORE_add_cert(store.get(), c.get());  // a duplicate is not an error
+    }
+    const auto want = purpose == Purpose::Signature ? trustlist::Service::Type::CaQc
+                                                    : trustlist::Service::Type::TsaQtst;
+    const std::int64_t at = when != 0 ? when : static_cast<std::int64_t>(std::time(nullptr));
+    bool listed = false;
+    for (const TrustStore::Impl::ListCert& lc : trust.impl().list_certs) {
+        const trustlist::Phase* phase = lc.service->at(at);
+        if (lc.service->type == want && phase != nullptr && phase->granted) {
+            (void)X509_STORE_add_cert(store.get(), lc.cert.get());
+            listed = true;
+        }
+    }
+    if (listed) {
+        // A listed CA is usually an intermediate (Estonia's ESTEID CAs are),
+        // and a listed TSA a leaf: the list itself is the anchor, so a chain
+        // may end at one without reaching a self-signed root.
+        X509_STORE_set_flags(store.get(), X509_V_FLAG_PARTIAL_CHAIN);
     }
     ERR_clear_error();
     return store;
@@ -234,6 +251,10 @@ TrustStore::TrustStore(const TrustStore& other) : impl_(std::make_unique<Impl>()
     for (const detail::X509Ptr& c : other.impl_->certs) {
         impl_->certs.push_back(detail::up_ref(c.get()));
     }
+    impl_->list = other.impl_->list;
+    for (const Impl::ListCert& lc : other.impl_->list_certs) {
+        impl_->list_certs.push_back({lc.service, detail::up_ref(lc.cert.get())});
+    }
 }
 TrustStore& TrustStore::operator=(const TrustStore& other) {
     if (this != &other) {
@@ -293,6 +314,23 @@ int TrustStore::add_pem(const std::string& pem) {
 }
 
 void TrustStore::add_der(const Bytes& der) { impl_->certs.push_back(detail::from_der(der)); }
+
+void TrustStore::add_trusted_list(trustlist::TrustedList list) {
+    impl_->list = std::make_shared<const trustlist::TrustedList>(std::move(list));
+    impl_->list_certs.clear();
+    for (const trustlist::Service& s : impl_->list->services) {
+        for (const trustlist::Bytes& der : s.certs) {
+            const unsigned char* p = der.data();
+            X509* x = d2i_X509(nullptr, &p, static_cast<long>(der.size()));
+            if (x != nullptr) {
+                impl_->list_certs.push_back({&s, detail::X509Ptr{x}});
+            }
+        }
+    }
+    ERR_clear_error();
+}
+
+const trustlist::TrustedList* TrustStore::trusted_list() const { return impl_->list.get(); }
 
 int TrustStore::size() const { return static_cast<int>(impl_->certs.size()); }
 
