@@ -64,7 +64,9 @@ leht ltv       FILE -o OUT.pdf [--tsa URL]        embed validation data (B-LT, B
 leht keys      [--pkcs11-module LIB]              signing keys on ID cards and tokens
 leht ocr       FILE -o OUT.pdf [-p RANGES] [--lang est+eng] [--dpi N] [--force]
                                                   make scanned pages searchable
-leht verify    FILE [--trust CA.pem]... [--online] [--json]  check every signature
+leht verify    FILE [--trust CA.pem]... [--online] [--require-qualified] [--json]
+                                                  check every signature
+leht trusted-list update|status                   the EU trusted lists: qualified or not
 ```
 
 `-o` output · `-p` pages · `-z` zoom (1.0 = 72 DPI) · `-n` pages per file · `-d` degrees ·
@@ -83,7 +85,8 @@ original bytes untouched, so signatures already in the file stay valid — and s
 signed document now appends rather than rewrites. `verify` keeps four questions apart: are
 these the signed bytes, whose key was it, is that name trustworthy, and was anything added
 afterwards. Exit codes say the same: 4 broken, 5 untrusted, 6 changed after signing, 7
-changed in a way a certification or field lock forbids. The private key never enters the
+changed in a way a certification or field lock forbids, and with `--require-qualified` 8
+not a qualified electronic signature. The private key never enters the
 sandboxed worker that parses the PDF, and the signature blobs coming out of a document are
 only ever parsed inside it: [docs/signing.md](docs/signing.md).
 
@@ -144,6 +147,11 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
   it can be checked after its certificate expires; revocation checked against them, or
   online on request. Only certificate identifiers ever go over the network. See
   [docs/signing.md](docs/signing.md#long-term-validation).
+- **The EU trusted lists:** fetched and verified on request from the Official Journal's
+  anchor down, they make qualified CAs and timestamp authorities trusted — an Estonian
+  ID-card signature verifies as trusted with nothing added — and say whether a signature
+  is a qualified electronic signature. See
+  [docs/signing.md](docs/signing.md#the-eu-trusted-lists).
 - **OCR:** scanned pages made searchable with an invisible text layer — Estonian and
   English by default — read by Tesseract in its own sandboxed worker. See
   [docs/ocr.md](docs/ocr.md).
@@ -197,14 +205,16 @@ cmake -S . -B build -G Ninja -DLEHT_MUPDF_ROOT="$(tools/build-mupdf.sh)"
 ```sh
 # Fedora
 sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel \
-                 p11-kit-devel tesseract-devel leptonica-devel
+                 p11-kit-devel tesseract-devel leptonica-devel \
+                 libxml2-devel xmlsec1-devel xmlsec1-openssl-devel libtool-ltdl-devel
 sudo dnf install tesseract-langpack-est tesseract-langpack-eng  # OCR languages
 sudo dnf install qt6-qtbase-devel qt6-qtsvg  # only for the viewer
 
 # Debian / Ubuntu
 sudo apt install g++ cmake ninja-build libmupdf-dev libssl-dev libseccomp-dev libp11-kit-dev \
-                 libtesseract-dev libleptonica-dev tesseract-ocr-est tesseract-ocr-eng
-sudo apt install qt6-base-dev                # only for the viewer
+                 libtesseract-dev libleptonica-dev tesseract-ocr-est tesseract-ocr-eng \
+                 libxml2-dev libxmlsec1-dev libltdl-dev
+sudo apt install qt6-base-dev qt6-svg-plugins  # only for the viewer (Debian 13+)
 ```
 
 ```sh

@@ -131,11 +131,11 @@ from the sandboxed worker.
   value itself (OpenSSL signs only with keys it holds), so every signature is parsed back
   and verified against the certificate before a byte goes into the file. A card whose key
   does not match the certificate beside it produces an error, not a broken signature.
-- **Trust.** An ID-card signature verifies as *intact* at once, and as *trusted* only once
-  the CA that issued the card's certificate is trusted: the Signatures panel names the
-  issuer; add the Estonian state's root and that intermediate, as published by SK ID
-  Solutions, with `--trust` or *Trust a Certificate…*. Leht does not consult the EU Trusted
-  List, which is what would make it say *qualified*.
+- **Trust.** With the EU trusted lists fetched once (`leht trusted-list update`, see
+  [The EU trusted lists](#the-eu-trusted-lists)), an ID-card signature verifies as
+  *trusted* and as a *qualified electronic signature* with nothing else to do: Estonia's
+  list names the ESTEID CAs. Without them it is *intact* but *untrusted* until you add the
+  Estonian roots yourself, with `--trust` or *Sign → Trusted Certificates…*.
 
 ## Certification and field locks
 
@@ -223,7 +223,8 @@ Four things are reported, and kept apart on purpose:
 Exit codes say the same thing to scripts: **0** all valid and trusted, **4** something is
 broken, **5** intact but the signer is not trusted (a certificate revoked before the
 signing time included), **6** intact and trusted but the document was added to
-afterwards, **7** changed in a way a certification or a field lock forbids.
+afterwards, **7** changed in a way a certification or a field lock forbids, and with
+`--require-qualified` **8** not a qualified electronic signature.
 
 An encrypted document is verified with its password: `--doc-password-fd N`, else it is
 asked for.
@@ -241,11 +242,11 @@ terms of field locks, and with none set it judges a second signature exactly as 
 watermark stamped across the text. What Leht reports instead: the document grew after this
 signature, and whether a later signature in the same document covers the new bytes as well.
 
-**Trust is the system's, plus yours.** Fedora's `/etc/pki/tls/certs/ca-bundle.crt` (or the
-Debian, openSUSE location), plus certificates added with `--trust` or the viewer's *Trust a
-Certificate…*. The EU Trusted List, which is what makes eIDAS qualified signatures
-verifiable as such, is **not** consulted: an Estonian ID-card signature will verify as
-intact and, unless you add the right roots yourself, as untrusted.
+**Trust is the system's, yours, and the EU's.** Fedora's `/etc/pki/tls/certs/ca-bundle.crt`
+(or the Debian, openSUSE location); certificates added with `--trust` or the viewer's
+*Sign → Trusted Certificates…*; and, once fetched, the EU trusted lists' qualified CAs and
+timestamp authorities — see [The EU trusted lists](#the-eu-trusted-lists). With the lists,
+`verify` also says whether each signature is *qualified*.
 
 **Revocation is checked only against data Leht was given.** Without any — no `/DSS` in the
 file, no `--online` — `verify` says *revocation: not checked* and keeps its exit code: a
@@ -278,8 +279,8 @@ before the last document timestamp's authority certificate expires, and the new 
 covers the old one along with fresh data for it.
 
 In the viewer: *Add long-term validation data* in the Sign dialog (with a timestamp
-authority), *More → Add Long-Term Validation…* for a document already signed, and
-*Check Revocation Online* in the Signatures panel.
+authority), *Sign → Add Long-Term Validation…* for a document already signed, and
+*Check Revocation Online* in the Signatures panel (and the Sign menu).
 
 ### What goes over the network
 
@@ -340,6 +341,84 @@ change.
 A document timestamp is listed with the signatures, as a document timestamp. Before M4,
 Leht took one for a CMS signature and reported it **broken**.
 
+## The EU trusted lists
+
+Under eIDAS a **qualified electronic signature** (QES) has the legal effect of a
+handwritten one. Whether a signature is one is not something its certificate can simply
+claim: each member state publishes a **trusted list** of the trust services it supervises
+— which CAs issue qualified certificates, which timestamp authorities are qualified, since
+when, and for what — and the Commission publishes the **List of Trusted Lists** (LOTL)
+that points to them all.
+
+```
+leht trusted-list update     # fetch and verify them (network; nothing else fetches them)
+leht trusted-list status     # what is cached, and whether any list is overdue
+leht verify FILE [--require-qualified] [--no-trusted-list]
+```
+
+`update` fetches the LOTL and every national list it points to — about 30 lists, 28 MB,
+naming each host first — verifies them, and keeps what it needs in
+`$XDG_CACHE_HOME/leht/trusted-list/` (Leht's own compact form, not the XML). From then on,
+offline:
+
+- the qualified CAs **anchor trust** — each only for signatures made while its status was
+  *granted*, so a CA withdrawn after you signed does not undo your signature, and one
+  withdrawn before does not vouch for it. The qualified timestamp authorities anchor
+  timestamps, and neither does the other's job;
+- `verify` says, for each signature, one of: **qualified electronic signature (QES)**,
+  **qualified electronic seal**, **advanced, with a qualified certificate** (qualified, but
+  the key is not on a qualified signature creation device), or **not qualified**, with the
+  reason; a timestamp from a qualified TSA says *qualified*. `--require-qualified` exits
+  **8** unless every signature is a QES. `--no-trusted-list` leaves it all out.
+
+If a list is overdue (past its *next update*), `status` says so; the cached list is still
+used, as a validator should, until you update.
+
+### Where the trust comes from
+
+Leht verifies every list by its XML signature, and trusts exactly one thing without
+verifying it: **who may sign the LOTL**. The Commission publishes that in the Official
+Journal — currently notice **C/2026/1944** (15 April 2026), giving the SHA-256 digests of
+six certificates. Those digests are in `trustlist/src/anchor.cpp`, with the link, so anyone
+can compare the two; they were checked against the notice and against the certificates
+the LOTL itself carries.
+
+When the Commission changes its signing certificates it publishes a **pivot** — the old
+LOTL, archived, naming the new certificates, signed with the old ones. Leht follows pivots
+by signature, oldest first, from the Official Journal's certificates to the current LOTL.
+If instead a new Official Journal notice appears, the LOTL names it and Leht stops: nothing
+new is trusted, the cached list stays, and `update` says a Leht update with the new
+notice's digests is needed.
+
+Each national list must be signed by a certificate the LOTL lists for that country, and
+say it is that country's. The signature must cover the whole list: exactly one signature,
+a child of the root, referencing the whole document and nothing outside its own XAdES
+properties — the checks that stop "signature wrapping", where a valid signature over one
+part of a document stands beside different content that a reader believes. Lists are
+parsed with no DTDs, no entities and no network. xmlsec1 does the XML-signature
+cryptography; for RSA-PSS, which Germany uses and xmlsec1 1.2 does not know, xmlsec1 still
+checks every reference and Leht checks the signature value with OpenSSL.
+
+### What "qualified" is decided from
+
+For a signature, at its trusted time (the timestamp's, when valid):
+
+- the certificate was issued by a CA on a list as *CA/QC*, with status *granted* then;
+- it is qualified — its QcCompliance statement says so, or the list's *QCStatement*
+  qualifier does, and the list does not say *NotQualified*;
+- it is for signatures (QcType *esign*, the list's *QCForESig*, or a CA that issues only
+  for signatures), or for seals;
+- its key is on a QSCD — the list's *QCWithQSCD*, or the certificate's QcSSCD statement
+  when the list does not say *QCNoQSCD*.
+
+A list's qualifier applies only to the certificates its criteria select — key usage and
+certificate policies, as Estonia's use. A criterion Leht cannot check means the qualifier
+is **not** applied, never guessed at.
+
+What this is not: the full ETSI TS 119 172-4 validation policies, trust frameworks outside
+the EU, the PDF-only lists a few countries also publish, or the revocation of the lists'
+own signing certificates.
+
 ## The visible mark that is not a signature
 
 `leht annotate --stamp-image P:IMAGE:X0,Y0,X1,Y1`, and in the viewer an image or drawn mark
@@ -377,7 +456,7 @@ Our own code agreeing with itself proves little about a format this old, so:
 
 ## In the viewer
 
-The **Sign** tool drags a box for a visible signature; *More → Sign Invisibly…* skips the
+The **Sign** tool drags a box for a visible signature; *Sign → Sign Invisibly…* skips the
 box. The dialog takes the `.p12` and its password — or a key on an ID card and its PIN,
 listed from the cards in the readers — what the signature should show — the
 name and date, an image, or a signature **drawn** on a small canvas — the reason and
@@ -393,11 +472,19 @@ The Signatures panel gives each signature one line — *Valid*, *Intact, signer 
 afterwards*, *Broken* — and the details under it: signer, issuer, trust, revocation,
 algorithm, claimed time, timestamp, reason, location and the certificate's SHA-256
 fingerprint. A document timestamp has its own line, with the time it proves and its
-authority.
+authority. The Signatures panel is a tab in the left sidebar.
+
+With the EU trusted lists, each signature also gets a *Qualified* line — *qualified
+electronic signature (QES)*, *qualified electronic seal*, *advanced, with a qualified
+certificate*, or *not qualified* with the reason — a qualified timestamp says so, and the
+banner says *Qualified electronic signature* when every signature is one. *Sign → Update EU
+Trusted Lists…* fetches them, after asking: the viewer only moves the bytes, and a
+sandboxed `leht-worker --trusted-list` reads and verifies the XML. The lists are cached
+where the CLI keeps them, so either one's update serves both; the banner mentions it when
+they are overdue.
 
 ## Not yet
 
 - **Smart-ID and Mobile-ID**, the Estonian signing apps. The `Identity` behind a card key
   is "a certificate plus something that signs a hash", which is what those services are
   too.
-- **The EU Trusted List**, which is what "qualified" means in practice.
