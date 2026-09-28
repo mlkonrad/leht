@@ -47,6 +47,13 @@ public slots:
     void compress(QString input, QString password, QString output, int preset, int quality,
                   bool linearize);
 
+    /// What each Reduce File Size preset would make of `input`, without
+    /// writing anything: the presets are run in turn into memory, the one the
+    /// dialog starts on first, and each result is reported by estimated().
+    /// Quiet: it never emits finished(), failed() or passwordRequired(). A
+    /// password-protected file (without `password`) gets no estimate.
+    void estimate(QString input, QString password);
+
     /// Writes the pages `ranges[i]` of `input` to `outputs[i]`, one file each.
     void split(QString input, QString password, QStringList ranges, QStringList outputs);
 
@@ -65,6 +72,8 @@ signals:
     /// `input` is encrypted: ask for its password and run the job again with
     /// it. `wrong` when the one given did not unlock it.
     void passwordRequired(bool wrong);
+    /// From estimate(): preset `preset` would write `bytes` (-1: no estimate).
+    void estimated(int preset, qint64 bytes);
 
 private:
     /// A fresh, handshaken worker; nullptr after emitting failed().

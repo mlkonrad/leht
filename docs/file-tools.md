@@ -22,7 +22,10 @@ calls, and a worker test compares the two.
   smallest, they are Lossless, Print (about 300 dpi), Ebook (about 150 dpi) and Screen
   (about 72 dpi). It writes a copy under another name. If the copy would not be smaller,
   nothing is written and the dialog says so: a tool called Reduce must never hand back a
-  bigger file.
+  bigger file. While the dialog is open, each preset shows the size it would give ("about
+  2.1 MB (−64%)", or "no smaller"). These estimates come from running the presets in turn,
+  starting with the one selected, in a worker of their own and into memory. Nothing is
+  written, and closing the dialog stops them. A password-protected file gets no estimate.
 - **Split Document** writes every N pages to a file, or one file per group of page ranges
   (`1-3; 4-10; 11-`). The files go into a chosen folder as `name-01.pdf`, `name-02.pdf`,
   and so on, zero-padded so they sort.
@@ -79,7 +82,6 @@ job leaves no half-written file. A split commits each part as it is written, as
 
 ## Not yet
 
-- Thumbnails and per-file page ranges in Combine, and a size estimate before Reduce runs.
-  These are in the UX plan.
+- Thumbnails and per-file page ranges in Combine. These are in the UX plan.
 - Choosing JPEG quality or the image-size limit in the viewer. The CLI has `-q`, and the
   protocol carries both.

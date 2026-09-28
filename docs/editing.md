@@ -155,6 +155,20 @@ document is open (see Saving). Form widgets are not listed as annotations: forms
   readers show.
 - `--flatten` bakes fields into the page content, and they can no longer be edited.
 
+**In the viewer**, the **Form** tab lists every field as a labelled editor, in reading order
+(page, then top to bottom), so Tab and Shift+Tab walk the form the way the eye does. Text is
+sent when you leave the field and a choice when you make it: one Undo step per field. On the
+page the fields have a light blue wash (required ones a thin red frame), and the field being
+filled in is framed and scrolled into view. Clicking a field on the page, with the Select
+tool, puts the keyboard in its editor. "Show fields on the page" turns the wash off.
+Required fields are marked `*`. One left empty says so when you leave it, and the tab's
+summary counts those still empty. Text boxes keep to the field's maximum length as you type.
+**Sign → Flatten Form…** (also a button at the bottom of the tab) is `--flatten`, as an edit:
+Undo brings the fields back until the document is closed. It asks first, names any required
+fields still empty, and warns that it breaks existing signatures. A certified document never
+allows it. Only the first widget of a field is outlined on the page, so a radio group shows
+where its first button is.
+
 ### MuPDF gap: button values stored as strings
 
 MuPDF 1.28 stores a checkbox's or radio group's `/V` as a string (`(Yes)`). The spec

@@ -41,6 +41,16 @@ public:
     /// Areas marked for redaction and not yet applied, drawn as proposals:
     /// outlined, not blacked out, so what they cover can still be read.
     void setRedactionMarks(const QVector<QPair<int, QRectF>>& marks);
+    /// The document's form fields, outlined on their pages while shown, so
+    /// the reader sees where to type; a click on one asks for it in the Form
+    /// panel (fieldClicked).
+    void setFormFields(const QVector<FieldRow>& fields);
+    void setFieldsShown(bool shown);
+    [[nodiscard]] bool fieldsShown() const { return fieldsShown_; }
+    /// The field being filled in: drawn stronger, and scrolled into view if it
+    /// is off screen. Empty for none.
+    void setCurrentField(const QString& name);
+    [[nodiscard]] QString currentField() const { return currentField_; }
     /// The colour the Text Box tool types new text in.
     void setNewTextColor(const QColor& color) { newTextColor_ = color; }
 
@@ -160,6 +170,8 @@ signals:
     void noteEditRequested(int annotId, QString current);
     /// A box was dragged with the Crop tool: the part of the page to keep.
     void cropBoxRequested(int page, QRectF box);
+    /// A form field was clicked with the Select tool.
+    void fieldClicked(QString name);
     /// A tool could not be used, with the reason, for the status bar.
     void toolRefused(QString reason);
 
@@ -263,6 +275,10 @@ private:
     int editorAnnot_ = 0;  ///< 0 while typing new free text
     QString editorOriginal_;
     QVector<QPair<int, QRectF>> redactionMarks_;
+    QVector<FieldRow> fields_;
+    bool fieldsShown_ = true;
+    QString currentField_;
+    [[nodiscard]] const FieldRow* fieldAt(int page, QPointF base) const;
     QColor newTextColor_ = Qt::black;
     /// Highlight, Underline and Strike-out act on a text selection.
     [[nodiscard]] bool markupTool() const {

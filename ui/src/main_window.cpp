@@ -15,6 +15,7 @@
 #include "page_dialogs.hpp"
 #include "file_tools.hpp"
 #include "file_tools_dialogs.hpp"
+#include "form_panel.hpp"
 #include "properties_dialog.hpp"
 #include "protect_dialog.hpp"
 #include "first_run_hints.hpp"
@@ -40,6 +41,7 @@
 #include <QMenuBar>
 #include <QInputDialog>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QHeaderView>
 #include <QShortcut>
@@ -800,6 +802,32 @@ void MainWindow::buildEditActions() {
             statusBar()->showMessage(tr("Checking revocation online…"));
             onWorker([](RenderWorker* w) { w->checkRevocationOnline(); });
         });
+    add({.id = QStringLiteral("flattenForm"), .text = tr("&Flatten Form…"), .icon = QStringLiteral("file-text"),
+         .tip = tr("Make the filled-in values part of the page, so they can no longer be changed"),
+         .certNeeds = 4,
+         .enabledWhen = [this] { return pageCount_ > 0 && form_->count() > 0 && certAllows(4); },
+         .group = sign},
+        [this] {
+            QString text = tr("The form's fields become part of the pages: what they show now stays, "
+                              "but nobody can change it any more, in Leht or elsewhere.\n\nUndo brings "
+                              "the fields back until the document is closed.");
+            if (const QStringList empty = form_->emptyRequired(); !empty.isEmpty()) {
+                QStringList labels;
+                for (const QString& name : empty) {
+                    labels << FormPanel::fieldLabel(name);
+                }
+                text += QStringLiteral("\n\n") +
+                        tr("Still empty, though required: %1.").arg(QLocale().createSeparatedList(labels));
+            }
+            if (QMessageBox::question(this, tr("Flatten the form?"), text,
+                                      QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) !=
+                QMessageBox::Yes) {
+                return;
+            }
+            if (confirmBreakingSignatures(tr("Flattening the form"))) {
+                onWorker([](RenderWorker* w) { w->flattenForm(); });
+            }
+        });
     add({.id = QStringLiteral("updateTrustedList"), .text = tr("Update EU Trusted &Lists…"),
          .icon = QStringLiteral("badge-check"),
          .tip = tr("Fetch and verify the EU trusted lists, which make qualified CAs and timestamp "
@@ -1162,8 +1190,8 @@ void MainWindow::applyCertification(int level) {
     }
     actions_->refresh();
     // Filling fields is the one change level 2 and 3 allow and 1 does not.
-    if (fields_ != nullptr) {
-        fields_->setEnabled(level != 1);
+    if (form_ != nullptr) {
+        form_->setEditable(level != 1);
     }
     if (comments_ != nullptr) {
         comments_->setEditable(certAllows(3));
@@ -1323,42 +1351,9 @@ void MainWindow::updateTitle() {
 }
 
 void MainWindow::onFieldsReady(const QVector<FieldRow>& rows) {
-    populatingFields_ = true;
-    fields_->setRowCount(0);
-    fields_->setRowCount(static_cast<int>(rows.size()));
-    for (int i = 0; i < rows.size(); ++i) {
-        const FieldRow& f = rows[i];
-        auto* name = new QTableWidgetItem(f.name);
-        name->setFlags(Qt::ItemIsEnabled);
-        fields_->setItem(i, 0, name);
-        auto* value = new QTableWidgetItem(f.value);
-        if (f.readOnly) {
-            value->setFlags(Qt::ItemIsEnabled);
-            value->setToolTip(tr("Read-only field"));
-        }
-        fields_->setItem(i, 1, value);
-
-        // Fields with a fixed set of values get a drop-down.
-        const auto type = static_cast<leht::ops::FieldType>(f.type);
-        const bool button =
-            type == leht::ops::FieldType::Checkbox || type == leht::ops::FieldType::Radio;
-        if ((button || type == leht::ops::FieldType::Choice) && !f.readOnly) {
-            auto* combo = new QComboBox(fields_);
-            QStringList choices = f.options;
-            if (button) {
-                choices.push_back(QStringLiteral("Off"));
-            }
-            combo->addItems(choices);
-            combo->setCurrentText(f.value);
-            const QString fieldName = f.name;
-            connect(combo, &QComboBox::activated, this, [this, combo, fieldName] {
-                const QString v = combo->currentText();
-                onWorker([=](RenderWorker* w) { w->setFieldValue(fieldName, v); });
-            });
-            fields_->setCellWidget(i, 1, combo);
-        }
-    }
-    populatingFields_ = false;
+    form_->setFields(rows);
+    view_->setFormFields(rows);
+    actions_->refresh();  // Flatten Form follows whether there are fields
     sidebar_->setPanelAvailable(QStringLiteral("form"), !rows.isEmpty());
     // A form opens on its fields, once: after that the sidebar is the user's.
     if (!rows.isEmpty() && !std::exchange(formShown_, true)) {

@@ -20,6 +20,7 @@
 #include "sidebar.hpp"
 #include "color_swatches.hpp"
 #include "first_run_hints.hpp"
+#include "form_panel.hpp"
 #include "signature_cards.hpp"
 #include "welcome_view.hpp"
 #include <QKeyEvent>
@@ -38,6 +39,7 @@
 #include <QScrollBar>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QSet>
 #include <QStringList>
 
@@ -868,6 +870,24 @@ int main(int argc, char** argv) {
         check(QFile::exists(reduceTo) && QFileInfo(reduceTo).size() < QFileInfo(heavy).size(),
               "and the copy is smaller than the original");
 
+        // The dialog's estimate: every preset reported, nothing written, and
+        // the smallest setting smaller than the scans.
+        {
+            QHash<int, qint64> sizes;
+            const auto estimates = QObject::connect(tools, &FileTools::estimated, &window,
+                                                    [&sizes](int preset, qint64 bytes) { sizes.insert(preset, bytes); });
+            QMetaObject::invokeMethod(tools, [tools, heavy] { tools->estimate(heavy, QString()); },
+                                      Qt::QueuedConnection);
+            QElapsedTimer waited;
+            waited.start();
+            while (sizes.size() < 4 && waited.elapsed() < 30000) {
+                pump(100);
+            }
+            QObject::disconnect(estimates);
+            check(sizes.size() == 4 && sizes.value(3) > 0 && sizes.value(3) < QFileInfo(heavy).size(),
+                  "Reduce File Size estimates each setting before writing anything");
+        }
+
         // A text-only file cannot get smaller at the lossless setting: nothing
         // is written, and the user is told so.
         const QString same = tmp.filePath(QStringLiteral("same.pdf"));
@@ -1693,13 +1713,33 @@ int main(int argc, char** argv) {
         if (QFile::copy(QStringLiteral(LEHT_CORPUS_DIR "/form.pdf"), form)) {
             window.openPath(form);
             pump(1500);
-            auto* table = window.findChild<QTableWidget*>();
-            check(table != nullptr && table->rowCount() == 2, "the form panel lists two fields");
-            QMetaObject::invokeMethod(worker, "setFieldValue", Qt::QueuedConnection,
-                                      Q_ARG(QString, QStringLiteral("name")),
-                                      Q_ARG(QString, QStringLiteral("Marlon")));
+            auto* formPanel = window.findChild<FormPanel*>(QStringLiteral("formPanel"));
+            check(formPanel != nullptr && formPanel->count() == 2, "the form panel lists two fields");
+            auto* view = window.findChild<PageView*>();
+            check(view != nullptr && view->fieldsShown(), "the fields are outlined on the page");
+            QLineEdit* nameEdit = nullptr;
+            if (formPanel != nullptr) {
+                for (QLineEdit* e : formPanel->findChildren<QLineEdit*>()) {
+                    if (e->accessibleName() == QStringLiteral("Name")) {
+                        nameEdit = e;
+                    }
+                }
+            }
+            check(nameEdit != nullptr && nameEdit->maxLength() == 20,
+                  "the name field is a text box that keeps to its 20 characters");
+            if (nameEdit != nullptr) {
+                formPanel->focusField(QStringLiteral("name"));
+                pump(50);
+                check(view != nullptr && view->currentField() == QStringLiteral("name"),
+                      "the field being filled in is framed on the page");
+                nameEdit->setText(QStringLiteral("Marlon"));
+                emit nameEdit->editingFinished();
+            }
             pump(1200);
             check(window.isModified(), "filling a field marks the document modified");
+            check(nameEdit != nullptr && nameEdit->text() == QStringLiteral("Marlon"),
+                  "the worker's new list leaves the typed value in place");
+            shot(&window, "ux-form-panel");
             (void)window.save();
             pump(2000);
             leht::Document saved = leht::Document::open(ctx, form.toStdString());
@@ -1708,6 +1748,36 @@ int main(int argc, char** argv) {
                 filled = filled || (f.name == "name" && f.value == "Marlon");
             }
             check(filled, "the filled value is in the saved file");
+
+            // Flatten: one confirmation, no fields left, and Undo brings them back.
+            auto* flatten = window.findChild<QAction*>(QStringLiteral("flattenForm"));
+            check(flatten != nullptr && flatten->isEnabled(), "Flatten Form is offered for a form");
+            QTimer yes;
+            QObject::connect(&yes, &QTimer::timeout, [] {
+                if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                    if (QAbstractButton* b = box->button(QMessageBox::Yes)) {
+                        b->click();
+                    } else {
+                        box->accept();
+                    }
+                }
+            });
+            yes.start(50);
+            if (flatten != nullptr) {
+                flatten->trigger();
+            }
+            pump(1500);
+            yes.stop();
+            check(formPanel != nullptr && formPanel->count() == 0 && flatten != nullptr && !flatten->isEnabled(),
+                  "flattening leaves no fields to fill");
+            auto* undo = window.findChild<QAction*>(QStringLiteral("undo"));
+            if (undo != nullptr) {
+                undo->trigger();
+            }
+            pump(1500);
+            check(formPanel != nullptr && formPanel->count() == 2, "Undo brings the fields back");
+            (void)window.save();  // whatever Undo left counts as saved: the next open asks nothing
+            pump(1500);
         } else {
             std::printf("  skip  forms (tests/corpus/form.pdf not generated)\n");
         }

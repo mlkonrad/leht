@@ -836,6 +836,12 @@ void RenderWorker::deleteAnnotation(int id) {
     applyEdit(e);
 }
 
+void RenderWorker::flattenForm() {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::FlattenForm;
+    applyEdit(e);
+}
+
 void RenderWorker::setFieldValue(QString name, QString value) {
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::SetField;
@@ -2014,7 +2020,9 @@ void RenderWorker::listFields() {
                 }
                 rows.push_back(FieldRow{QString::fromStdString(f.name), static_cast<int>(f.type),
                                         QString::fromStdString(f.value), options, f.page,
-                                        f.read_only});
+                                        f.read_only,
+                                        QRectF(QPointF(f.rect.x0, f.rect.y0), QPointF(f.rect.x1, f.rect.y1)),
+                                        f.required, f.max_length});
             }
         } else if (reply) {
             (void)ipc::decode_as<ipc::Failed>(*reply);  // not a PDF, or XFA: no fields

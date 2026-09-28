@@ -7,6 +7,7 @@
 #include "actions.hpp"
 #include "color_swatches.hpp"
 #include "comments_panel.hpp"
+#include "form_panel.hpp"
 #include "first_run_hints.hpp"
 #include "export_dialog.hpp"
 #include "file_tools.hpp"
@@ -155,25 +156,29 @@ void MainWindow::buildLayout() {
         }
     });
 
-    // Form panel: one row per field, the value editable in place.
-    fields_ = new QTableWidget(0, 2, sidebar_);
-    fields_->setObjectName(QStringLiteral("formFields"));
-    fields_->setHorizontalHeaderLabels({tr("Field"), tr("Value")});
-    fields_->horizontalHeader()->setStretchLastSection(true);
-    fields_->verticalHeader()->hide();
-    connect(fields_, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* item) {
-        if (populatingFields_ || item->column() != 1) {
-            return;
-        }
-        const QString name = fields_->item(item->row(), 0)->text();
-        const QString value = item->text();
+    // Form panel: one labelled editor per field, in reading order. The page
+    // outlines the fields; a click on one goes to its editor, and the editor
+    // being typed in frames its field on the page.
+    form_ = new FormPanel(sidebar_);
+    connect(form_, &FormPanel::valueEdited, this, [this](const QString& name, const QString& value) {
         onWorker([=](RenderWorker* w) { w->setFieldValue(name, value); });
+    });
+    connect(form_, &FormPanel::currentFieldChanged, view_, &PageView::setCurrentField);
+    connect(form_, &FormPanel::highlightChanged, view_, &PageView::setFieldsShown);
+    connect(form_, &FormPanel::flattenRequested, this, [this] {
+        if (QAction* flatten = actions_->find(QStringLiteral("flattenForm")); flatten != nullptr && flatten->isEnabled()) {
+            flatten->trigger();
+        }
+    });
+    connect(view_, &PageView::fieldClicked, this, [this](const QString& name) {
+        sidebar_->showPanel(QStringLiteral("form"));
+        form_->focusField(name);
     });
 
     sidebar_->addPanel(QStringLiteral("pages"), QStringLiteral("files"), tr("Pages"), thumbnails_);
     sidebar_->addPanel(QStringLiteral("outline"), QStringLiteral("list-tree"), tr("Outline"), outlineTree_);
     sidebar_->addPanel(QStringLiteral("comments"), QStringLiteral("message-square"), tr("Comments"), comments_);
-    sidebar_->addPanel(QStringLiteral("form"), QStringLiteral("text-cursor-input"), tr("Form"), fields_);
+    sidebar_->addPanel(QStringLiteral("form"), QStringLiteral("text-cursor-input"), tr("Form"), form_);
     sidebar_->addPanel(QStringLiteral("signatures"), QStringLiteral("signature"), tr("Signatures"),
                        signaturePanel_);
     for (const char* panel : {"outline", "form", "signatures"}) {
@@ -392,7 +397,7 @@ void MainWindow::buildMenus() {
         {tr("&Comment"), ids({"toolHighlight", "toolUnderline", "toolStrike", "toolNote", "toolText",
                               "toolDraw", "toolStamp", "-", "toolMove", "toolErase"})},
         {tr("&Sign"), ids({"toolSign", "signInvisibly", "-", "addLongTermValidation", "checkRevocation", "-",
-                           "updateTrustedList", "trustedCertificates"})},
+                           "flattenForm", "-", "updateTrustedList", "trustedCertificates"})},
         {tr("&Tools"), ids({"recognizeText", "-", "toolRedact", "applyRedactions", "clearRedactionMarks",
                             "redactText"})},
         {tr("&Help"), ids({"shortcuts", "-", "about"})},
@@ -474,9 +479,7 @@ void MainWindow::closeDocument() {
     outlineTree_->clear();
     comments_->setAnnotations({});
     signatures_->clear();
-    populatingFields_ = true;
-    fields_->setRowCount(0);
-    populatingFields_ = false;
+    form_->setFields({});
     for (const char* panel : {"outline", "form", "signatures"}) {
         sidebar_->setPanelAvailable(QLatin1String(panel), false);
     }

@@ -16,6 +16,7 @@
 class ActionRegistry;
 class ColorSwatches;
 class CommentsPanel;
+class FormPanel;
 class ModeBar;
 class PageGrid;
 class PageView;
@@ -227,13 +228,12 @@ private:
     QAction* undoAction_ = nullptr;
     QAction* redoAction_ = nullptr;
     QActionGroup* tools_ = nullptr;
-    QTableWidget* fields_ = nullptr;
+    FormPanel* form_ = nullptr;
     QTreeWidget* signatures_ = nullptr;
     QToolBar* signatureBanner_ = nullptr;
     QLabel* signatureBannerLabel_ = nullptr;
     QLabel* signatureBannerIcon_ = nullptr;
     int signatureCount_ = 0;
-    bool populatingFields_ = false;
     std::function<void()> afterSave_;  ///< what an unsaved-changes prompt was waiting for
 
     // Structure (see the class comment).

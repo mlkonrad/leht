@@ -12,6 +12,7 @@
 #include <QLocale>
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -241,6 +242,79 @@ void FileTools::compress(QString input, QString password, QString output, int pr
                       .arg(sizeText(before), sizeText(result.bytes))
                       .arg(saved),
                   {output});
+}
+
+void FileTools::estimate(QString input, QString password) {
+    cancel_ = false;
+    bool reported[4] = {};
+    const auto report = [this, &reported](int preset, qint64 bytes) {
+        reported[preset] = true;
+        emit estimated(preset, bytes);
+    };
+    const auto giveUp = [&] {  // every preset not yet reported: no estimate
+        for (int preset = 0; preset < 4; ++preset) {
+            if (!reported[preset]) {
+                report(preset, -1);
+            }
+        }
+    };
+    std::unique_ptr<ipc::WorkerProcess> w;
+    try {
+        w = ipc::WorkerProcess::spawn(workerPath().toStdString());
+        w->handshake();
+    } catch (const std::exception&) {
+        giveUp();
+        return;
+    }
+    // Compression closes the document it rewrote: open it afresh each time.
+    for (const int preset : {2, 1, 3, 0}) {
+        if (cancel_.exchange(false)) {
+            return;
+        }
+        const Input in(input);
+        if (in.fd() < 0) {
+            giveUp();
+            return;
+        }
+        QString error;
+        auto reply = request(*w, ipc::Open{QFileInfo(input).fileName().toStdString()}, in.fd(), error);
+        if (reply && reply->type == ipc::MsgType::NeedsPassword && !password.isEmpty()) {
+            reply = request(*w, ipc::Authenticate{password.toStdString()}, -1, error);
+        }
+        if (!reply || reply->type != ipc::MsgType::Opened) {
+            giveUp();
+            return;
+        }
+        try {
+            (void)w->channel().recv(requestTimeout());  // the outline
+        } catch (const std::exception&) {
+            giveUp();
+            return;
+        }
+        const int sink = ::memfd_create("leht-estimate", MFD_CLOEXEC);
+        if (sink < 0) {
+            giveUp();
+            return;
+        }
+        ipc::Compress msg;
+        msg.preset = static_cast<std::uint8_t>(preset);
+        reply = request(*w, msg, sink, error);
+        ::close(sink);
+        if (!reply) {
+            report(preset, -1);
+            if (w->try_wait().has_value()) {
+                giveUp();  // stopped (request() kills it on anything but a refusal)
+                return;
+            }
+            continue;
+        }
+        try {
+            report(preset, static_cast<qint64>(ipc::decode_as<ipc::Compressed>(*reply).bytes));
+        } catch (const std::exception&) {
+            giveUp();
+            return;
+        }
+    }
 }
 
 void FileTools::protect(QString input, QString password, QString output, bool lock,

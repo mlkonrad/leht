@@ -5,6 +5,7 @@
 #include <QString>
 #include <QStringList>
 
+class FileTools;
 class QCheckBox;
 class QLabel;
 class QLineEdit;
@@ -53,7 +54,10 @@ class ReduceDialog : public QDialog {
 
 public:
     /// `signedDocument`: warn that the copy will not carry the signatures.
-    ReduceDialog(QWidget* parent, const QString& input, bool signedDocument);
+    /// With `tools`, each preset shows the size it would give (FileTools::
+    /// estimate, on its thread); closing the dialog stops the estimate.
+    ReduceDialog(QWidget* parent, const QString& input, bool signedDocument, FileTools* tools = nullptr);
+    void done(int result) override;
 
     /// An ops::CompressPreset.
     [[nodiscard]] int preset() const;
@@ -65,6 +69,8 @@ private:
 
     QString input_;
     QRadioButton* presets_[4] = {};
+    QLabel* estimates_[4] = {};
+    FileTools* tools_ = nullptr;
     QLineEdit* output_ = nullptr;
     QLabel* problem_ = nullptr;
     QPushButton* ok_ = nullptr;

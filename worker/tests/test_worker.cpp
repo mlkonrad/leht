@@ -644,6 +644,13 @@ void forms_through_the_worker() {
     CHECK(next(*w).type == MsgType::Failed);
     w->channel().send(913, ListFields{});
     CHECK(next(*w).type == MsgType::FieldList);
+
+    // Flattening keeps what the fields show and leaves no fields behind.
+    Edit flat;
+    flat.kind = Edit::Kind::FlattenForm;
+    CHECK(edit_ok(*w, flat).all_pages);
+    w->channel().send(914, ListFields{});
+    CHECK(decode_as<FieldList>(next(*w)).items.empty());
 }
 
 void replay_is_deterministic() {

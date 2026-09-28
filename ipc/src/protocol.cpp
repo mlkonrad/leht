@@ -604,13 +604,15 @@ void Edit::encode(Writer& w) const {
         w.str(name);
         w.str(text);
         break;
+    case Kind::FlattenForm:
+        break;
     }
 }
 
 Edit Edit::decode(Reader& r) {
     Edit m;
     const std::uint8_t kind = r.u8();
-    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::SetInfo)) {
+    if (kind < 1 || kind > static_cast<std::uint8_t>(Kind::FlattenForm)) {
         throw ProtocolError("unknown edit kind");
     }
     m.kind = static_cast<Kind>(kind);
@@ -729,6 +731,8 @@ Edit Edit::decode(Reader& r) {
     case Kind::SetInfo:
         m.name = r.str(16);  // "Keywords" is the longest
         m.text = r.str(32768);
+        break;
+    case Kind::FlattenForm:
         break;
     }
     return m;

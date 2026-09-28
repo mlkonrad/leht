@@ -916,6 +916,9 @@ void test_file_tools() {
     title.text = "Üürileping";
     const Edit title2 = round_trip(title);
     CHECK(title2.name == "Title" && title2.text == "Üürileping");
+    Edit flat;
+    flat.kind = Edit::Kind::FlattenForm;
+    CHECK(round_trip(flat).kind == Edit::Kind::FlattenForm);
 
     Protect lock;
     lock.user_password = "salajane";

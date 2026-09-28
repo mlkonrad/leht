@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "page_view.hpp"
 
+#include "leht/ops/forms.hpp"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QKeyEvent>
@@ -39,6 +41,8 @@ void PageView::setPages(const QVector<QSize>& baseSizes) {
 
 void PageView::clear() {
     redactionMarks_.clear();
+    fields_.clear();
+    currentField_.clear();
     cancelEditor();
     selectedAnnot_ = 0;
     grip_ = Grip::None;
@@ -54,6 +58,53 @@ void PageView::clear() {
 void PageView::setRedactionMarks(const QVector<QPair<int, QRectF>>& marks) {
     redactionMarks_ = marks;
     viewport()->update();
+}
+
+void PageView::setFormFields(const QVector<FieldRow>& fields) {
+    fields_.clear();
+    for (const FieldRow& f : fields) {
+        // A button does nothing here and a signature field has its own tool;
+        // a field without a widget box has nowhere to be drawn.
+        const auto type = static_cast<leht::ops::FieldType>(f.type);
+        if (type != leht::ops::FieldType::PushButton && type != leht::ops::FieldType::Signature &&
+            type != leht::ops::FieldType::Unknown && !f.rect.isEmpty()) {
+            fields_.push_back(f);
+        }
+    }
+    viewport()->update();
+}
+
+void PageView::setFieldsShown(bool shown) {
+    fieldsShown_ = shown;
+    viewport()->update();
+}
+
+void PageView::setCurrentField(const QString& name) {
+    currentField_ = name;
+    const auto it = std::find_if(fields_.cbegin(), fields_.cend(),
+                                 [&](const FieldRow& f) { return f.name == name; });
+    if (it != fields_.cend() && it->page < baseSizes_.size()) {
+        const QRectF shown = baseRectToViewport(it->page, it->rect);
+        if (!viewport()->rect().contains(shown.toAlignedRect())) {
+            // A third of the way down, as a find match is.
+            const int y = pageTop(it->page) + int(it->rect.center().y() * zoom_) - viewport()->height() / 3;
+            verticalScrollBar()->setValue(std::clamp(y, 0, verticalScrollBar()->maximum()));
+            requestVisible();
+        }
+    }
+    viewport()->update();
+}
+
+const FieldRow* PageView::fieldAt(int page, QPointF base) const {
+    if (!fieldsShown_) {
+        return nullptr;
+    }
+    for (const FieldRow& f : fields_) {
+        if (f.page == page && f.rect.contains(base)) {
+            return &f;
+        }
+    }
+    return nullptr;
 }
 
 void PageView::forgetPages() {
@@ -800,6 +851,11 @@ void PageView::mousePressEvent(QMouseEvent* event) {
         emit stampRequested(page, base);
         return;
     case Tool::Select:
+        if (const FieldRow* f = fieldAt(page, base)) {
+            emit fieldClicked(f->name);
+            return;
+        }
+        break;
     case Tool::Highlight:
     case Tool::Underline:
     case Tool::StrikeOut:
@@ -1089,6 +1145,25 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
             }
             painter.setPen(QPen(QColor(40, 40, 40), 1, Qt::DashLine));
             painter.drawRect(box);
+        }
+        // Form fields: a light wash says where to type; the one being
+        // filled in gets a frame.
+        if (fieldsShown_) {
+            for (const FieldRow& f : fields_) {
+                if (f.page != p) {
+                    continue;
+                }
+                const QRectF box = baseRectToViewport(p, f.rect);
+                const bool current = f.name == currentField_;
+                painter.fillRect(box, f.readOnly ? QColor(128, 128, 128, 30) : QColor(40, 110, 230, current ? 45 : 28));
+                if (current) {
+                    painter.setPen(QPen(QColor(40, 110, 230), 2));
+                    painter.drawRect(box.adjusted(-1, -1, 1, 1));
+                } else if (f.required && !f.readOnly) {
+                    painter.setPen(QPen(QColor(200, 60, 40, 160), 1));
+                    painter.drawRect(box);
+                }
+            }
         }
         // Marked for redaction, not yet applied: a red frame over a light
         // wash, so the reader still sees what would go.

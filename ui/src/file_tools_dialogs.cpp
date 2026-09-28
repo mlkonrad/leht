@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "file_tools_dialogs.hpp"
 
+#include "file_tools.hpp"
+
 #include "leht/error.hpp"
 #include "leht/ops/pages.hpp"
 
@@ -9,6 +11,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -177,8 +180,8 @@ void CombineDialog::chooseOutputAndAccept() {
 
 // --- Reduce File Size ------------------------------------------------------------
 
-ReduceDialog::ReduceDialog(QWidget* parent, const QString& input, bool signedDocument)
-    : QDialog(parent), input_(input) {
+ReduceDialog::ReduceDialog(QWidget* parent, const QString& input, bool signedDocument, FileTools* tools)
+    : QDialog(parent), input_(input), tools_(tools) {
     setWindowTitle(tr("Reduce file size"));
     auto* layout = new QVBoxLayout(this);
     const QFileInfo info(input);
@@ -195,11 +198,47 @@ ReduceDialog::ReduceDialog(QWidget* parent, const QString& input, bool signedDoc
         tr("Balanced — good for sharing and e-mail (about 150 dpi)"),
         tr("Smallest — for reading on screen (about 72 dpi)"),
     };
+    auto* grid = new QGridLayout;
+    grid->setColumnStretch(0, 1);
     for (int i = 0; i < 4; ++i) {
         presets_[i] = new QRadioButton(labels[i], this);
-        layout->addWidget(presets_[i]);
+        grid->addWidget(presets_[i], i, 0);
+        estimates_[i] = new QLabel(this);
+        estimates_[i]->setObjectName(QStringLiteral("reduceEstimate%1").arg(i));
+        estimates_[i]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        grid->addWidget(estimates_[i], i, 1);
     }
+    layout->addLayout(grid);
     presets_[2]->setChecked(true);
+
+    if (tools_ != nullptr) {
+        const qint64 before = info.size();
+        for (QLabel* l : estimates_) {
+            l->setText(tr("estimating…"));
+            l->setEnabled(false);
+        }
+        // Queued back to this thread; the connection dies with the dialog.
+        connect(tools_, &FileTools::estimated, this, [this, before](int preset, qint64 bytes) {
+            if (preset < 0 || preset > 3) {
+                return;
+            }
+            QLabel* l = estimates_[preset];
+            l->setEnabled(true);
+            if (bytes < 0) {
+                l->setText(QString());
+            } else if (bytes >= before) {
+                l->setText(tr("no smaller"));
+                l->setEnabled(false);
+            } else {
+                const int saved = static_cast<int>(100.0 - 100.0 * static_cast<double>(bytes) /
+                                                               static_cast<double>(before));
+                l->setText(tr("about %1 (−%2%)").arg(QLocale().formattedDataSize(bytes)).arg(saved));
+            }
+        });
+        FileTools* t = tools_;
+        const QString path = input;
+        QMetaObject::invokeMethod(tools_, [t, path] { t->estimate(path, QString()); }, Qt::QueuedConnection);
+    }
 
     auto* where = new QFormLayout;
     auto* row = new QHBoxLayout;
@@ -239,6 +278,15 @@ ReduceDialog::ReduceDialog(QWidget* parent, const QString& input, bool signedDoc
     connect(browse, &QPushButton::clicked, this, &ReduceDialog::browse);
     connect(output_, &QLineEdit::textChanged, this, &ReduceDialog::validate);
     validate();
+}
+
+void ReduceDialog::done(int result) {
+    // Before the dialog's caller queues the real job, never after: a late
+    // cancel would stop that job instead of the estimate.
+    if (tools_ != nullptr) {
+        tools_->cancel();  // thread-safe; the estimate stops after its current preset
+    }
+    QDialog::done(result);
 }
 
 int ReduceDialog::preset() const {

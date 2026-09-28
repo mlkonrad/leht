@@ -12,6 +12,7 @@ qt_add_library(leht_viewer_lib STATIC
     src/file_tools.cpp
     src/file_tools_dialogs.cpp
     src/first_run_hints.cpp
+    src/form_panel.cpp
     src/icons.cpp
     src/main_window.cpp
     src/main_window_layout.cpp

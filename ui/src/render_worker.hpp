@@ -139,6 +139,8 @@ public slots:
     void redactText(QString needle);
     void deleteAnnotation(int id);
     void setFieldValue(QString name, QString value);
+    /// Bakes every form field into its page: shown as filled, no longer editable.
+    void flattenForm();
     /// Moves annotation `id` so its bounds become `to` (see ops::move_annotation).
     void moveAnnotation(int id, QRectF to);
     /// Free text written in `box`, at `size` points in `color`.

@@ -504,6 +504,10 @@ void Session::on_edit(std::uint64_t id, const Edit& m) {
     case Edit::Kind::SetInfo:
         ops::set_info(ctx_, *doc_, m.name, m.text);
         break;  // no page changes
+    case Edit::Kind::FlattenForm:
+        (void)ops::flatten(ctx_, *doc_);
+        out.all_pages = true;
+        break;
     case Edit::Kind::InsertBlank:
         if (m.rects.empty()) {
             channel_.send(id, Failed{"no size for the new page"});

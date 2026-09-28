@@ -27,8 +27,8 @@ struct AnnotRow {
     QColor color;            ///< free text: its colour
 };
 
-/// One form field, for the Form panel. `type` is a leht::ops::FieldType cast
-/// to int.
+/// One form field, for the Form panel and the outlines on the page. `type` is
+/// a leht::ops::FieldType cast to int.
 struct FieldRow {
     QString name;
     int type = 0;
@@ -36,6 +36,9 @@ struct FieldRow {
     QStringList options;
     int page = 0;
     bool readOnly = false;
+    QRectF rect;  ///< of the first widget, in base coordinates
+    bool required = false;
+    int maxLength = 0;  ///< text: most characters allowed, 0 = no limit
 };
 
 /// What the Sign dialog collected. The password lives only as long as the
