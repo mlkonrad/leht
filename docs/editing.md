@@ -177,8 +177,10 @@ menu switches to its mode. The tools:
 | Highlight | drag across text; the selection becomes a highlight |
 | Note | click to place a sticky note; double-click one to change its text |
 | Text Box | drag a box (or click) and type on the page; Ctrl+Enter or clicking away writes it, Esc cancels. Clicking existing free text edits it in place; emptying it deletes it |
+| Underline, Strike Out | drag across text, as for Highlight |
 | Draw | freehand ink |
-| Redact Area | drag a box: everything under it is **removed**, as for `leht redact` |
+| Stamp | click, then pick a standard stamp (Approved, Draft, Confidential, …) |
+| Mark for Redaction | drag boxes over what must go; they are drawn as red outlines, and nothing is removed until **Apply Redactions** — then everything under them is **removed**, as for `leht redact`, in one step one Undo takes back. Saving with marks still pending asks whether to apply them first |
 | Erase | click an annotation to delete it; erasable ones are outlined |
 | Crop | drag the box to keep, then choose this page, every page or a range. Hides, like `leht crop --box` |
 

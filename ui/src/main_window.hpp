@@ -71,6 +71,12 @@ public:
     void startTask(const QString& task);
     /// File > Close: back to the welcome view (asks about unsaved edits).
     void closeDocument();
+    /// Areas marked with the Redact tool and not yet applied.
+    [[nodiscard]] int pendingRedactions() const { return static_cast<int>(redactionMarks_.size()); }
+    /// Tools > Apply Redactions: removes everything under the marks, as one
+    /// edit group. Asks first when `confirm`. False if nothing was marked or
+    /// the user called it off.
+    bool applyRedactions(bool confirm = true);
 
 private slots:
     void openDialog();
@@ -217,6 +223,12 @@ private:
     CommentsPanel* comments_ = nullptr;
     QStackedWidget* viewStack_ = nullptr;  ///< the page view, or the page grid
     PageGrid* pageGrid_ = nullptr;
+    QVector<QPair<int, QRectF>> redactionMarks_;
+    void setRedactionMarks(QVector<QPair<int, QRectF>> marks);
+    /// Before a save: false to stop, after asking about marks not yet applied.
+    bool settlePendingRedactions();
+    /// Save As without the questions save() and saveAs() have already asked.
+    bool saveToChosenPath();
     bool rearranged_ = false;
     bool sidebarBeforeGrid_ = true;  ///< whether the sidebar was open before the grid showed  ///< the next documentEdited follows a page rearrangement
     QVector<int> gridSelectionAfterEdit_;  ///< what the grid selects once the edit lands

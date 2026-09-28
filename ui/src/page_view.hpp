@@ -38,6 +38,9 @@ public:
     /// The pages were rearranged (moved, deleted, inserted): every image and
     /// mark is of the wrong page now. Call before the edit's onDocumentEdited.
     void forgetPages();
+    /// Areas marked for redaction and not yet applied, drawn as proposals:
+    /// outlined, not blacked out, so what they cover can still be read.
+    void setRedactionMarks(const QVector<QPair<int, QRectF>>& marks);
 
     [[nodiscard]] double zoom() const { return zoom_; }
     void setZoom(double zoom);
@@ -91,7 +94,7 @@ public:
     // --- Editing tools ------------------------------------------------------
     /// What a left-button drag or click does. Every tool but Select works in
     /// base coordinates, so needs the view unrotated (see setTool).
-    enum class Tool { Select, Highlight, Note, Ink, Redact, Erase, Sign, Move, Text, Crop };
+    enum class Tool { Select, Highlight, Note, Ink, Redact, Erase, Sign, Move, Text, Crop, Underline, StrikeOut, Stamp };
     /// Returns false (and keeps Select) if `tool` needs an unrotated view and
     /// the view is rotated.
     bool setTool(Tool tool);
@@ -135,6 +138,10 @@ signals:
 
     // Editing requests, all in base coordinates on one page.
     void highlightRequested(int page, QVector<QRectF> boxes);
+    /// The Underline or Strike-out tool, over the text `boxes` cover.
+    void markupRequested(int page, QVector<QRectF> boxes, bool strikeOut);
+    /// The Stamp tool, clicked at `at`.
+    void stampRequested(int page, QPointF at);
     void noteRequested(int page, QPointF at);
     void inkRequested(int page, QVector<QPolygonF> strokes);
     void redactRequested(int page, QRectF box);
@@ -253,6 +260,11 @@ private:
     QRectF editorBox_;
     int editorAnnot_ = 0;  ///< 0 while typing new free text
     QString editorOriginal_;
+    QVector<QPair<int, QRectF>> redactionMarks_;
+    /// Highlight, Underline and Strike-out act on a text selection.
+    [[nodiscard]] bool markupTool() const {
+        return tool_ == Tool::Highlight || tool_ == Tool::Underline || tool_ == Tool::StrikeOut;
+    }
     double editorSize_ = 12;
     QColor editorColor_ = Qt::black;
 

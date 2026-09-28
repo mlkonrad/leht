@@ -191,14 +191,16 @@ void MainWindow::buildLayout() {
     };
     modeTools_.insert(QStringLiteral("read"), tools({"copy", "find"}));
     modeTools_.insert(QStringLiteral("comment"),
-                      tools({"toolHighlight", "toolNote", "toolText", "toolDraw", "-", "toolMove", "toolErase"}));
+                      tools({"toolHighlight", "toolUnderline", "toolStrike", "toolNote", "toolText", "toolDraw",
+                             "toolStamp", "-", "toolMove", "toolErase"}));
     modeTools_.insert(QStringLiteral("sign"),
                       tools({"toolSign", "signInvisibly", "-", "addLongTermValidation", "checkRevocation"}));
     modeTools_.insert(QStringLiteral("pages"),
                       tools({"pageGrid", "-", "pageRotateLeft", "pageRotateRight", "-", "pageInsertFile",
                              "pageInsertBlank", "pageExtract", "pageDelete", "-", "toolCrop", "cropMargins",
                              "watermark", "recognizeText"}));
-    modeTools_.insert(QStringLiteral("redact"), tools({"toolRedact", "redactText"}));
+    modeTools_.insert(QStringLiteral("redact"),
+                      tools({"toolRedact", "-", "applyRedactions", "clearRedactionMarks", "-", "redactText"}));
     modes_ = new ModeBar(this);
     modes_->addMode(QStringLiteral("read"), QStringLiteral("book-open"), tr("Read"),
                     tr("Read, search and copy text"), modeTools_.value(QStringLiteral("read")));
@@ -345,11 +347,12 @@ void MainWindow::buildMenus() {
                            "toggleSidebar", "fullScreen"})},
         {tr("&Pages"), ids({"pageRotateLeft", "pageRotateRight", "-", "pageInsertFile", "pageInsertBlank",
                             "pageExtract", "pageDelete", "-", "toolCrop", "cropMargins", "-", "watermark"})},
-        {tr("&Comment"), ids({"toolHighlight", "toolNote", "toolText", "toolDraw", "-", "toolMove",
-                              "toolErase"})},
+        {tr("&Comment"), ids({"toolHighlight", "toolUnderline", "toolStrike", "toolNote", "toolText",
+                              "toolDraw", "toolStamp", "-", "toolMove", "toolErase"})},
         {tr("&Sign"), ids({"toolSign", "signInvisibly", "-", "addLongTermValidation", "checkRevocation", "-",
                            "updateTrustedList", "trustedCertificates"})},
-        {tr("&Tools"), ids({"recognizeText", "-", "toolRedact", "redactText"})},
+        {tr("&Tools"), ids({"recognizeText", "-", "toolRedact", "applyRedactions", "clearRedactionMarks",
+                            "redactText"})},
         {tr("&Help"), ids({"shortcuts", "-", "about"})},
     });
 }
@@ -421,6 +424,7 @@ void MainWindow::closeDocument() {
     pageCount_ = 0;
     signatureCount_ = 0;
     modified_ = false;
+    setRedactionMarks({});
     currentPath_.clear();
     currentTitle_.clear();
     view_->clear();

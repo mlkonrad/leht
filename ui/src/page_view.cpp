@@ -36,6 +36,7 @@ void PageView::setPages(const QVector<QSize>& baseSizes) {
 }
 
 void PageView::clear() {
+    redactionMarks_.clear();
     cancelEditor();
     selectedAnnot_ = 0;
     grip_ = Grip::None;
@@ -48,7 +49,13 @@ void PageView::clear() {
     viewport()->update();
 }
 
+void PageView::setRedactionMarks(const QVector<QPair<int, QRectF>>& marks) {
+    redactionMarks_ = marks;
+    viewport()->update();
+}
+
 void PageView::forgetPages() {
+    redactionMarks_.clear();
     cancelEditor();
     selectedAnnot_ = 0;
     grip_ = Grip::None;
@@ -436,7 +443,11 @@ void PageView::setSelection(int page, const QVector<QRectF>& boxes,
 void PageView::finishHighlight() {
     highlightWhenSettled_ = false;
     if (selectionPage_ >= 0 && !selectionBoxes_.isEmpty()) {
-        emit highlightRequested(selectionPage_, selectionBoxes_);
+        if (tool_ == Tool::Underline || tool_ == Tool::StrikeOut) {
+            emit markupRequested(selectionPage_, selectionBoxes_, tool_ == Tool::StrikeOut);
+        } else {
+            emit highlightRequested(selectionPage_, selectionBoxes_);
+        }
     }
     selectionPage_ = -1;
     selectionBoxes_.clear();
@@ -783,8 +794,13 @@ void PageView::mousePressEvent(QMouseEvent* event) {
         dragStart_ = dragNow_ = base;
         viewport()->update();
         return;
+    case Tool::Stamp:
+        emit stampRequested(page, base);
+        return;
     case Tool::Select:
     case Tool::Highlight:
+    case Tool::Underline:
+    case Tool::StrikeOut:
         break;
     }
     selecting_ = true;
@@ -879,7 +895,7 @@ void PageView::mouseReleaseEvent(QMouseEvent* event) {
         viewport()->update();
         return;
     }
-    if (selecting_ && tool_ == Tool::Highlight) {
+    if (selecting_ && markupTool()) {
         highlightWhenSettled_ = true;
         if (selectsReceived_ == selectsSent_) {
             finishHighlight();  // every reply is already in
@@ -911,12 +927,12 @@ void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
             }
         }
     }
-    if (tool_ != Tool::Select && tool_ != Tool::Highlight) {
+    if (tool_ != Tool::Select && !markupTool()) {
         return;
     }
     // Word select: same point twice, Words mode.
     emitSelect(page, base, base, /*Words=*/1);
-    if (tool_ == Tool::Highlight) {
+    if (markupTool()) {
         highlightWhenSettled_ = true;
     }
 }
@@ -1072,13 +1088,24 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
             painter.setPen(QPen(QColor(40, 40, 40), 1, Qt::DashLine));
             painter.drawRect(box);
         }
+        // Marked for redaction, not yet applied: a red frame over a light
+        // wash, so the reader still sees what would go.
+        for (const auto& [markPage, markBox] : redactionMarks_) {
+            if (markPage != p) {
+                continue;
+            }
+            const QRectF box = baseRectToViewport(p, markBox);
+            painter.fillRect(box, QColor(200, 30, 30, 45));
+            painter.setPen(QPen(QColor(200, 30, 30), 2, Qt::DashLine));
+            painter.drawRect(box);
+        }
         if (dragPage_ == p && (tool_ == Tool::Redact || tool_ == Tool::Sign)) {
             const QRectF box = baseRectToViewport(p, QRectF(dragStart_, dragNow_).normalized());
             const bool signing = tool_ == Tool::Sign;
-            // Redaction is drawn as what it does -- a black box. A signature
-            // box is only a frame: nothing under it is touched.
-            painter.fillRect(box, signing ? QColor(30, 90, 200, 40) : QColor(0, 0, 0, 90));
-            painter.setPen(QPen(signing ? QColor(30, 90, 200) : Qt::black, 1, Qt::DashLine));
+            // A redaction is drawn as the mark it makes (red, to be reviewed
+            // and applied); a signature box is only a frame.
+            painter.fillRect(box, signing ? QColor(30, 90, 200, 40) : QColor(200, 30, 30, 45));
+            painter.setPen(QPen(signing ? QColor(30, 90, 200) : QColor(200, 30, 30), 1, Qt::DashLine));
             painter.drawRect(box);
         }
     }

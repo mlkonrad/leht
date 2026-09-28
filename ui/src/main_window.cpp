@@ -4,7 +4,9 @@
 #include "sign_dialog.hpp"
 #include "leht/crypto/crypto.hpp"
 
+#include <QCursor>
 #include <QDateTime>
+#include <QSet>
 #include <QTreeWidgetItem>
 
 #include "page_grid.hpp"
@@ -150,6 +152,7 @@ MainWindow::MainWindow() {
     // Editing: the view's tools -> worker edits; worker changes -> view.
     // Before the view hears of the edit: its pictures are of the wrong pages.
     connect(worker_, &RenderWorker::pagesRearranged, this, [this] {
+        redactionMarks_.clear();  // marks name pages that have moved
         view_->forgetPages();
         rearranged_ = true;
     });
@@ -250,11 +253,53 @@ MainWindow::MainWindow() {
             [this](int page, const QVector<QPolygonF>& strokes) {
                 onWorker([=](RenderWorker* w) { w->addInk(page, strokes, QColor(30, 60, 200)); });
             });
+    // The Redact tool marks; Apply Redactions removes. Nothing leaves the
+    // file until the marks have been looked over.
     connect(view_, &PageView::redactRequested, this, [this](int page, QRectF box) {
-        if (!confirmBreakingSignatures(tr("A redaction"))) {
+        auto marks = redactionMarks_;
+        marks.push_back({page, box});
+        setRedactionMarks(marks);
+        statusBar()->showMessage(
+            tr("%n area(s) marked for redaction. Review them, then choose Apply Redactions.", nullptr,
+               static_cast<int>(marks.size())),
+            8000);
+    });
+    connect(view_, &PageView::markupRequested, this,
+            [this](int page, const QVector<QRectF>& boxes, bool strikeOut) {
+                const QColor color = strikeOut ? QColor(200, 30, 30) : QColor(20, 90, 200);
+                onWorker([=](RenderWorker* w) { w->addTextMarkup(page, boxes, strikeOut, color); });
+            });
+    connect(view_, &PageView::stampRequested, this, [this](int page, QPointF at) {
+        // The standard stamps (ops::AnnotSpec::stamp), by what they say.
+        const struct {
+            const char* name;
+            const char* label;
+        } kStamps[] = {
+            {"Approved", QT_TR_NOOP("Approved")}, {"NotApproved", QT_TR_NOOP("Not Approved")},
+            {"Draft", QT_TR_NOOP("Draft")}, {"Final", QT_TR_NOOP("Final")},
+            {"Confidential", QT_TR_NOOP("Confidential")}, {"ForComment", QT_TR_NOOP("For Comment")},
+            {"ForPublicRelease", QT_TR_NOOP("For Public Release")},
+            {"NotForPublicRelease", QT_TR_NOOP("Not For Public Release")},
+            {"Experimental", QT_TR_NOOP("Experimental")}, {"Expired", QT_TR_NOOP("Expired")},
+            {"AsIs", QT_TR_NOOP("As Is")}, {"Departmental", QT_TR_NOOP("Departmental")},
+            {"Sold", QT_TR_NOOP("Sold")}, {"TopSecret", QT_TR_NOOP("Top Secret")},
+        };
+        QMenu menu(this);
+        for (const auto& s : kStamps) {
+            menu.addAction(tr(s.label))->setData(QLatin1String(s.name));
+        }
+        QAction* chosen = menu.exec(QCursor::pos());
+        if (chosen == nullptr) {
             return;
         }
-        onWorker([=](RenderWorker* w) { w->redactArea(page, box); });
+        // Centred on the click, and kept on the page.
+        const QSizeF pageSize = view_->pageSizePoints(page);
+        QRectF box(QPointF(0, 0), QSizeF(180, 50));
+        box.moveCenter(at);
+        box.moveLeft(std::clamp(box.left(), 0.0, std::max(0.0, pageSize.width() - box.width())));
+        box.moveTop(std::clamp(box.top(), 0.0, std::max(0.0, pageSize.height() - box.height())));
+        const QString name = chosen->data().toString();
+        onWorker([=](RenderWorker* w) { w->addStamp(page, box, name); });
     });
     connect(view_, &PageView::signRequested, this, [this](int page, QRectF box) {
         startSigning(page, box);
@@ -578,7 +623,13 @@ void MainWindow::buildEditActions() {
         {"toolText", QT_TR_NOOP("Text Box"), "type",
          QT_TR_NOOP("Drag a box (or click) and type; Ctrl+Enter or click away to finish, Esc to cancel"),
          PageView::Tool::Text, 3},
+        {"toolUnderline", QT_TR_NOOP("Underline"), "underline", QT_TR_NOOP("Drag across text to underline it"),
+         PageView::Tool::Underline, 3},
+        {"toolStrike", QT_TR_NOOP("Strike Out"), "strikethrough",
+         QT_TR_NOOP("Drag across text to strike it out"), PageView::Tool::StrikeOut, 3},
         {"toolDraw", QT_TR_NOOP("Draw"), "pen-line", QT_TR_NOOP("Draw freehand"), PageView::Tool::Ink, 3},
+        {"toolStamp", QT_TR_NOOP("Stamp"), "stamp",
+         QT_TR_NOOP("Click where a stamp such as Approved or Draft should go"), PageView::Tool::Stamp, 3},
         {"toolMove", QT_TR_NOOP("Move"), "move",
          QT_TR_NOOP("Click an annotation to select it: drag it to move, drag a handle to resize, arrows to "
                     "nudge, Delete to remove"),
@@ -587,8 +638,9 @@ void MainWindow::buildEditActions() {
          PageView::Tool::Erase, 3},
         {"toolSign", QT_TR_NOOP("Sign"), "signature", QT_TR_NOOP("Drag a box to place a signature there"),
          PageView::Tool::Sign, 2},
-        {"toolRedact", QT_TR_NOOP("Redact Area"), "square-dashed",
-         QT_TR_NOOP("Drag a box: everything under it is removed from the file, not just covered"),
+        {"toolRedact", QT_TR_NOOP("Mark for Redaction"), "square-dashed",
+         QT_TR_NOOP("Drag boxes over what must go; Apply Redactions then removes it from the file, "
+                    "not just covers it"),
          PageView::Tool::Redact, 4},
         {"toolCrop", QT_TR_NOOP("Crop"), "crop",
          QT_TR_NOOP("Drag the box to keep: the rest of the page is hidden, not removed"), PageView::Tool::Crop, 4},
@@ -624,10 +676,30 @@ void MainWindow::buildEditActions() {
             const QString needle = QInputDialog::getText(
                 this, tr("Redact text"), tr("Remove every occurrence of (case-insensitive):"),
                 QLineEdit::Normal, QString(), &ok);
-            if (ok && !needle.isEmpty() && confirmBreakingSignatures(tr("A redaction"))) {
+            if (!ok || needle.isEmpty()) {
+                return;
+            }
+            if (signatureCount_ == 0 &&
+                QMessageBox::warning(this, tr("Redact text"),
+                                     tr("Every occurrence of “%1” will be removed from the file, not just "
+                                        "covered. Once saved, it cannot be brought back.\n\nRedact it?")
+                                         .arg(needle),
+                                     QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) {
+                return;
+            }
+            if (confirmBreakingSignatures(tr("A redaction"))) {
                 onWorker([=](RenderWorker* w) { w->redactText(needle); });
             }
         });
+    add({.id = QStringLiteral("applyRedactions"), .text = tr("&Apply Redactions…"), .icon = QStringLiteral("check"),
+         .tip = tr("Remove everything under the marked areas from the file, for good"), .certNeeds = 4,
+         .enabledWhen = [this] { return pageCount_ > 0 && certAllows(4) && !redactionMarks_.isEmpty(); },
+         .group = tools},
+        [this] { (void)applyRedactions(); });
+    add({.id = QStringLiteral("clearRedactionMarks"), .text = tr("C&lear Redaction Marks"),
+         .icon = QStringLiteral("x"), .tip = tr("Forget the marked areas; nothing is removed"), .certNeeds = 4,
+         .enabledWhen = [this] { return !redactionMarks_.isEmpty(); }, .group = tools},
+        [this] { setRedactionMarks({}); });
     add({.id = QStringLiteral("watermark"), .text = tr("&Watermark…"), .icon = QStringLiteral("droplets"),
          .tip = tr("Put text such as DRAFT across the pages"), .certNeeds = 4, .group = tools},
         [this] {
@@ -1025,6 +1097,46 @@ void MainWindow::applyCertification(int level) {
     }
 }
 
+void MainWindow::setRedactionMarks(QVector<QPair<int, QRectF>> marks) {
+    redactionMarks_ = std::move(marks);
+    view_->setRedactionMarks(redactionMarks_);
+    actions_->refresh();
+}
+
+bool MainWindow::applyRedactions(bool confirm) {
+    if (redactionMarks_.isEmpty() || pageCount_ <= 0) {
+        return false;
+    }
+    if (confirm) {
+        QSet<int> pages;
+        for (const auto& mark : redactionMarks_) {
+            pages.insert(mark.first);
+        }
+        const auto answer = QMessageBox::warning(
+            this, tr("Apply redactions"),
+            tr("Everything under %n marked area(s)", nullptr, static_cast<int>(redactionMarks_.size())) +
+                tr(" on %n page(s) will be removed from the file: text, pictures and drawing, not just "
+                   "covered.\n\nUndo can bring it back until you save; after that it is gone.",
+                   nullptr, static_cast<int>(pages.size())),
+            QMessageBox::Apply | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (answer != QMessageBox::Apply || !confirmBreakingSignatures(tr("A redaction"))) {
+            return false;
+        }
+    }
+    const auto marks = std::exchange(redactionMarks_, {});
+    view_->setRedactionMarks({});
+    actions_->refresh();
+    // One edit group: one Undo takes back the lot.
+    onWorker([marks](RenderWorker* w) {
+        w->beginEditGroup();
+        for (const auto& [page, box] : marks) {
+            w->redactArea(page, box);
+        }
+        w->endEditGroup();
+    });
+    return true;
+}
+
 bool MainWindow::confirmBreakingSignatures(const QString& what) {
     if (signatureCount_ == 0) {
         return true;
@@ -1168,12 +1280,33 @@ void MainWindow::onFieldsReady(const QVector<FieldRow>& rows) {
     }
 }
 
+bool MainWindow::settlePendingRedactions() {
+    if (redactionMarks_.isEmpty()) {
+        return true;
+    }
+    // Saving with marks still pending would write a file that looks redacted
+    // and is not: ask, every time.
+    QMessageBox box(QMessageBox::Warning, tr("Redactions not applied"),
+                    tr("%n area(s) are marked for redaction but not yet removed. Saving now keeps "
+                       "everything under them in the file.",
+                       nullptr, static_cast<int>(redactionMarks_.size())),
+                    QMessageBox::Cancel, this);
+    QPushButton* apply = box.addButton(tr("Apply and Save"), QMessageBox::AcceptRole);
+    QPushButton* without = box.addButton(tr("Save Without Applying"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(apply);
+    box.exec();
+    if (box.clickedButton() == apply) {
+        return applyRedactions(/*confirm=*/false);  // queued before the save, so saved with it
+    }
+    return box.clickedButton() == without;
+}
+
 bool MainWindow::save() {
-    if (pageCount_ <= 0) {
+    if (pageCount_ <= 0 || !settlePendingRedactions()) {
         return false;
     }
     if (currentPath_.isEmpty() || !currentPath_.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
-        return saveAs();  // an image or XPS opened for viewing is not written back as PDF in place
+        return saveToChosenPath();  // an image or XPS opened for viewing is not written back as PDF in place
     }
     statusBar()->showMessage(tr("Saving…"));
     const QString path = currentPath_;
@@ -1182,9 +1315,13 @@ bool MainWindow::save() {
 }
 
 bool MainWindow::saveAs() {
-    if (pageCount_ <= 0) {
+    if (pageCount_ <= 0 || !settlePendingRedactions()) {
         return false;
     }
+    return saveToChosenPath();
+}
+
+bool MainWindow::saveToChosenPath() {
     const QString path = QFileDialog::getSaveFileName(this, tr("Save PDF"), currentPath_,
                                                       tr("PDF documents (*.pdf)"));
     if (path.isEmpty()) {
@@ -1256,6 +1393,7 @@ void MainWindow::openPath(const QString& path) {
         return;
     }
     modified_ = false;
+    redactionMarks_.clear();  // the view forgets its copy in clear()
     pageCount_ = 0;  // nothing to act on until it opens
     signatureCount_ = 0;
     documentEncrypted_ = false;

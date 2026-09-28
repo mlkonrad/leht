@@ -901,6 +901,31 @@ void RenderWorker::cropMargins(QString pages, leht::ops::Margins margins) {
     applyEdit(e);
 }
 
+void RenderWorker::addTextMarkup(int page, QVector<QRectF> boxes, bool strikeOut, QColor color) {
+    if (boxes.isEmpty()) {
+        return;
+    }
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::AddAnnot;
+    e.annot.author = annotationAuthor();
+    e.page = page;
+    e.annot.kind = strikeOut ? leht::ops::AnnotKind::StrikeOut : leht::ops::AnnotKind::Underline;
+    e.annot.quads = toQuads(boxes);
+    setColor(e.annot.color, color);
+    applyEdit(e);
+}
+
+void RenderWorker::addStamp(int page, QRectF box, QString name) {
+    ipc::Edit e;
+    e.kind = ipc::Edit::Kind::AddAnnot;
+    e.annot.author = annotationAuthor();
+    e.page = page;
+    e.annot.kind = leht::ops::AnnotKind::Stamp;
+    e.annot.rect = toRect(box);
+    e.annot.stamp = name.toStdString();
+    applyEdit(e);
+}
+
 void RenderWorker::cropBox(QString pages, QRectF box) {
     ipc::Edit e;
     e.kind = ipc::Edit::Kind::CropBox;

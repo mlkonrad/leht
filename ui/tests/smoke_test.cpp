@@ -1234,7 +1234,7 @@ int main(int argc, char** argv) {
               "Comment mode shows the highlighter");
         fresh.actions()->find(QStringLiteral("toolRedact"))->trigger();
         pump(50);
-        check(modes->mode() == QStringLiteral("redact"), "picking Redact Area switches to Redact mode");
+        check(modes->mode() == QStringLiteral("redact"), "picking Mark for Redaction switches to Redact mode");
         modes->setMode(QStringLiteral("read"));
         pump(50);
         check(fresh.actions()->find(QStringLiteral("toolSelect"))->isChecked(),
@@ -1514,8 +1514,16 @@ int main(int argc, char** argv) {
 
         // Redact a box over the first line, then save and look for the text.
         emit view->redactRequested(0, boxes.first().adjusted(-1, -1, 1, 1));
+        pump(300);
+        check(window.pendingRedactions() == 1 && !window.isModified(),
+              "the Redact tool marks an area and removes nothing yet");
+        check(window.actions()->find(QStringLiteral("applyRedactions"))->isEnabled(),
+              "Apply Redactions is offered once something is marked");
+        shot(&window, "ux-redaction-mark");
+        check(window.applyRedactions(/*confirm=*/false), "the marks are applied");
         pump(1500);
-        check(window.isModified(), "a redaction marks the document modified");
+        check(window.isModified() && window.pendingRedactions() == 0,
+              "applying marks the document modified and clears the marks");
         (void)window.save();
         pump(2000);
         try {
@@ -1524,6 +1532,36 @@ int main(int argc, char** argv) {
             check(left.size() == 49, "the redacted line's text is gone from the file (49 of 50 left)");
         } catch (const leht::Error&) {
             check(false, "the redacted file opens");
+        }
+
+        // Underline, strike-out and a stamp, then saved: the next file opens without a prompt.
+        {
+            leht::Document d = leht::Document::open(ctx, copy.toStdString());
+            const auto hit = leht::TextPage(ctx, d, 0).search("lazy dog").front();
+            QVector<QRectF> dog;
+            for (const auto& q : hit.quads) {
+                dog.push_back(QRectF(QPointF(q.min_x(), q.min_y()), QPointF(q.max_x(), q.max_y())));
+            }
+            emit view->markupRequested(0, dog, /*strikeOut=*/true);
+            emit view->markupRequested(0, dog, /*strikeOut=*/false);
+        }
+        QMetaObject::invokeMethod(worker, "addStamp", Qt::QueuedConnection, Q_ARG(int, 1),
+                                  Q_ARG(QRectF, QRectF(100, 100, 180, 50)),
+                                  Q_ARG(QString, QStringLiteral("Approved")));
+        pump(2000);
+        (void)window.save();
+        pump(2000);
+        try {
+            leht::Document marked = leht::Document::open(ctx, copy.toStdString());
+            QStringList kinds;
+            for (const auto& a : leht::ops::list_annotations(ctx, marked)) {
+                kinds << QString::fromStdString(a.type);
+            }
+            check(kinds.contains(QStringLiteral("StrikeOut")) && kinds.contains(QStringLiteral("Underline")) &&
+                      kinds.contains(QStringLiteral("Stamp")),
+                  "underline, strike-out and stamp are saved");
+        } catch (const leht::Error&) {
+            check(false, "the marked-up file opens");
         }
 
         // Forms: the panel lists the fields, and a value set there is saved.

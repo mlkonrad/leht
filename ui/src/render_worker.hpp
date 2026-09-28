@@ -126,6 +126,10 @@ public slots:
     void addHighlight(int page, QVector<QRectF> boxes, QColor color);
     /// A sticky note at `at` saying `text`.
     void addNote(int page, QPointF at, QString text);
+    /// An underline or strike-out over the text `boxes` cover.
+    void addTextMarkup(int page, QVector<QRectF> boxes, bool strikeOut, QColor color);
+    /// A standard rubber stamp ("Approved", "Draft", ...) filling `box`.
+    void addStamp(int page, QRectF box, QString name);
     /// A freehand drawing: one polygon per stroke.
     void addInk(int page, QVector<QPolygonF> strokes, QColor color);
     /// Removes everything under `box` (see ops::redact).
