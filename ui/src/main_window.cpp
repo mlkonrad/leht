@@ -177,6 +177,24 @@ MainWindow::MainWindow() {
                 }
                 statusBar()->showMessage(what + QStringLiteral("."), 8000);
             });
+    connect(worker_, &RenderWorker::trustedListUpdated, this,
+            [this](int verified, int lists, int services, const QStringList& failed) {
+                QString what = tr("EU trusted lists: %1 of %2 verified, %n qualified service(s).",
+                                  nullptr, services)
+                                   .arg(verified)
+                                   .arg(lists);
+                if (!failed.isEmpty()) {
+                    what += QLatin1Char(' ') +
+                            tr("Could not be verified: %1.").arg(failed.join(QStringLiteral(", ")));
+                }
+                statusBar()->showMessage(what, 12000);
+            });
+    connect(worker_, &RenderWorker::trustedListFailed, this, [this](const QString& why) {
+        statusBar()->clearMessage();
+        QMessageBox::warning(this, tr("EU trusted lists"),
+                             tr("The trusted lists were not updated; the ones cached before are "
+                                "still used.\n\n%1").arg(why));
+    });
     connect(worker_, &RenderWorker::saveFailed, this, [this](const QString& why) {
         afterSave_ = nullptr;
         statusBar()->clearMessage();
@@ -596,6 +614,12 @@ void MainWindow::buildEditActions() {
             statusBar()->showMessage(tr("Checking revocation online…"));
             onWorker([](RenderWorker* w) { w->checkRevocationOnline(); });
         });
+    add({.id = QStringLiteral("updateTrustedList"), .text = tr("Update EU Trusted &Lists…"),
+         .icon = QStringLiteral("badge-check"),
+         .tip = tr("Fetch and verify the EU trusted lists, which make qualified CAs and timestamp "
+                   "authorities trusted and say whether a signature is qualified"),
+         .enabledWhen = [] { return true; }, .group = sign},
+        &MainWindow::updateTrustedList);
     add({.id = QStringLiteral("trustedCertificates"), .text = tr("&Trusted Certificates…"),
          .icon = QStringLiteral("key-round"), .tip = tr("Certificates you trust besides your system's"),
          .enabledWhen = [] { return true; }, .group = sign},
@@ -694,6 +718,30 @@ std::pair<QString, QColor> verdict(const SigRow& row) {
     return {MainWindow::tr("Valid"), QColor(20, 120, 40)};
 }
 
+/// crypto::QualifiedReport::Level::Qes, as SigRow::qualified carries it.
+constexpr int kQes = 2;
+
+/// A signature's "Qualified" line: the EU trusted lists' verdict, and why.
+QString qualifiedWords(const SigRow& row, bool haveTrustedList) {
+    QString words;
+    switch (row.qualified) {
+        case 0:
+            return haveTrustedList
+                       ? MainWindow::tr("not checked")
+                       : MainWindow::tr("not checked: no EU trusted lists yet (Sign → Update EU "
+                                        "Trusted Lists…)");
+        case 1: words = MainWindow::tr("not qualified"); break;
+        case kQes: words = MainWindow::tr("qualified electronic signature (QES)"); break;
+        case 3: words = MainWindow::tr("qualified electronic seal"); break;
+        case 4: words = MainWindow::tr("advanced, with a qualified certificate"); break;
+        default: return {};
+    }
+    if (!row.qualifiedDetail.isEmpty()) {
+        words = MainWindow::tr("%1: %2").arg(words, row.qualifiedDetail);
+    }
+    return words;
+}
+
 QString certificationWords(int level) {
     switch (level) {
         case 1: return MainWindow::tr("no changes allowed");
@@ -724,6 +772,8 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
         return;
     }
 
+    const RenderWorker::TrustedListState lists = RenderWorker::trustedListState();
+    const bool haveTrustedList = lists.present;
     int worst = 0;  // 0 valid, 1 a warning, 2 broken
     for (const SigRow& row : rows) {
         const auto [word, colour] = verdict(row);
@@ -753,6 +803,9 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
         add(tr("Trust"), row.trustDetail.isEmpty() ? trustWord(row.trust)
                                                    : tr("%1: %2").arg(trustWord(row.trust),
                                                                       row.trustDetail));
+        if (row.intact && !row.documentTimestamp) {
+            add(tr("Qualified"), qualifiedWords(row, haveTrustedList));
+        }
         if (row.notAfter != 0) {
             add(tr("Certificate valid until"), localTime(row.notAfter));
         }
@@ -789,7 +842,9 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
             add(tr("Timestamp"),
                 row.timestampValid
                     ? tr("%1, by %2 (%3)").arg(localTime(row.timestampTime), row.authority,
-                                               trustWord(row.timestampTrust))
+                                               row.timestampQualified
+                                                   ? tr("%1, qualified").arg(trustWord(row.timestampTrust))
+                                                   : trustWord(row.timestampTrust))
                     : tr("not valid: %1").arg(row.timestampProblem));
             for (const QString& line : row.timestampRevocation) {
                 add(tr("Authority revocation"), line);
@@ -845,9 +900,15 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
         stamps == 0 ? tr("%n signature(s)", nullptr, signatureCount_)
                     : tr("%n signature(s)", nullptr, signatureCount_ - stamps) + QStringLiteral(", ") +
                           tr("%n document timestamp(s)", nullptr, stamps);
+    // Qualified when every signature is a QES, as the EU trusted lists say.
+    const bool allQes = std::all_of(rows.begin(), rows.end(), [](const SigRow& r) {
+        return r.documentTimestamp || r.qualified == kQes;
+    });
     signatureBannerLabel_->setText(
         tr(" %1  (%2) ").arg(summary, counted) +
-        (certified != 0 ? tr(" Certified: %1. ").arg(certificationWords(certified)) : QString()));
+        (allQes && stamps < signatureCount_ ? tr(" Qualified electronic signature. ") : QString()) +
+        (certified != 0 ? tr(" Certified: %1. ").arg(certificationWords(certified)) : QString()) +
+        (lists.overdue ? tr(" The EU trusted lists are overdue for an update. ") : QString()));
     applyCertification(certified);
     // The verdict in a coloured mark and a faint wash of the same colour; the
     // text keeps the palette's, so it reads in light and dark themes alike.
@@ -940,6 +1001,19 @@ void MainWindow::startSigning(int page, QRectF rect) {
     }
     statusBar()->showMessage(tr("Signing…"));
     onWorker([=](RenderWorker* w) { w->signDocument(target, spec); });
+}
+
+void MainWindow::updateTrustedList() {
+    const auto answer = QMessageBox::question(
+        this, tr("Update EU Trusted Lists"),
+        tr("Leht will download the European Commission's List of Trusted Lists and the national "
+           "lists it points to — about 30 servers, some 28 MB — and verify each by its "
+           "signature. Nothing about you or your documents is sent.\n\nUpdate now?"));
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+    statusBar()->showMessage(tr("Updating the EU trusted lists…"));
+    onWorker([](RenderWorker* w) { w->updateTrustedList(); });
 }
 
 void MainWindow::addLongTermValidation() {

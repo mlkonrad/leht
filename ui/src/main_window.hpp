@@ -120,6 +120,8 @@ public slots:
     void applyCertification(int level);
     /// More -> Add Long-Term Validation...
     void addLongTermValidation();
+    /// Sign -> Update EU Trusted Lists...
+    void updateTrustedList();
 
 private:
     void buildActions();

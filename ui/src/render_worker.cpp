@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "render_worker.hpp"
+#include "leht/trustlist/model.hpp"
 #include "worker_files.hpp"
 
 #include "leht/edit.hpp"
@@ -1519,6 +1520,163 @@ void RenderWorker::checkRevocationOnline() {
     }
 }
 
+namespace {
+
+/// The cached EU trusted lists, as the worker takes them; empty when none
+/// (or when the user turned them off).
+std::vector<std::uint8_t> cachedTrustedList() {
+    if (!QSettings().value(QStringLiteral("trustedList/enabled"), true).toBool()) {
+        return {};
+    }
+    QFile f(QString::fromStdString(leht::trustlist::default_cache_path()));
+    if (!f.open(QIODevice::ReadOnly) || f.size() > (qint64{64} << 20)) {
+        return {};
+    }
+    const QByteArray bytes = f.readAll();
+    return {bytes.begin(), bytes.end()};
+}
+
+}  // namespace
+
+RenderWorker::TrustedListState RenderWorker::trustedListState() {
+    TrustedListState st;
+    const auto blob = cachedTrustedList();
+    if (blob.empty()) {
+        return st;
+    }
+    try {
+        // Leht's own bounds-checked form, written by the worker: decoded here
+        // only for dates, as any other message from the worker is.
+        const auto list = leht::trustlist::decode(blob);
+        st.present = true;
+        st.built = list.built;
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        st.overdue = list.lotl.next_update != 0 && list.lotl.next_update < now;
+        for (const auto& l : list.lists) {
+            st.overdue = st.overdue || (l.verified && l.next_update != 0 && l.next_update < now);
+        }
+    } catch (const std::exception&) {
+    }
+    return st;
+}
+
+void RenderWorker::updateTrustedList() {
+    const auto& anchor = leht::trustlist::eu_anchor();
+    const auto fail = [this](const QString& why) { emit trustedListFailed(why); };
+    ipc::TrustedListStep step;
+    try {
+        emit networkUsed(QUrl(QString::fromStdString(anchor.lotl_url)).host());
+        step.lotl = leht::crypto::http_get(anchor.lotl_url, std::size_t{32} << 20, 60);
+    } catch (const leht::Error& e) {
+        fail(QString::fromUtf8(e.what()));
+        return;
+    }
+    // Its own worker, for this update only: libxml2 and xmlsec1 load there,
+    // then its sandbox goes up, then it reads what this thread fetched.
+    std::unique_ptr<ipc::WorkerProcess> lists;
+    try {
+        lists = ipc::WorkerProcess::spawn(workerPath().toStdString(), {"--trusted-list"});
+        lists->handshake();
+    } catch (const std::exception&) {
+        fail(tr("The trusted-list worker could not start."));
+        return;
+    }
+    std::uint64_t id = 1;
+    for (int round = 0; round < 8; ++round) {
+        std::optional<ipc::Frame> reply;
+        try {
+            lists->channel().send(id++, step);
+            reply = lists->channel().recv(std::chrono::minutes(3));
+        } catch (const std::exception&) {
+            reply.reset();
+        }
+        if (!reply) {
+            fail(tr("The trusted-list worker stopped."));
+            return;
+        }
+        ipc::TrustedListProgress progress;
+        try {
+            if (reply->type == ipc::MsgType::Failed) {
+                fail(QString::fromStdString(ipc::decode_as<ipc::Failed>(*reply).message));
+                return;
+            }
+            // Decoding refuses any URL but http(s): a worker cannot point this
+            // process anywhere else.
+            progress = ipc::decode_as<ipc::TrustedListProgress>(*reply);
+        } catch (const ipc::ProtocolError&) {
+            fail(tr("The trusted-list worker answered with garbage."));
+            return;
+        }
+        if (progress.done) {
+            if (progress.blob.empty()) {
+                fail(QString::fromStdString(progress.problem));
+                return;
+            }
+            leht::trustlist::TrustedList list;
+            try {
+                list = leht::trustlist::decode(progress.blob);
+            } catch (const std::exception&) {
+                fail(tr("The trusted-list worker answered with garbage."));
+                return;
+            }
+            const QString path = QString::fromStdString(leht::trustlist::default_cache_path());
+            QDir().mkpath(QFileInfo(path).absolutePath());
+            Beside out(path);
+            if (out.fd() < 0) {
+                fail(out.error());
+                return;
+            }
+            for (std::size_t off = 0; off < progress.blob.size();) {
+                const ssize_t n =
+                    ::write(out.fd(), progress.blob.data() + off, progress.blob.size() - off);
+                if (n <= 0) {
+                    fail(QString::fromUtf8(std::strerror(errno)));
+                    return;
+                }
+                off += static_cast<std::size_t>(n);
+            }
+            if (const QString why = out.commit(); !why.isEmpty()) {
+                fail(why);
+                return;
+            }
+            int verified = 0;
+            QStringList failed;
+            for (const auto& l : list.lists) {
+                if (l.verified) {
+                    ++verified;
+                } else {
+                    failed << QString::fromStdString(l.territory);
+                }
+            }
+            emit trustedListUpdated(verified, static_cast<int>(list.lists.size()),
+                                    static_cast<int>(list.services.size()), failed);
+            if (proc_.load()) {
+                listSignatures();  // the open document's verdicts, with the new lists
+            }
+            return;
+        }
+        QStringList hosts;
+        for (const std::string& url : progress.need) {
+            const QString h = QUrl(QString::fromStdString(url)).host();
+            if (!hosts.contains(h)) {
+                hosts << h;
+            }
+        }
+        emit networkUsed(hosts.join(QStringLiteral(", ")));
+        for (const std::string& url : progress.need) {
+            ipc::FetchedRow f;
+            f.url = url;
+            try {
+                f.body = leht::crypto::http_get(url, std::size_t{32} << 20, 60);
+            } catch (const leht::Error& e) {
+                f.error = e.what();
+            }
+            step.fetched.push_back(std::move(f));
+        }
+    }
+    fail(tr("The trusted lists did not settle after several rounds of fetching."));
+}
+
 void RenderWorker::listSignatures() { listSignaturesWith({}); }
 
 void RenderWorker::listSignaturesWith(const std::vector<leht::ipc::FetchedRow>& online) {
@@ -1526,6 +1684,7 @@ void RenderWorker::listSignaturesWith(const std::vector<leht::ipc::FetchedRow>& 
     leht::ipc::ListSignatures request;
     request.trust_pem = trustPem();
     request.online = online;
+    request.trusted_list = cachedTrustedList();
     auto reply = proc_.load() ? roundTrip(request, Phase::Edit, -1) : std::nullopt;
     try {
         if (reply && reply->type == leht::ipc::MsgType::SignatureList) {
@@ -1578,6 +1737,16 @@ void RenderWorker::listSignaturesWith(const std::vector<leht::ipc::FetchedRow>& 
                 row.revocation = revocation_lines(s.revocation, &row.revoked);
                 bool tsa_revoked = false;
                 row.timestampRevocation = revocation_lines(s.timestamp_revocation, &tsa_revoked);
+                row.qualified = s.qualified;
+                row.qualifiedDetail = QString::fromStdString(s.qualified_detail);
+                row.qualifiedService =
+                    s.qualified_service.empty()
+                        ? QString()
+                        : tr("%1 (%2)").arg(QString::fromStdString(s.qualified_service),
+                                            QString::fromStdString(s.qualified_territory));
+                row.timestampQualified =
+                    s.timestamp_qualified ==
+                    static_cast<std::uint8_t>(leht::crypto::QualifiedReport::Level::QualifiedTimestamp);
                 rows.push_back(std::move(row));
             }
         } else if (reply) {

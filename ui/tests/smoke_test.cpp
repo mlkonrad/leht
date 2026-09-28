@@ -54,6 +54,7 @@
 #include "leht/text.hpp"
 #include "leht/crypto/crypto.hpp"
 #include "test_pki.hpp"
+#include "leht/trustlist/model.hpp"
 #include "softhsm.hpp"
 #include "sign_dialog.hpp"
 #include <QComboBox>
@@ -1401,8 +1402,12 @@ int main(int argc, char** argv) {
             window.openPath(toSign);
             pump(1500);
             QVector<SigRow> reported;
-            QObject::connect(worker, &RenderWorker::signaturesReady, &window,
-                             [&reported](const QVector<SigRow>& rows) { reported = rows; });
+            // Disconnected before `reported` goes: a connection left behind
+            // writes the next document's list into a dead QVector, and that
+            // heap corruption surfaced far later, as a crash in unrelated code.
+            const auto reportedConnection =
+                QObject::connect(worker, &RenderWorker::signaturesReady, &window,
+                                 [&reported](const QVector<SigRow>& rows) { reported = rows; });
 
             SignSpec spec;
             spec.p12Path = p12;
@@ -1438,6 +1443,62 @@ int main(int argc, char** argv) {
                 check(signedDoc.signature_count() == 1, "the file on disk carries one signature");
             } catch (const leht::Error&) {
                 check(false, "the signed file opens");
+            }
+
+            // The EU trusted lists (queue M5): with a cached list that names the
+            // test CA as qualified, the same signature is a QES, and the Sign
+            // menu offers the update. The list is written where the viewer
+            // looks, under a temporary XDG_CACHE_HOME.
+            {
+                const QByteArray oldCache = qgetenv("XDG_CACHE_HOME");
+                qputenv("XDG_CACHE_HOME", tmp.filePath(QStringLiteral("cache")).toUtf8());
+                leht::trustlist::TrustedList tl;
+                leht::trustlist::Service svc;
+                svc.type = leht::trustlist::Service::Type::CaQc;
+                svc.territory = "EE";
+                svc.name = "Test qualified CA";
+                unsigned char* caDer = nullptr;
+                const int caLen = i2d_X509(pki.ca.p, &caDer);
+                svc.certs = {std::vector<std::uint8_t>(caDer, caDer + caLen)};
+                OPENSSL_free(caDer);
+                leht::trustlist::Phase phase;
+                phase.granted = true;
+                leht::trustlist::Qualification q;
+                q.qualifiers = leht::trustlist::QcStatement | leht::trustlist::QcForEsig |
+                               leht::trustlist::QcWithQscd;
+                q.criteria.assert = leht::trustlist::Criteria::Assert::AtLeastOne;
+                q.criteria.key_usage = {{{"nonRepudiation", true}}};
+                phase.qualifications = {q};
+                svc.phases = {phase};
+                tl.services = {svc};
+                const QString cachePath = QString::fromStdString(leht::trustlist::default_cache_path());
+                QDir().mkpath(QFileInfo(cachePath).absolutePath());
+                {
+                    QFile f(cachePath);
+                    check(f.open(QIODevice::WriteOnly), "the trusted-list cache opens for writing");
+                    const auto blob = leht::trustlist::encode(tl);
+                    f.write(reinterpret_cast<const char*>(blob.data()), static_cast<qint64>(blob.size()));
+                }
+                reported.clear();
+                QMetaObject::invokeMethod(worker, "listSignatures", Qt::QueuedConnection);
+                pump(1500);
+                check(reported.size() == 1 && reported.first().qualified == 2,
+                      "with the EU trusted list, the signature is a qualified electronic signature");
+                check(RenderWorker::trustedListState().present, "the viewer sees the cached list");
+                auto* update = window.findChild<QAction*>(QStringLiteral("updateTrustedList"));
+                check(update != nullptr && update->isEnabled(),
+                      "the Sign menu offers to update the EU trusted lists");
+                QFile::remove(cachePath);
+                if (oldCache.isNull()) {
+                    qunsetenv("XDG_CACHE_HOME");
+                } else {
+                    qputenv("XDG_CACHE_HOME", oldCache);
+                }
+                reported.clear();
+                QMetaObject::invokeMethod(worker, "listSignatures", Qt::QueuedConnection);
+                pump(1500);
+                check(reported.size() == 1 && reported.first().qualified == 0,
+                      "without it, nothing is said about qualified");
             }
 
             // A certification (M3): made through the same path, and afterwards
@@ -1720,6 +1781,7 @@ int main(int argc, char** argv) {
             } else {
                 std::printf("  skip  card signing (SoftHSM2 not installed)\n");
             }
+            QObject::disconnect(reportedConnection);
             settings.remove(QStringLiteral("trustedCertificates"));
         } else {
             std::printf("  skip  signing (could not copy the corpus file)\n");

@@ -302,7 +302,7 @@ void MainWindow::buildMenus() {
         {tr("&Comment"), ids({"toolHighlight", "toolNote", "toolText", "toolDraw", "-", "toolMove",
                               "toolErase"})},
         {tr("&Sign"), ids({"toolSign", "signInvisibly", "-", "addLongTermValidation", "checkRevocation", "-",
-                           "trustedCertificates"})},
+                           "updateTrustedList", "trustedCertificates"})},
         {tr("&Tools"), ids({"recognizeText", "-", "toolRedact", "redactText"})},
         {tr("&Help"), ids({"shortcuts", "-", "about"})},
     });

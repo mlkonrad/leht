@@ -107,6 +107,13 @@ struct SigRow {
     QStringList revocation;
     QStringList timestampRevocation;
     bool revoked = false;  ///< one of them was revoked before the signing time
+    /// The EU trusted lists' verdict (crypto::QualifiedReport::Level: 0 not
+    /// checked, 1 not qualified, 2 QES, 3 qualified seal, 4 advanced with a
+    /// qualified certificate), and why.
+    int qualified = 0;
+    QString qualifiedDetail;
+    QString qualifiedService;  ///< the qualified CA, with its country
+    bool timestampQualified = false;
 };
 
 Q_DECLARE_METATYPE(AnnotRow)

@@ -162,6 +162,15 @@ public slots:
     void recognizeText(QString pages, QString languages, int dpi, bool skipPagesWithText);
 
 public:
+    /// What is cached of the EU trusted lists, for the window's note: none,
+    /// when (and whether it is overdue for an update).
+    struct TrustedListState {
+        bool present = false;
+        qint64 built = 0;
+        bool overdue = false;  ///< the LOTL or a list is past its next update
+    };
+    static TrustedListState trustedListState();
+
     /// Stops a recognizeText() run after the page it is on. Safe to call
     /// from any thread -- the GUI calls it while this one is busy.
     void cancelRecognition() { ocrCancel_ = true; }
@@ -213,6 +222,18 @@ public slots:
     /// as the document's own; nothing is embedded. Emits signaturesReady().
     void checkRevocationOnline();
 
+    // --- The EU trusted lists (queue M5) -----------------------------------------
+    //
+    // Fetched only when asked. This thread moves bytes; leht-worker
+    // --trusted-list, in its own sandbox, reads and verifies the XML. The
+    // verified lists are cached where the CLI keeps them too, and every
+    // signature list afterwards is verified with them.
+
+    /// Fetches and verifies the lists, and caches them. Emits networkUsed()
+    /// before each round of fetching, then trustedListUpdated() or
+    /// trustedListFailed().
+    void updateTrustedList();
+
     /// Certificates to trust beyond the system's, remembered between sessions.
     void addTrustedCertificate(QString pemPath);
 
@@ -256,6 +277,10 @@ signals:
     /// addLongTermValidation() wrote what it says; `timestamp` is 0 when no
     /// document timestamp was added.
     void longTermValidationAdded(int certs, int ocsps, int crls, qint64 timestamp);
+    /// updateTrustedList() cached `verified` of `lists` national lists, with
+    /// `services` qualified services; `failed` names the ones that failed.
+    void trustedListUpdated(int verified, int lists, int services, QStringList failed);
+    void trustedListFailed(QString why);
 
 private:
     /// What the viewer was doing when a worker died, which decides the response.
