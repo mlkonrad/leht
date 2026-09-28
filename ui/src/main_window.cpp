@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "main_window.hpp"
+#include "phone_sign_dialog.hpp"
 
 #include "sign_dialog.hpp"
 #include "leht/crypto/crypto.hpp"
@@ -223,6 +224,42 @@ MainWindow::MainWindow() {
         QMessageBox::warning(this, tr("EU trusted lists"),
                              tr("The trusted lists were not updated; the ones cached before are "
                                 "still used.\n\n%1").arg(why));
+    });
+    // Signing with a phone: the window with its QR code or code comes and
+    // goes with the worker's signing; Cancel asks the worker to stop waiting.
+    connect(worker_, &RenderWorker::phoneSigningStarted, this, [this](const QString& service) {
+        if (phoneDialog_ != nullptr) {
+            phoneDialog_->deleteLater();
+        }
+        phoneDialog_ = new PhoneSignDialog(this, service);
+        connect(phoneDialog_, &PhoneSignDialog::cancelRequested, this,
+                [this] { worker_->cancelPhoneSigning(); });
+        phoneDialog_->open();
+    });
+    connect(worker_, &RenderWorker::phoneLink, this, [this](const QString& link) {
+        if (phoneDialog_ != nullptr) {
+            phoneDialog_->showLink(link);
+        }
+    });
+    connect(worker_, &RenderWorker::phoneCode, this, [this](const QString& code) {
+        if (phoneDialog_ != nullptr) {
+            phoneDialog_->showCode(code);
+        }
+    });
+    connect(worker_, &RenderWorker::phoneStatus, this, [this](const QString& text) {
+        if (phoneDialog_ != nullptr) {
+            phoneDialog_->showStatus(text);
+        }
+    });
+    connect(worker_, &RenderWorker::phoneSigningEnded, this, [this](bool cancelled) {
+        if (phoneDialog_ != nullptr) {
+            phoneDialog_->hide();
+            phoneDialog_->deleteLater();
+            phoneDialog_ = nullptr;
+        }
+        if (cancelled) {
+            statusBar()->showMessage(tr("Signing was cancelled. Nothing was written."), 8000);
+        }
     });
     connect(worker_, &RenderWorker::saveFailed, this, [this](const QString& why) {
         afterSave_ = nullptr;

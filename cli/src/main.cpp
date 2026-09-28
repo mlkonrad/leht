@@ -38,6 +38,7 @@
 #include <cerrno>
 #include <climits>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -87,12 +88,15 @@ constexpr const char* kUsage =
     "  form      FILE                         list form fields and their values\n"
     "  fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]\n"
     "            fill form fields; never runs the document's JavaScript\n"
-    "  sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto)\n"
+    "  sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto |\n"
+    "            --smart-id qr|PERSON | --mobile-id PHONE:PERSON)\n"
     "            [--field NAME | --box P:X0,Y0,X1,Y1] [--image IMG] [--name N]\n"
     "            [--reason R] [--location L] [--tsa URL [--ltv | --lta]]\n"
-    "            sign with a key in a PKCS#12 file or on an ID card (PAdES); the\n"
-    "            original bytes are kept and the signature appended, so earlier\n"
-    "            signatures stay valid\n"
+    "            sign with a key in a PKCS#12 file, on an ID card, or on a phone\n"
+    "            (Smart-ID, Mobile-ID: SK's demo environment only, for now) --\n"
+    "            PAdES; the original bytes are kept and the signature appended, so\n"
+    "            earlier signatures stay valid. Exits 3 when cancelled: Ctrl-C, or\n"
+    "            declined on the phone\n"
     "  ltv       FILE -o OUT.pdf [--tsa URL] [--trust CA.pem]...\n"
     "            long-term validation: embed the certificates, OCSP responses and\n"
     "            CRLs every signature needs to be checked after its certificates\n"
@@ -155,6 +159,15 @@ constexpr const char* kUsage =
     "                 ID card that is the PIN2 key\n"
     "  --pkcs11-module LIB  use this PKCS#11 library instead of the ones the system\n"
     "                 has registered with p11-kit (OpenSC registers itself)\n"
+    "  --smart-id qr  sign with Smart-ID: scan the QR code shown with the Smart-ID\n"
+    "                 app, choose the account, then enter PIN2 on the phone\n"
+    "  --smart-id PERSON  the same for this person, EE:38001085718 (or ETSI's\n"
+    "                 PNOEE-38001085718): compare the code shown with the phone's\n"
+    "  --mobile-id PHONE:PERSON  sign with Mobile-ID, e.g. +37268000769:60001017869;\n"
+    "                 compare the code shown with the phone's, then enter PIN2.\n"
+    "                 Only the digest to sign is sent to SK, never the document\n"
+    "  --relying-party-name NAME, --relying-party-uuid UUID  who asks SK for the\n"
+    "                 signature (default: SK's DEMO)\n"
     "  --password-fd N  read the password or PIN from this descriptor, one line.\n"
     "                 Without it, leht asks on the terminal. NEVER pass one as an\n"
     "                 argument: /proc shows it to every process on the machine\n"
@@ -268,7 +281,8 @@ bool takes_value(const std::string& name) {
         "--angle", "--size", "--color", "--highlight", "--underline", "--strike",
         "--note", "--stamp", "--delete", "--author", "--move", "--set-text", "--freetext",
         "--p12", "--password-fd", "--field", "--image", "--name", "--reason",
-        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module", "--lang", "--dpi", "--certify", "--doc-password-fd", "--anchor"};
+        "--location", "--tsa", "--trust", "--stamp-image", "--pkcs11", "--pkcs11-module", "--lang", "--dpi", "--certify", "--doc-password-fd", "--anchor",
+        "--smart-id", "--mobile-id", "--relying-party-name", "--relying-party-uuid"};
     for (const std::string& v : kValued) {
         if (v == name) {
             return true;
@@ -1029,12 +1043,140 @@ std::string auto_key_uri(const std::string& module) {
                          "lists them)");
 }
 
-leht::crypto::Identity identity_from(const Args& args) {
+// --- signing with a phone (queue M6) ---------------------------------------------
+
+/// Ctrl-C while a phone is being asked: the next check (within about a
+/// second) cancels, and nothing is written.
+volatile std::sig_atomic_t g_interrupted = 0;
+
+extern "C" void on_interrupt(int /*sig*/) { g_interrupted = 1; }
+
+/// A QR code in the terminal, two modules a character with half blocks, dark
+/// on light whatever the terminal's colours, and drawn over itself each time.
+class TerminalQr {
+public:
+    void show(const std::string& link) {
+        if (::isatty(STDERR_FILENO) == 0) {
+            // Not a terminal: the link itself, for whatever reads this.
+            std::fprintf(stderr, "leht: Smart-ID link: %s\n", link.c_str());
+            return;
+        }
+        const leht::crypto::QrCode qr = leht::crypto::qr_modules(link);
+        constexpr int kQuiet = 2;
+        const int side = qr.size + 2 * kQuiet;
+        const auto dark = [&](int x, int y) {
+            x -= kQuiet;
+            y -= kQuiet;
+            return x >= 0 && y >= 0 && x < qr.size && y < qr.size && qr.at(x, y);
+        };
+        std::string out;
+        if (lines_ > 0) {
+            out += "\x1b[" + std::to_string(lines_) + "A";
+        }
+        lines_ = 0;
+        for (int y = 0; y < side; y += 2) {
+            out += "\x1b[30;107m";
+            for (int x = 0; x < side; ++x) {
+                const bool top = dark(x, y);
+                const bool bottom = y + 1 < side && dark(x, y + 1);
+                out += top && bottom ? "\u2588" : top ? "\u2580" : bottom ? "\u2584" : " ";
+            }
+            out += "\x1b[0m\n";
+            ++lines_;
+        }
+        std::fputs(out.c_str(), stderr);
+    }
+
+private:
+    int lines_ = 0;
+};
+
+/// "EE:38001085718" as Smart-ID's ETSI identifier; ETSI's own form as it is.
+std::string smart_id_person(const std::string& text) {
+    if (text.size() > 3 && text[2] == ':') {
+        std::string country = text.substr(0, 2);
+        for (char& c : country) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        return "PNO" + country + "-" + text.substr(3);
+    }
+    return text;
+}
+
+/// The phone's language from the locale: Estonian, Russian, else English.
+std::string phone_language() {
+    for (const char* var : {"LC_ALL", "LC_MESSAGES", "LANG"}) {
+        const char* v = std::getenv(var);
+        if (v != nullptr && *v != '\0') {
+            const std::string l(v);
+            return l.rfind("et", 0) == 0 ? "est" : l.rfind("ru", 0) == 0 ? "rus" : "eng";
+        }
+    }
+    return "eng";
+}
+
+leht::crypto::Identity phone_identity(const Args& args, const std::string& input) {
+    auto qr = std::make_shared<TerminalQr>();
+    leht::crypto::PhoneDialog dialog;
+    dialog.display_text = "Sign " + fs::path(input).filename().string();
+    dialog.language = phone_language();
+    dialog.show_qr = [qr](const std::string& link) { qr->show(link); };
+    dialog.show_code = [](const std::string& code) {
+        std::fprintf(stderr, "Verification code: %s\n", code.c_str());
+    };
+    dialog.status = [](const std::string& text) { std::fprintf(stderr, "leht: %s\n", text.c_str()); };
+    dialog.cancelled = [] { return g_interrupted != 0; };
+
+    struct sigaction sa {};
+    sa.sa_handler = on_interrupt;
+    sa.sa_flags = SA_RESTART;  // a wait in progress finishes; the check after it cancels
+    sigemptyset(&sa.sa_mask);
+    ::sigaction(SIGINT, &sa, nullptr);
+
+    const auto party = [&](leht::crypto::RelyingParty p) {
+        if (const std::string n = args.flag("--relying-party-name"); !n.empty()) {
+            p.name = n;
+        }
+        if (const std::string u = args.flag("--relying-party-uuid"); !u.empty()) {
+            p.uuid = u;
+        }
+        return p;
+    };
+    std::fprintf(stderr, "leht: SK's demo environment: only the digest to sign is sent, "
+                         "never the document\n");
+    if (const std::string who = args.flag("--smart-id"); !who.empty()) {
+        leht::crypto::SmartIdService service = leht::crypto::SmartIdService::demo();
+        service.party = party(service.party);
+        if (who == "qr") {
+            return leht::crypto::Identity::from_smart_id_qr(service, dialog);
+        }
+        return leht::crypto::Identity::from_smart_id(service, smart_id_person(who), dialog);
+    }
+    const std::string mid = args.flag("--mobile-id");
+    const std::size_t colon = mid.find(':');
+    if (colon == std::string::npos) {
+        throw leht::Error(0, "--mobile-id takes PHONE:PERSON, e.g. +37268000769:60001017869");
+    }
+    leht::crypto::MobileIdService service = leht::crypto::MobileIdService::demo();
+    service.party = party(service.party);
+    return leht::crypto::Identity::from_mobile_id(service, mid.substr(0, colon),
+                                                  mid.substr(colon + 1), dialog);
+}
+
+leht::crypto::Identity identity_from(const Args& args, const std::string& input) {
     const std::string p12_path = args.flag("--p12");
     std::string uri = args.flag("--pkcs11");
-    if (p12_path.empty() == uri.empty()) {
-        throw leht::Error(0, "sign needs either --p12 ID.p12 (a key in a file) or --pkcs11 "
-                             "URI|auto (a key on an ID card or other token)");
+    const bool phone = !args.flag("--smart-id").empty() || !args.flag("--mobile-id").empty();
+    if (static_cast<int>(!p12_path.empty()) + static_cast<int>(!uri.empty()) +
+            static_cast<int>(!args.flag("--smart-id").empty()) +
+            static_cast<int>(!args.flag("--mobile-id").empty()) !=
+        1) {
+        throw leht::Error(0, "sign needs one of --p12 ID.p12 (a key in a file), --pkcs11 "
+                             "URI|auto (an ID card or other token), --smart-id qr|PERSON or "
+                             "--mobile-id PHONE:PERSON (a phone)");
+    }
+    if (phone) {
+        return phone_identity(args, input);
     }
     // The key and its password never leave this process.
     if (!p12_path.empty()) {
@@ -1527,7 +1669,7 @@ int cmd_sign(const leht::Context& ctx, const Args& args) {
     }
     request.override_certification = args.has_switch("--force");
 
-    const leht::crypto::Identity identity = identity_from(args);
+    const leht::crypto::Identity identity = identity_from(args, input);
     const leht::crypto::CertInfo cert = identity.certificate();
     if (request.name.empty()) {
         request.name = cert.common_name;
@@ -2359,7 +2501,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "leht: unknown command '%s'\n\n", cmd.c_str());
         std::fputs(kUsage, stderr);
         return 2;
+    } catch (const leht::crypto::Cancelled& e) {
+        std::fprintf(stderr, "leht: %s\n", e.what());
+        return 3;
     } catch (const leht::Error& e) {
+        if (g_interrupted != 0) {
+            // Ctrl-C broke a network wait off rather than waiting for it.
+            std::fprintf(stderr, "leht: Signing was cancelled. Nothing was written.\n");
+            return 3;
+        }
         std::fprintf(stderr, "leht: %s\n", e.what());
         return 1;
     } catch (const std::exception& e) {

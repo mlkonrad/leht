@@ -15,6 +15,7 @@
 //   * VERIFICATION parses hostile DER from the document, so the viewer runs it
 //     inside the sandboxed worker. See verify_cms().
 
+#include "leht/error.hpp"
 #include "leht/ops/sign.hpp"
 #include "leht/trustlist/model.hpp"
 
@@ -99,6 +100,75 @@ struct TokenKey {
 /// not an error, when there is no reader or no card.
 [[nodiscard]] std::vector<TokenKey> list_token_keys(const std::string& module_path = {});
 
+/// Signing thrown out by the person: Cancel pressed, Ctrl-C, or "no" on the
+/// phone. Nothing was written.
+class Cancelled : public Error {
+public:
+    explicit Cancelled(const std::string& message) : Error(0, message) {}
+};
+
+// --- Smart-ID and Mobile-ID (SK ID Solutions) ---------------------------------
+//
+// The key is on the person's phone. Leht sends SK the digest of what is to be
+// signed -- never the document -- and gets the signature value back. SK's DEMO
+// environment only, for now: its accounts chain to SK's TEST CAs.
+
+/// Who asks SK: registered with SK, shown on the phone.
+struct RelyingParty {
+    std::string uuid;
+    std::string name;
+};
+
+struct SmartIdService {
+    std::string base_url;     ///< ".../smart-id-rp/v3/", with the slash
+    std::string scheme_name;  ///< ties QR links to the environment: "smart-id-demo"
+    RelyingParty party;
+    /// SK's demo environment, as DEMO. $LEHT_SMARTID_URL replaces the URL, for
+    /// tests against a local mock only.
+    static SmartIdService demo();
+};
+
+struct MobileIdService {
+    std::string base_url;  ///< ".../mid-api", no slash
+    RelyingParty party;
+    /// SK's demo environment, as DEMO. $LEHT_MOBILEID_URL replaces the URL,
+    /// for tests only.
+    static MobileIdService demo();
+};
+
+/// What the person sees, and can do, while their phone is asked. Every
+/// callback is called on the thread that called into leht::crypto, between
+/// network waits of at most about a second.
+struct PhoneDialog {
+    /// Shown on the phone with the PIN prompt ("Sign contract.pdf").
+    /// Shortened to what the service allows.
+    std::string display_text;
+    /// ISO 639-2: "est", "eng", "rus" (Mobile-ID also "lit").
+    std::string language = "eng";
+    /// Smart-ID's QR link, anew every second: draw it as a QR code
+    /// (qr_modules()). Required for the QR flow.
+    std::function<void(const std::string& link)> show_qr;
+    /// A verification code the person must see match the phone's.
+    std::function<void(const std::string& code)> show_code;
+    /// True to stop waiting: throws Cancelled.
+    std::function<bool()> cancelled;
+    /// What happens now, for a status line ("Scan the code with Smart-ID").
+    std::function<void(const std::string& status)> status;
+};
+
+/// A QR code as modules, row by row: true is dark. The side is `size`; no
+/// quiet zone is included. Error correction level L, as SK recommends for
+/// its long links.
+struct QrCode {
+    int size = 0;
+    std::vector<bool> dark;
+    [[nodiscard]] bool at(int x, int y) const {
+        return dark[static_cast<std::size_t>(y) * static_cast<std::size_t>(size) +
+                    static_cast<std::size_t>(x)];
+    }
+};
+[[nodiscard]] QrCode qr_modules(const std::string& text);
+
 /// A signing key and its certificate chain.
 ///
 /// The key is either in memory, read from a PKCS#12 file, or stays on a
@@ -127,8 +197,29 @@ public:
     static Identity from_pkcs11(const std::string& uri, const PinSource& pin,
                                 const std::string& module_path = {});
 
+    /// Smart-ID, the person unknown until they scan: a QR code (shown
+    /// through dialog.show_qr, renewed every second) lets them pick an
+    /// account in the Smart-ID app. Returns once they have, with its
+    /// certificate. Signing then asks that phone directly, with no code to
+    /// compare. Throws Cancelled, or leht::Error with a message for the person.
+    static Identity from_smart_id_qr(const SmartIdService& service, const PhoneDialog& dialog);
+
+    /// Smart-ID by personal code: `semantics_id` is ETSI's, "PNOEE-38001085718"
+    /// (the type, the country, the code). The phone is asked to pick the
+    /// account first; signing then shows a verification code.
+    static Identity from_smart_id(const SmartIdService& service, const std::string& semantics_id,
+                                  const PhoneDialog& dialog);
+
+    /// Mobile-ID: the phone number ("+37268000769") and the personal code it
+    /// is registered to. Fetches the signing certificate; signing shows a
+    /// verification code.
+    static Identity from_mobile_id(const MobileIdService& service, const std::string& phone,
+                                   const std::string& national_id, const PhoneDialog& dialog);
+
     /// True when the key is on a token; false for a PKCS#12 key.
     [[nodiscard]] bool on_token() const;
+    /// True when a phone signs (Smart-ID, Mobile-ID).
+    [[nodiscard]] bool on_phone() const;
 
     Identity(Identity&&) noexcept;
     Identity& operator=(Identity&&) noexcept;

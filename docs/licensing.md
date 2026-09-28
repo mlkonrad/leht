@@ -23,6 +23,8 @@ known, weighed cost of the model, not an oversight.
 | **OpenSSL** (libcrypto, libssl) | Apache-2.0, dynamically linked | Signing and verification: PKCS#12, CMS/PAdES, RFC 3161 timestamps, and TLS for an https timestamp authority (M5) |
 | **libxml2** | MIT, dynamically linked | Reading the EU trusted lists' XML (`trustlist/`, queue M5), in the sandboxed worker in the viewer |
 | **xmlsec1** (with its OpenSSL backend) | MIT, dynamically linked | Verifying the trusted lists' XML signatures (`trustlist/`) |
+| **nlohmann/json** | MIT, header-only | Reading and writing SK's Smart-ID and Mobile-ID JSON (`crypto/src/sk.cpp`), in the trusted process |
+| **libqrencode** | LGPL-2.1-or-later, dynamically linked | Smart-ID's QR codes, in the terminal and in the viewer (`crypto/src/qr.cpp`) |
 | **Tesseract** | Apache-2.0, dynamically linked | OCR (`ocr/`), in its own sandboxed worker in the viewer. Its glyphless font `tessdata/pdf.ttf` (572 bytes, Apache-2.0) is embedded in `core/src/ops/glyphless_font.hpp`, with attribution, for the invisible text layer |
 
 **qpdf was removed from the build.** MuPDF 1.28 covers the structure work it was brought in
@@ -31,7 +33,7 @@ collection, de-duplication, linearisation and AES-256. The qpdf and Ghostscript
 *command-line* tools are used at test time only and are not linked, not shipped, and not
 runtime dependencies, so their licences do not enter the chain.
 
-AGPL-3.0 + LGPL-3.0 and LGPL-2.1 (both dynamic) + Apache-2.0 → **the app ships AGPL-3.0**. Compatible and
+AGPL-3.0 + LGPL-3.0 and LGPL-2.1 (all dynamic) + Apache-2.0 + MIT → **the app ships AGPL-3.0**. Compatible and
 consistent, and simpler than it was: one copyleft library, not two.
 
 OpenSSL 3 is Apache-2.0, which is GPLv3-compatible, so it raises nothing new — unlike

@@ -46,8 +46,9 @@ private:
     bool drawing_ = false;
 };
 
-/// Collects everything a signature needs: the key, what it should look like,
-/// and the optional timestamp authority.
+/// Collects everything a signature needs: the key (a file, a card, or a
+/// phone through Smart-ID or Mobile-ID), what it should look like, and the
+/// optional timestamp authority.
 ///
 /// The password is held only until the request is handed to the engine, which
 /// wipes it. Nothing here touches the PDF, and nothing here signs.
@@ -82,6 +83,15 @@ private:
     QFormLayout* form_ = nullptr;
     QRadioButton* fromFile_ = nullptr;
     QRadioButton* fromCard_ = nullptr;
+    QRadioButton* fromSmartId_ = nullptr;
+    QRadioButton* fromMobileId_ = nullptr;
+    QWidget* smartIdRow_ = nullptr;
+    QComboBox* smartIdHow_ = nullptr;      ///< QR code, or personal code
+    QComboBox* smartIdCountry_ = nullptr;
+    QLineEdit* smartIdCode_ = nullptr;
+    QLineEdit* mobilePhone_ = nullptr;
+    QLineEdit* mobileCode_ = nullptr;
+    QLabel* phoneNote_ = nullptr;
     QWidget* keyFileRow_ = nullptr;
     QLineEdit* keyPath_ = nullptr;
     QLineEdit* password_ = nullptr;

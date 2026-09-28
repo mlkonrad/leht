@@ -8,6 +8,7 @@
 #include <openssl/bn.h>
 #include <openssl/ec.h>
 #include <openssl/err.h>
+#include <openssl/rsa.h>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -131,6 +132,9 @@ Bytes digest_ranges(int fd, const ops::ByteRange& r, const EVP_MD* md) {
 /// The digest to pair with the key: an ECDSA key's curve sets the hash size
 /// that gives it its full strength (P-384 with SHA-384, as ID-card keys are).
 const EVP_MD* digest_for(const Identity& id) {
+    if (id.impl().remote) {
+        return id.impl().remote->digest();
+    }
     if (id.key_type() == KeyType::Ec) {
         if (id.key_bits() > 384) {
             return EVP_sha512();
@@ -191,11 +195,80 @@ Bytes signed_attributes_der(CMS_SignerInfo* si) {
     return out;
 }
 
-/// What CMS_final_digest does for a key in memory, with a PKCS#11 token
-/// computing the signature value: the signed attributes are completed here,
-/// hashed, and the token signs the hash.
-void sign_on_token(CMS_SignerInfo* si, detail::Token& token, const Identity& identity,
-                   const EVP_MD* md, const Bytes& digest) {
+/// The SignerInfo's algorithm as RSASSA-PSS (RFC 4055): `md` for the hash
+/// and for MGF1, a salt as long as the digest, the usual trailer.
+void set_pss(CMS_SignerInfo* si, const EVP_MD* md) {
+    X509_ALGOR* sig_alg = nullptr;
+    CMS_SignerInfo_get0_algs(si, nullptr, nullptr, nullptr, &sig_alg);
+    detail::Ptr<RSA_PSS_PARAMS, RSA_PSS_PARAMS_free> pss{RSA_PSS_PARAMS_new()};
+    detail::Ptr<X509_ALGOR, X509_ALGOR_free> mgf_md{X509_ALGOR_new()};
+    if (sig_alg == nullptr || !pss || !mgf_md) {
+        fail("cannot describe the RSASSA-PSS signature");
+    }
+    pss->hashAlgorithm = X509_ALGOR_new();
+    pss->maskGenAlgorithm = X509_ALGOR_new();
+    pss->saltLength = ASN1_INTEGER_new();
+    if (pss->hashAlgorithm == nullptr || pss->maskGenAlgorithm == nullptr ||
+        pss->saltLength == nullptr ||
+        ASN1_INTEGER_set(pss->saltLength, EVP_MD_get_size(md)) != 1) {
+        fail("cannot describe the RSASSA-PSS signature");
+    }
+    X509_ALGOR_set_md(pss->hashAlgorithm, md);
+    X509_ALGOR_set_md(mgf_md.get(), md);
+    ASN1_STRING* mgf_params = ASN1_item_pack(mgf_md.get(), ASN1_ITEM_rptr(X509_ALGOR), nullptr);
+    if (mgf_params == nullptr || X509_ALGOR_set0(pss->maskGenAlgorithm, OBJ_nid2obj(NID_mgf1),
+                                                 V_ASN1_SEQUENCE, mgf_params) != 1) {
+        ASN1_STRING_free(mgf_params);
+        fail("cannot describe the RSASSA-PSS signature");
+    }
+    ASN1_STRING* params = ASN1_item_pack(pss.get(), ASN1_ITEM_rptr(RSA_PSS_PARAMS), nullptr);
+    if (params == nullptr ||
+        X509_ALGOR_set0(sig_alg, OBJ_nid2obj(NID_rsassaPss), V_ASN1_SEQUENCE, params) != 1) {
+        ASN1_STRING_free(params);
+        fail("cannot describe the RSASSA-PSS signature");
+    }
+}
+
+/// An ECDSA value as CMS wants it, an ECDSA-Sig-Value: tokens and phones
+/// hand back r||s, and some already DER.
+Bytes ecdsa_der(const Bytes& value) {
+    if (!value.empty() && value[0] == 0x30) {
+        const unsigned char* p = value.data();
+        detail::Ptr<ECDSA_SIG, ECDSA_SIG_free> parsed{
+            d2i_ECDSA_SIG(nullptr, &p, static_cast<long>(value.size()))};
+        if (parsed && p == value.data() + value.size()) {
+            return value;
+        }
+        ERR_clear_error();
+    }
+    if (value.empty() || value.size() % 2 != 0) {
+        throw Error(0, "the key returned a malformed ECDSA signature");
+    }
+    const std::size_t half = value.size() / 2;
+    detail::Ptr<ECDSA_SIG, ECDSA_SIG_free> sig{ECDSA_SIG_new()};
+    BIGNUM* r = BN_bin2bn(value.data(), static_cast<int>(half), nullptr);
+    BIGNUM* s = BN_bin2bn(value.data() + half, static_cast<int>(half), nullptr);
+    if (!sig || r == nullptr || s == nullptr || ECDSA_SIG_set0(sig.get(), r, s) != 1) {
+        BN_free(r);
+        BN_free(s);
+        fail("cannot encode the ECDSA signature");
+    }
+    unsigned char* p = nullptr;
+    const int n = i2d_ECDSA_SIG(sig.get(), &p);
+    if (n <= 0) {
+        fail("cannot encode the ECDSA signature");
+    }
+    Bytes out(p, p + n);
+    OPENSSL_free(p);
+    return out;
+}
+
+/// What CMS_final_digest does for a key in memory, with the signature value
+/// computed elsewhere -- on a PKCS#11 token, or on a phone: the signed
+/// attributes are completed here, hashed, and the hash is signed there.
+void sign_externally(CMS_SignerInfo* si, const Identity& identity, const EVP_MD* md,
+                     const Bytes& digest) {
+    const Identity::Impl& id = identity.impl();
     if (CMS_signed_add1_attr_by_NID(si, NID_pkcs9_contentType, V_ASN1_OBJECT,
                                     OBJ_nid2obj(NID_pkcs7_data), -1) != 1 ||
         CMS_signed_add1_attr_by_NID(si, NID_pkcs9_messageDigest, V_ASN1_OCTET_STRING,
@@ -210,49 +283,37 @@ void sign_on_token(CMS_SignerInfo* si, detail::Token& token, const Identity& ide
     }
     hash.resize(hash_len);
 
-    Bytes input = hash;
-    if (identity.key_type() == KeyType::Rsa) {
-        // CKM_RSA_PKCS pads what it is given: hand it the DigestInfo.
-        detail::Ptr<X509_SIG, X509_SIG_free> info{X509_SIG_new()};
-        X509_ALGOR* alg = nullptr;
-        ASN1_OCTET_STRING* value = nullptr;
-        X509_SIG_getm(info.get(), &alg, &value);
-        if (!info || X509_ALGOR_set0(alg, OBJ_nid2obj(EVP_MD_get_type(md)), V_ASN1_NULL,
-                                     nullptr) != 1 ||
-            ASN1_OCTET_STRING_set(value, hash.data(), static_cast<int>(hash.size())) != 1) {
-            fail("cannot build the DigestInfo");
+    Bytes value;
+    if (id.remote) {
+        if (identity.key_type() == KeyType::Rsa && id.remote->pss()) {
+            set_pss(si, md);
         }
-        unsigned char* p = nullptr;
-        const int n = i2d_X509_SIG(info.get(), &p);
-        if (n <= 0) {
-            fail("cannot encode the DigestInfo");
+        value = id.remote->sign(hash);
+    } else {
+        Bytes input = hash;
+        if (identity.key_type() == KeyType::Rsa) {
+            // CKM_RSA_PKCS pads what it is given: hand it the DigestInfo.
+            detail::Ptr<X509_SIG, X509_SIG_free> info{X509_SIG_new()};
+            X509_ALGOR* alg = nullptr;
+            ASN1_OCTET_STRING* octets = nullptr;
+            X509_SIG_getm(info.get(), &alg, &octets);
+            if (!info || X509_ALGOR_set0(alg, OBJ_nid2obj(EVP_MD_get_type(md)), V_ASN1_NULL,
+                                         nullptr) != 1 ||
+                ASN1_OCTET_STRING_set(octets, hash.data(), static_cast<int>(hash.size())) != 1) {
+                fail("cannot build the DigestInfo");
+            }
+            unsigned char* p = nullptr;
+            const int n = i2d_X509_SIG(info.get(), &p);
+            if (n <= 0) {
+                fail("cannot encode the DigestInfo");
+            }
+            input.assign(p, p + n);
+            OPENSSL_free(p);
         }
-        input.assign(p, p + n);
-        OPENSSL_free(p);
+        value = detail::token_sign(*id.token, input);
     }
-
-    Bytes value = detail::token_sign(token, input);
     if (identity.key_type() == KeyType::Ec) {
-        // PKCS#11 returns r||s; CMS wants an ECDSA-Sig-Value.
-        if (value.empty() || value.size() % 2 != 0) {
-            throw Error(0, "the token returned a malformed ECDSA signature");
-        }
-        const std::size_t half = value.size() / 2;
-        detail::Ptr<ECDSA_SIG, ECDSA_SIG_free> sig{ECDSA_SIG_new()};
-        BIGNUM* r = BN_bin2bn(value.data(), static_cast<int>(half), nullptr);
-        BIGNUM* s = BN_bin2bn(value.data() + half, static_cast<int>(half), nullptr);
-        if (!sig || r == nullptr || s == nullptr || ECDSA_SIG_set0(sig.get(), r, s) != 1) {
-            BN_free(r);
-            BN_free(s);
-            fail("cannot encode the ECDSA signature");
-        }
-        unsigned char* p = nullptr;
-        const int n = i2d_ECDSA_SIG(sig.get(), &p);
-        if (n <= 0) {
-            fail("cannot encode the ECDSA signature");
-        }
-        value.assign(p, p + n);
-        OPENSSL_free(p);
+        value = ecdsa_der(value);
     }
     if (ASN1_STRING_set(CMS_SignerInfo_get0_signature(si), value.data(),
                         static_cast<int>(value.size())) != 1) {
@@ -263,7 +324,8 @@ void sign_on_token(CMS_SignerInfo* si, detail::Token& token, const Identity& ide
 /// The finished blob, read back as a verifier will read it, must verify
 /// against the signer's certificate. For a token key this is the only proof
 /// that the attributes signed are the ones encoded and that the key on the
-/// card is the certificate's; for any key it costs a millisecond.
+/// card (or the phone) is the certificate's; for any key it costs a
+/// millisecond.
 void self_check(const Bytes& blob, X509* cert) {
     const unsigned char* p = blob.data();
     const detail::CmsPtr back{d2i_CMS_ContentInfo(nullptr, &p, static_cast<long>(blob.size()))};
@@ -327,8 +389,8 @@ SignResult sign_prepared(int fd, const ops::ByteRange& range, const Identity& id
             fail("cannot add a chain certificate");
         }
     }
-    if (id.token) {
-        sign_on_token(si, *id.token, identity, md, digest);
+    if (id.token || id.remote) {
+        sign_externally(si, identity, md, digest);
     } else if (CMS_final_digest(cms.get(), digest.data(), static_cast<unsigned>(digest.size()),
                                 nullptr, kFlags) != 1) {
         fail("signing failed");

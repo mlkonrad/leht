@@ -104,6 +104,7 @@ struct CertSpec {
     std::string crl_url{};   ///< crlDistributionPoints, when set
     std::string qc_statements{};  ///< qcStatements extension value, as DER in hex
     std::string policies{};       ///< certificatePolicies, OIDs separated by commas
+    std::string ca_issuers_url{};  ///< authorityInfoAccess caIssuers, when set
 };
 
 /// Issues a certificate for `key` from `issuer` (self-signed when null).
@@ -142,8 +143,15 @@ inline Cert issue(const Key& key, const CertSpec& spec, const Cert* issuer = nul
         add(NID_ext_key_usage, spec.ext_key_usage);
     }
     add(NID_subject_key_identifier, "hash");
-    if (!spec.ocsp_url.empty()) {
-        add(NID_info_access, ("OCSP;URI:" + spec.ocsp_url).c_str());
+    if (!spec.ocsp_url.empty() || !spec.ca_issuers_url.empty()) {
+        std::string aia;
+        if (!spec.ocsp_url.empty()) {
+            aia = "OCSP;URI:" + spec.ocsp_url;
+        }
+        if (!spec.ca_issuers_url.empty()) {
+            aia += (aia.empty() ? "" : ",") + std::string("caIssuers;URI:") + spec.ca_issuers_url;
+        }
+        add(NID_info_access, aia.c_str());
     }
     if (!spec.crl_url.empty()) {
         add(NID_crl_distribution_points, ("URI:" + spec.crl_url).c_str());
@@ -302,6 +310,7 @@ protected:
     struct Reply {
         std::string type;
         std::string body;  ///< empty: answer 404
+        int status = 200;  ///< another status answers with no body
     };
     virtual Reply answer(const std::string& method, const std::string& path,
                          const std::string& body) = 0;
@@ -352,8 +361,10 @@ private:
         const Reply r = answer(method, path, in.substr(in.find("\r\n\r\n") + 4));
         ++served_;
         const std::string head =
-            r.body.empty() ? std::string("HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-                           : "HTTP/1.0 200 OK\r\nContent-Type: " + r.type +
+            r.status != 200 ? "HTTP/1.0 " + std::to_string(r.status) +
+                                  " Error\r\nContent-Length: 0\r\n\r\n"
+            : r.body.empty() ? std::string("HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                             : "HTTP/1.0 200 OK\r\nContent-Type: " + r.type +
                                  "\r\nContent-Length: " + std::to_string(r.body.size()) +
                                  "\r\n\r\n";
         (void)!::write(c, head.data(), head.size());

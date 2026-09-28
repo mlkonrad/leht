@@ -23,7 +23,7 @@ of Leht:**
 
 ```sh
 sudo dnf install mupdf qpdf ghostscript poppler-utils python3-pillow python3-numpy \
-                 softhsm tesseract-langpack-eng tesseract-langpack-est \
+                 softhsm zbar tesseract-langpack-eng tesseract-langpack-est \
                  libasan libubsan clang
 ```
 
@@ -41,6 +41,10 @@ sudo dnf install mupdf qpdf ghostscript poppler-utils python3-pillow python3-num
   whenever SoftHSM can start inside it (NSS loads every p11-kit module) — with a test
   token, or as root with the default config, as in CI. The tests run it with
   `SOFTHSM2_CONF` pointing at a file that does not exist.
+- `zbar` — **`zbarimg`** reads the Smart-ID QR codes back, an independent check that the
+  code holds the link, bit for bit. The Smart-ID and Mobile-ID tests otherwise run against
+  a local imitation of SK (`crypto/tests/sk_mock.hpp`); `LEHT_SK_DEMO=1` adds SK's real
+  demo environment, by hand only, never in CI.
 - `tesseract-langpack-eng`, `-est` — the OCR tests read English and Estonian; without the
   data they skip (77). `-DLEHT_WITH_OCR=OFF` builds without Tesseract at all.
 - `poppler-utils`, Pillow, NumPy — for the render cross-check described under Testing.

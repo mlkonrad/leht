@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QList>
 #include <QMainWindow>
+#include <QPointer>
 #include <QThread>
 #include <QVector>
 
@@ -46,6 +47,7 @@ class ThumbnailBar;
 /// the menu bar, the toolbar and the mode bar are built from it. With no
 /// document open the window shows the WelcomeView; with one, a mode bar over
 /// the sidebar (pages, outline, comments, form, signatures) and the page.
+class PhoneSignDialog;
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -197,6 +199,8 @@ private:
     PageView* view_ = nullptr;
     QThread workerThread_;
     RenderWorker* worker_ = nullptr;
+    /// Up while a phone signs: its QR code or verification code, and Cancel.
+    QPointer<PhoneSignDialog> phoneDialog_;
 
     QLabel* pageLabel_ = nullptr;
     QLabel* zoomLabel_ = nullptr;

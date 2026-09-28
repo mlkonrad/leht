@@ -58,7 +58,8 @@ leht annotate  FILE -o OUT.pdf [--highlight TEXT] [--note P:X,Y:TEXT] [--freetex
                [--stamp P:NAME]... [--move ID:BOX]... [--set-text ID:TEXT]...
 leht form      FILE                               list form fields
 leht fill      FILE -o OUT.pdf NAME=VALUE... [--flatten]
-leht sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto) [--box P:BOX] [--tsa URL]
+leht sign      FILE -o OUT.pdf (--p12 ID.p12 | --pkcs11 URI|auto | --smart-id qr|PERSON |
+               --mobile-id PHONE:PERSON) [--box P:BOX] [--tsa URL]
                [--certify no-changes|forms|comments] [--ltv | --lta]
 leht ltv       FILE -o OUT.pdf [--tsa URL]        embed validation data (B-LT, B-LTA)
 leht keys      [--pkcs11-module LIB]              signing keys on ID cards and tokens
@@ -134,6 +135,11 @@ example: a 466 KB merge of a 150 DPI scan plus text went to 106 KB at `--preset 
 - **ID-card signing:** a key that stays on an Estonian ID card, or any PKCS#11 smartcard
   or token, in the CLI (`--pkcs11`, `leht keys`) and the viewer's Sign dialog. Tested
   against SoftHSM2 only; **not yet tried with a real card and reader.**
+- **Smart-ID and Mobile-ID:** signing with a phone, in the CLI and the viewer — Smart-ID by
+  a QR code renewed every second or by personal code, Mobile-ID by phone number, RSA-PSS
+  and ECDSA. Only the digest to sign goes to SK, never the document. **SK's demo
+  environment only for now**, and a Smart-ID signature through a real phone not yet made.
+  See [docs/signing.md](docs/signing.md#signing-with-a-phone-smart-id-and-mobile-id).
 - **Release readiness:** `cmake --install` with desktop integration, CI on every push,
   and the whole suite, sanitizers and a fuzz pass run against the pinned MuPDF 1.28.4.
 - **Viewer editing:** move and resize annotations, free text typed in place, crop to a
@@ -206,14 +212,15 @@ cmake -S . -B build -G Ninja -DLEHT_MUPDF_ROOT="$(tools/build-mupdf.sh)"
 # Fedora
 sudo dnf install gcc-c++ cmake ninja-build mupdf-devel openssl-devel libseccomp-devel \
                  p11-kit-devel tesseract-devel leptonica-devel \
-                 libxml2-devel xmlsec1-devel xmlsec1-openssl-devel libtool-ltdl-devel
+                 libxml2-devel xmlsec1-devel xmlsec1-openssl-devel libtool-ltdl-devel \
+                 json-devel qrencode-devel
 sudo dnf install tesseract-langpack-est tesseract-langpack-eng  # OCR languages
 sudo dnf install qt6-qtbase-devel qt6-qtsvg  # only for the viewer
 
 # Debian / Ubuntu
 sudo apt install g++ cmake ninja-build libmupdf-dev libssl-dev libseccomp-dev libp11-kit-dev \
                  libtesseract-dev libleptonica-dev tesseract-ocr-est tesseract-ocr-eng \
-                 libxml2-dev libxmlsec1-dev libltdl-dev
+                 libxml2-dev libxmlsec1-dev libltdl-dev nlohmann-json3-dev libqrencode-dev
 sudo apt install qt6-base-dev qt6-svg-plugins  # only for the viewer (Debian 13+)
 ```
 

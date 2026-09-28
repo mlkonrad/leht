@@ -18,6 +18,11 @@ inline constexpr const char* kAuthor = "annotations/author";
 inline constexpr const char* kDefaultZoom = "view/defaultZoom";  ///< "width" | "page" | "actual"
 inline constexpr const char* kToolbarText = "appearance/toolbarText";
 inline constexpr const char* kTrusted = "trustedCertificates";
+/// Who asks SK for Smart-ID and Mobile-ID signatures. Empty: SK's DEMO.
+inline constexpr const char* kSmartIdRpName = "signing/smartIdRpName";
+inline constexpr const char* kSmartIdRpUuid = "signing/smartIdRpUuid";
+inline constexpr const char* kMobileIdRpName = "signing/mobileIdRpName";
+inline constexpr const char* kMobileIdRpUuid = "signing/mobileIdRpUuid";
 }  // namespace prefs
 
 class PreferencesDialog : public QDialog {
@@ -49,6 +54,10 @@ private:
     QCheckBox* useTsa_ = nullptr;
     QLineEdit* tsa_ = nullptr;
     QCheckBox* ltv_ = nullptr;
+    QLineEdit* smartIdRpName_ = nullptr;
+    QLineEdit* smartIdRpUuid_ = nullptr;
+    QLineEdit* mobileIdRpName_ = nullptr;
+    QLineEdit* mobileIdRpUuid_ = nullptr;
 
     QListWidget* trusted_ = nullptr;
 
