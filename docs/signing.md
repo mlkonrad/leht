@@ -467,12 +467,15 @@ signed file becomes the document, and the edit log restarts from it. **Undo does
 back past a signature**, which is as it should be — undoing into a signed revision could
 only invalidate it.
 
-The Signatures panel gives each signature one line — *Valid*, *Intact, signer not trusted*,
-*Intact, but the certificate was revoked*, *Intact, but the document was changed
-afterwards*, *Broken* — and the details under it: signer, issuer, trust, revocation,
-algorithm, claimed time, timestamp, reason, location and the certificate's SHA-256
-fingerprint. A document timestamp has its own line, with the time it proves and its
-authority. The Signatures panel is a tab in the left sidebar.
+The Signatures tab in the left sidebar gives each signature a card: a coloured shield and a
+verdict — *Valid*, *Signer not trusted*, *Certificate revoked*, *Changed after signing*,
+*Changed in a forbidden way*, *Broken*, the same judgement as `leht verify`'s exit codes — and
+a sentence saying what it means, who signed and when (proved by a timestamp, or only claimed),
+whether it is qualified, and buttons to go to its page or, for an unknown signer, to the
+trusted certificates. A document timestamp has its own card, with the time it proves.
+*Technical details* folds out the full record under the cards: signer, issuer, trust,
+revocation, algorithm, claimed time, timestamp, reason, location and the certificate's
+SHA-256 fingerprint.
 
 With the EU trusted lists, each signature also gets a *Qualified* line — *qualified
 electronic signature (QES)*, *qualified electronic seal*, *advanced, with a qualified

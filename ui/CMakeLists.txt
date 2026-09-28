@@ -22,6 +22,7 @@ qt_add_library(leht_viewer_lib STATIC
     src/recent_files.cpp
     src/render_worker.cpp
     src/sidebar.cpp
+    src/signature_cards.cpp
     src/sign_dialog.cpp
     src/thumbnail_bar.cpp
     src/welcome_view.cpp

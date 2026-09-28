@@ -18,6 +18,7 @@
 #include <QTimeZone>
 #include "recent_files.hpp"
 #include "sidebar.hpp"
+#include "signature_cards.hpp"
 #include "welcome_view.hpp"
 #include <QListWidget>
 #include <QMenuBar>
@@ -1419,6 +1420,28 @@ int main(int argc, char** argv) {
         check(saved.metadata("info:Title").value_or("") == "Üürileping", "the title is saved");
     }
 
+    // --- Signatures in words ---------------------------------------------------
+    {
+        SigRow ok;
+        ok.rangeOk = ok.intact = true;
+        ok.trust = static_cast<int>(leht::crypto::Trust::Trusted);
+        check(judgeSignature(ok).level == SignatureVerdict::Level::Valid, "an intact, trusted signature is Valid");
+        SigRow later = ok;
+        later.changedAfterSigning = true;
+        check(judgeSignature(later).level == SignatureVerdict::Level::Warning,
+              "one the document was added to after is a warning");
+        later.onlyValidationDataAfter = true;
+        check(judgeSignature(later).level == SignatureVerdict::Level::Valid,
+              "unless all that came after was validation data");
+        SigRow broken = ok;
+        broken.intact = false;
+        check(judgeSignature(broken).level == SignatureVerdict::Level::Broken, "a broken one is Broken");
+        SigRow stranger = ok;
+        stranger.trust = static_cast<int>(leht::crypto::Trust::Untrusted);
+        check(judgeSignature(stranger).headline == QStringLiteral("Signer not trusted"),
+              "an unknown signer is said to be not trusted");
+    }
+
     // --- Editing (M4b) -----------------------------------------------------
     {
         QTemporaryDir tmp;
@@ -1650,6 +1673,11 @@ int main(int argc, char** argv) {
             auto* banner = window.findChild<QToolBar*>(QStringLiteral("signatureBanner"));
             check(banner != nullptr && banner->isVisibleTo(&window),
                   "the signed-document banner is shown");
+            auto* cards = window.findChild<SignatureCards*>();
+            check(cards != nullptr && cards->count() == 1, "the Signatures tab has one card for the signature");
+            window.sidebar()->showPanel(QStringLiteral("signatures"));
+            pump(200);
+            shot(&window, "ux-signature-card");
             try {
                 leht::Document signedDoc = leht::Document::open(ctx, toSign.toStdString());
                 check(signedDoc.signature_count() == 1, "the file on disk carries one signature");

@@ -20,6 +20,7 @@ class PageView;
 class QAction;
 class QMenu;
 class QStackedWidget;
+class SignatureCards;
 class Sidebar;
 class WelcomeView;
 class QActionGroup;
@@ -233,6 +234,7 @@ private:
     bool sidebarBeforeGrid_ = true;  ///< whether the sidebar was open before the grid showed  ///< the next documentEdited follows a page rearrangement
     QVector<int> gridSelectionAfterEdit_;  ///< what the grid selects once the edit lands
     QWidget* signaturePanel_ = nullptr;
+    SignatureCards* signatureCards_ = nullptr;
     QMenu* recentMenu_ = nullptr;
     int certLevel_ = 0;
     QString pendingTask_;   ///< a welcome task waiting for its document to open

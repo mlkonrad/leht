@@ -16,6 +16,7 @@
 #include "file_tools_dialogs.hpp"
 #include "properties_dialog.hpp"
 #include "protect_dialog.hpp"
+#include "signature_cards.hpp"
 #ifdef LEHT_HAVE_OCR
 #include "leht/ocr/ocr.hpp"
 #endif
@@ -54,6 +55,7 @@
 #include <QTableWidget>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QScrollArea>
 #include <QSettings>
 #include <QVBoxLayout>
 #include <QPushButton>
@@ -791,12 +793,40 @@ void MainWindow::buildSignaturePanel() {
                           "document, and nothing is added to it."));
     connect(online, &QPushButton::clicked, actions_->find(QStringLiteral("checkRevocation")),
             &QAction::trigger);
+    // Cards first, in words; the full technical record folds out below.
+    signatureCards_ = new SignatureCards(signaturePanel_);
+    auto* cardScroll = new QScrollArea(signaturePanel_);
+    cardScroll->setWidgetResizable(true);
+    cardScroll->setFrameShape(QFrame::NoFrame);
+    cardScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);  // cards wrap to the width
+    auto* cardHolder = new QWidget(cardScroll);
+    auto* cardColumn = new QVBoxLayout(cardHolder);
+    cardColumn->setContentsMargins(0, 0, 0, 0);
+    cardColumn->addWidget(signatureCards_);
+    cardColumn->addStretch(1);
+    cardScroll->setWidget(cardHolder);
+    connect(signatureCards_, &SignatureCards::showPage, this, [this](int page) { view_->goToPage(page); });
+    connect(signatureCards_, &SignatureCards::trustRequested, this,
+            [this] { openPreferences(static_cast<int>(PreferencesDialog::Page::Trust)); });
+    auto* detailsToggle = new QPushButton(icons::named(QStringLiteral("chevron-down")), tr("Technical details"),
+                                          signaturePanel_);
+    detailsToggle->setObjectName(QStringLiteral("signatureDetailsToggle"));
+    detailsToggle->setCheckable(true);
+    detailsToggle->setFlat(true);
     signatures_ = new QTreeWidget(signaturePanel_);
     signatures_->setObjectName(QStringLiteral("signatureTree"));
     signatures_->setHeaderLabels({tr("Signature"), tr("Details")});
     signatures_->setColumnWidth(0, 150);
+    signatures_->hide();
+    connect(detailsToggle, &QPushButton::toggled, this, [this, detailsToggle, cardScroll](bool on) {
+        signatures_->setVisible(on);
+        cardScroll->setMaximumHeight(on ? cardScroll->sizeHint().height() : QWIDGETSIZE_MAX);
+        detailsToggle->setIcon(icons::named(on ? QStringLiteral("chevron-up") : QStringLiteral("chevron-down")));
+    });
+    column->addWidget(cardScroll, 1);
+    column->addWidget(detailsToggle, 0, Qt::AlignLeft);
+    column->addWidget(signatures_, 1);
     column->addWidget(online);
-    column->addWidget(signatures_);
     connect(details, &QAction::triggered, this, [this] { sidebar_->showPanel(QStringLiteral("signatures")); });
 
     // Clicking a signature goes to the page it is on.
@@ -890,6 +920,7 @@ QString localTime(qint64 unix_seconds) {
 void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
     signatureCount_ = static_cast<int>(rows.size());
     signatures_->clear();
+    signatureCards_->setRows({}, true);
     sidebar_->setPanelAvailable(QStringLiteral("signatures"), !rows.isEmpty());
     const bool verifyAsked = std::exchange(verifyPending_, false);
     if (rows.isEmpty()) {
@@ -904,6 +935,7 @@ void MainWindow::onSignaturesReady(const QVector<SigRow>& rows) {
 
     const RenderWorker::TrustedListState lists = RenderWorker::trustedListState();
     const bool haveTrustedList = lists.present;
+    signatureCards_->setRows(rows, haveTrustedList);
     int worst = 0;  // 0 valid, 1 a warning, 2 broken
     for (const SigRow& row : rows) {
         const auto [word, colour] = verdict(row);
