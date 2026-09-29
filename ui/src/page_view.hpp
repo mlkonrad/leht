@@ -15,6 +15,7 @@
 
 #include "edit_model.hpp"
 
+class CommentPopup;
 class QPlainTextEdit;
 
 /// Continuous vertical page view.
@@ -123,6 +124,28 @@ public:
     /// The text editor, while it is open; for tests.
     [[nodiscard]] QPlainTextEdit* textEditor() const;
 
+    // --- Comments on the page ------------------------------------------------
+    /// What is under the pointer at `pos` (viewport coordinates): a form field
+    /// and the topmost comment with something to read (a note, or any
+    /// annotation with text). Either may be null; where both are, the field
+    /// wins a click. Nothing while the view is rotated.
+    struct HoverTarget {
+        int page = -1;
+        QPointF base;
+        const FieldRow* field = nullptr;
+        const AnnotRow* annot = nullptr;
+    };
+    [[nodiscard]] HoverTarget hoverTargetAt(QPoint pos) const;
+    /// Opens the comment card on annotation `id`, scrolled into view; with
+    /// `edit`, with its text ready to edit (if edits are allowed). Returns
+    /// false if there is no such annotation.
+    bool showComment(int id, bool edit);
+    /// Whether comments may be edited or deleted from the card (not in a
+    /// certification that forbids it).
+    void setCommentsEditable(bool editable);
+    /// The comment card, while it is open; for tests.
+    [[nodiscard]] CommentPopup* commentPopup() const;
+
 public slots:
     /// A finished render from the worker. Ignored if the zoom has since changed.
     void onRendered(int page, double zoom, int rotation, quint64 generation, QImage image);
@@ -166,8 +189,6 @@ signals:
     void freeTextRequested(int page, QRectF box, QString text, double size, QColor color);
     /// Different words for an existing free-text annotation.
     void annotationTextRequested(int annotId, QString text);
-    /// A sticky note was double-clicked: its text should be edited.
-    void noteEditRequested(int annotId, QString current);
     /// A box was dragged with the Crop tool: the part of the page to keep.
     void cropBoxRequested(int page, QRectF box);
     /// A form field was clicked with the Select tool.
@@ -187,6 +208,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
+    bool viewportEvent(QEvent* event) override;
 
 private:
     static constexpr int kGap = 12;      // px between pages, at any zoom
@@ -300,6 +322,17 @@ private:
     void placeEditor();
     void commitEditor();
     void cancelEditor();
+
+    // The comment card, and a Select-tool click that may open one.
+    CommentPopup* popup_ = nullptr;
+    bool commentsEditable_ = true;
+    int pressComment_ = 0;  ///< the comment a Select press landed on, 0 for none
+    QPoint pressPos_;
+    void placePopup();
+    void closePopup(bool keepEdits);
+    /// The cursor `tool_` shows where nothing under the pointer changes it.
+    [[nodiscard]] Qt::CursorShape toolCursor() const;
+    void updateHoverCursor(QPoint pos);
 
     void emitSelect(int page, QPointF a, QPointF b, int mode);
     /// Turns the settled selection into a highlight request, then clears it.

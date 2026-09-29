@@ -10,6 +10,7 @@
 #include "page_view.hpp"
 #include "actions.hpp"
 #include "annotation_properties.hpp"
+#include "comment_popup.hpp"
 #include "comments_panel.hpp"
 #include "contrast.hpp"
 #include <QDoubleSpinBox>
@@ -46,6 +47,7 @@
 #include <QFileInfo>
 #include <QPrinter>
 #include <QTemporaryDir>
+#include <QToolTip>
 #include <QImage>
 #include <QScrollBar>
 #include <QTimer>
@@ -1013,6 +1015,182 @@ int main(int argc, char** argv) {
         answer.stop();
     }
 
+
+    // --- Comments on the page: hover, the card, the Note tool ------------------
+    {
+        QTemporaryDir tmp;
+        const QString copy = tmp.filePath(QStringLiteral("read me.pdf"));
+        QFile::copy(QString::fromStdString(doc), copy);
+        window.openPath(copy);
+        pump(1500);
+        view->setZoom(1.0);
+        view->verticalScrollBar()->setValue(0);
+        view->horizontalScrollBar()->setValue(0);
+        pump(500);
+
+        QVector<AnnotRow> rows;
+        const auto listed = QObject::connect(worker, &RenderWorker::annotationsReady, &window,
+                                             [&rows](const QVector<AnnotRow>& r) { rows = r; });
+        const auto notes = [&rows] {
+            QVector<AnnotRow> found;
+            for (const AnnotRow& r : rows) {
+                if (r.type == QStringLiteral("Text")) {
+                    found.push_back(r);
+                }
+            }
+            return found;
+        };
+        QWidget* vp = view->viewport();
+        auto mouse = [&](QEvent::Type type, QPoint at, Qt::MouseButtons held) {
+            QMouseEvent e(type, QPointF(at), vp->mapToGlobal(QPointF(at)),
+                          type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton, held,
+                          Qt::NoModifier);
+            QApplication::sendEvent(vp, &e);
+        };
+        auto click = [&](QPoint at) {
+            mouse(QEvent::MouseButtonPress, at, Qt::LeftButton);
+            mouse(QEvent::MouseButtonRelease, at, Qt::NoButton);
+        };
+        auto key = [](QWidget* w, int k, Qt::KeyboardModifiers mods = Qt::NoModifier) {
+            QKeyEvent press(QEvent::KeyPress, k, mods);
+            QApplication::sendEvent(w, &press);
+        };
+        auto button = [](CommentPopup* card, const char* name) {
+            auto* b = card != nullptr ? card->findChild<QPushButton*>(QLatin1String(name)) : nullptr;
+            return b != nullptr && b->isVisibleTo(card) ? b : nullptr;
+        };
+
+        window.current()->onWorker([](RenderWorker* w) {
+            w->addNote(0, QPointF(200, 200), QStringLiteral("Read <b>me</b> & weep"));
+        });
+        pump(1500);
+        check(notes().size() == 1, "a note to read on the page");
+        const AnnotRow n = notes().value(0);
+        // Zoom 1, scrolled to the top left: page point p is at p + the margin.
+        const QPoint on(8 + static_cast<int>(n.rect.center().x()),
+                        8 + static_cast<int>(n.rect.center().y()));
+
+        QHelpEvent help(QEvent::ToolTip, on, vp->mapToGlobal(on));
+        QApplication::sendEvent(vp, &help);
+        check(QToolTip::isVisible() &&
+                  QToolTip::text().contains(QStringLiteral("Read &lt;b&gt;me&lt;/b&gt; &amp; weep")) &&
+                  QToolTip::text().contains(QStringLiteral("<b>Note</b>")),
+              "hovering a note shows its type and words, escaped");
+        shot(&window, "comment-tooltip");
+        QHelpEvent away(QEvent::ToolTip, QPoint(30, 400), vp->mapToGlobal(QPoint(30, 400)));
+        QApplication::sendEvent(vp, &away);
+        pump(600);  // a tip fades out
+        check(!QToolTip::isVisible(), "and nothing where there is no comment");
+        mouse(QEvent::MouseMove, on, Qt::NoButton);
+        check(vp->cursor().shape() == Qt::PointingHandCursor, "the pointer says it can be clicked");
+        mouse(QEvent::MouseMove, QPoint(30, 400), Qt::NoButton);
+        check(vp->cursor().shape() == Qt::IBeamCursor, "and is a text cursor again off it");
+
+        // A click opens the card, read-only; Edit, then Ctrl+Enter, saves.
+        click(on);
+        CommentPopup* card = view->commentPopup();
+        check(card != nullptr && card->annotationId() == n.id && !card->editing() &&
+                  card->textEdit()->isReadOnly() && card->textEdit()->toPlainText() == n.contents,
+              "a click on a note opens its card with the whole text");
+        check(card != nullptr && vp->rect().contains(card->geometry()) &&
+                  !card->geometry().contains(on),
+              "the card sits beside the note, inside the view");
+        shot(&window, "comment-card");
+        if (QPushButton* edit = button(card, "commentPopupEdit")) {
+            edit->click();
+            check(card->editing() && !card->textEdit()->isReadOnly() &&
+                      button(card, "commentPopupSave") != nullptr && button(card, "commentPopupDelete") == nullptr,
+                  "Edit makes the text editable, with Save and Cancel");
+            card->textEdit()->setPlainText(QStringLiteral("New words"));
+            key(card->textEdit(), Qt::Key_Return, Qt::ControlModifier);
+        } else {
+            check(false, "the card offers Edit");
+        }
+        pump(1500);
+        check(view->commentPopup() == nullptr && notes().value(0).contents == QStringLiteral("New words"),
+              "Ctrl+Enter saves the new words and closes the card");
+
+        // Esc closes; a drag over the note selects instead of opening it.
+        click(on);
+        card = view->commentPopup();
+        if (card != nullptr) {
+            key(card->textEdit(), Qt::Key_Escape);
+        }
+        check(card != nullptr && view->commentPopup() == nullptr, "Esc closes the card");
+        mouse(QEvent::MouseButtonPress, on, Qt::LeftButton);
+        for (int i = 1; i <= 4; ++i) {
+            mouse(QEvent::MouseMove, on + QPoint(10 * i, 0), Qt::LeftButton);
+        }
+        mouse(QEvent::MouseButtonRelease, on + QPoint(40, 0), Qt::NoButton);
+        check(view->commentPopup() == nullptr, "a drag from a note opens no card");
+
+        // A click elsewhere closes the card, and so does a change of tool.
+        click(on);
+        click(QPoint(30, 400));
+        check(view->commentPopup() == nullptr, "a click elsewhere closes the card");
+
+        // The Note tool on an existing note reads it and adds none.
+        check(view->setTool(PageView::Tool::Note), "the note tool is available");
+        click(on);
+        pump(800);
+        check(view->commentPopup() != nullptr && notes().size() == 1,
+              "a click with the Note tool on a note opens it and adds no other");
+        (void)view->setTool(PageView::Tool::Select);
+        check(view->commentPopup() == nullptr, "a change of tool closes the card");
+
+        // A double-click opens it ready to edit (no dialog any more).
+        mouse(QEvent::MouseButtonDblClick, on, Qt::LeftButton);
+        card = view->commentPopup();
+        check(card != nullptr && card->editing(), "a double-click opens the card in edit mode");
+        if (QPushButton* cancel = button(card, "commentPopupCancel")) {
+            cancel->click();
+            check(!card->editing() && card->textEdit()->toPlainText() == QStringLiteral("New words"),
+                  "Cancel keeps the old words");
+        }
+        (void)view->setTool(PageView::Tool::Select);
+
+        // From the Comments panel: a row opens the card on the page.
+        window.findChild<Sidebar*>()->showPanel(QStringLiteral("comments"));
+        pump(50);
+        auto* tree = window.findChild<QTreeWidget*>(QStringLiteral("commentsTree"));
+        const auto found = tree != nullptr ? tree->findItems(QStringLiteral("New words"),
+                                                             Qt::MatchExactly | Qt::MatchRecursive)
+                                           : QList<QTreeWidgetItem*>{};
+        check(found.size() == 1, "the panel lists the note");
+        if (found.size() == 1) {
+            emit tree->itemClicked(found.first(), 0);
+            card = view->commentPopup();
+            check(card != nullptr && card->annotationId() == n.id && !card->editing(),
+                  "choosing it in the panel opens its card");
+            emit tree->itemActivated(found.first(), 0);
+            card = view->commentPopup();
+            check(card != nullptr && card->editing(), "activating it opens the card to edit");
+            (void)view->setTool(PageView::Tool::Select);
+        }
+        view->verticalScrollBar()->setValue(0);  // the panel scrolled to it
+        view->horizontalScrollBar()->setValue(0);
+        pump(300);
+
+        // Read-only when edits are locked.
+        view->setCommentsEditable(false);
+        check(view->showComment(n.id, true) && !view->commentPopup()->editing() &&
+                  button(view->commentPopup(), "commentPopupEdit") == nullptr &&
+                  button(view->commentPopup(), "commentPopupDelete") == nullptr,
+              "with edits locked the card only reads");
+        view->setCommentsEditable(true);
+
+        // Delete removes the note.
+        click(QPoint(30, 400));
+        click(on);
+        if (QPushButton* del = button(view->commentPopup(), "commentPopupDelete")) {
+            del->click();
+        }
+        pump(1500);
+        check(view->commentPopup() == nullptr && notes().isEmpty(), "Delete on the card removes the note");
+        QObject::disconnect(listed);
+        (void)window.save();  // so opening the next one asks nothing
+        pump(2000);
+    }
 
     // --- Moving, free text, watermark and crop options (M1) ------------------
     {

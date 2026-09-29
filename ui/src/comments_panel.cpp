@@ -98,13 +98,17 @@ CommentsPanel::CommentsPanel(QWidget* parent) : QWidget(parent) {
     connect(filter_, &QLineEdit::textChanged, this, &CommentsPanel::rebuild);
     connect(tree_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item) {
         if (const AnnotRow* row = rowFor(item)) {
+            const int id = row->id;
             emit showRequested(row->page, row->rect);
+            emit openRequested(id, false);
         }
     });
     connect(tree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem* item) {
-        const AnnotRow* row = rowFor(item);
-        if (row != nullptr && editable_ && hasEditableText(row->type)) {
-            emit editRequested(row->id, row->contents);
+        if (const AnnotRow* row = rowFor(item)) {
+            const int id = row->id;
+            const bool edit = editable_ && hasEditableText(row->type);
+            emit showRequested(row->page, row->rect);
+            emit openRequested(id, edit);
         }
     });
     connect(tree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& at) {
@@ -115,10 +119,16 @@ CommentsPanel::CommentsPanel(QWidget* parent) : QWidget(parent) {
         const AnnotRow copy = *row;
         QMenu menu(this);
         menu.addAction(icons::named(QStringLiteral("eye")), tr("Show on Page"), this,
-                       [this, copy] { emit showRequested(copy.page, copy.rect); });
+                       [this, copy] {
+                           emit showRequested(copy.page, copy.rect);
+                           emit openRequested(copy.id, false);
+                       });
         if (hasEditableText(copy.type)) {
             QAction* edit = menu.addAction(icons::named(QStringLiteral("file-pen-line")), tr("Edit Text…"), this,
-                                           [this, copy] { emit editRequested(copy.id, copy.contents); });
+                                           [this, copy] {
+                                               emit showRequested(copy.page, copy.rect);
+                                               emit openRequested(copy.id, true);
+                                           });
             edit->setEnabled(editable_);
         }
         menu.addSeparator();

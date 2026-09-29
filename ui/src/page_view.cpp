@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "page_view.hpp"
 
+#include "comment_popup.hpp"
+#include "comments_panel.hpp"
 #include "leht/ops/forms.hpp"
 
 #include <QApplication>
 #include <QClipboard>
+#include <QHelpEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -14,11 +17,49 @@
 #include <QPlainTextEdit>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QToolTip>
 #include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
 #include <utility>
+
+namespace {
+
+/// Something to read on the page: a note (even an empty one, to be written
+/// in), or any other comment with text. Links and form widgets are not.
+bool readable(const AnnotRow& a) {
+    if (a.type == QLatin1String("Link") || a.type == QLatin1String("Widget") ||
+        a.type == QLatin1String("Popup")) {
+        return false;
+    }
+    return a.type == QLatin1String("Text") || !a.contents.trimmed().isEmpty();
+}
+
+/// The hover text for a comment: its type, author and words. All of it comes
+/// from the PDF, so all of it is escaped before Qt reads it as rich text.
+QString commentToolTip(const AnnotRow& a) {
+    constexpr int kMaxChars = 300;
+    QString text = a.contents.trimmed();
+    if (text.size() > kMaxChars) {
+        int n = kMaxChars - 1;
+        if (text.at(n - 1).isHighSurrogate()) {
+            --n;  // never half a character
+        }
+        text = text.left(n) + QChar(0x2026);
+    }
+    QString html = QStringLiteral("<b>%1</b>").arg(annotationTypeName(a.type).toHtmlEscaped());
+    if (!a.author.trimmed().isEmpty()) {
+        html += QStringLiteral(" — ") + a.author.trimmed().toHtmlEscaped();
+    }
+    if (!text.isEmpty()) {
+        html += QStringLiteral("<br>") +
+                text.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+    }
+    return QStringLiteral("<qt>") + html + QStringLiteral("</qt>");
+}
+
+}  // namespace
 
 PageView::PageView(QWidget* parent) : QAbstractScrollArea(parent) {
     setFrameShape(QFrame::NoFrame);
@@ -27,6 +68,7 @@ PageView::PageView(QWidget* parent) : QAbstractScrollArea(parent) {
     setFocusPolicy(Qt::StrongFocus);  // so PageUp/Down, Home/End, arrows arrive
     setAccessibleName(tr("Document"));
     setAccessibleDescription(tr("No document open"));
+    viewport()->setMouseTracking(true);  // hover: the cursor and comment tooltips
 }
 
 void PageView::setPages(const QVector<QSize>& baseSizes) {
@@ -44,6 +86,7 @@ void PageView::clear() {
     fields_.clear();
     currentField_.clear();
     cancelEditor();
+    closePopup(false);
     selectedAnnot_ = 0;
     grip_ = Grip::None;
     baseSizes_.clear();
@@ -110,6 +153,7 @@ const FieldRow* PageView::fieldAt(int page, QPointF base) const {
 void PageView::forgetPages() {
     redactionMarks_.clear();
     cancelEditor();
+    closePopup(false);  // its annotation may be another one now
     selectedAnnot_ = 0;
     grip_ = Grip::None;
     rendered_.clear();
@@ -164,6 +208,7 @@ void PageView::relayout() {
     verticalScrollBar()->setRange(0, std::max(0, contentH - vp.height()));
     verticalScrollBar()->setPageStep(vp.height());
     placeEditor();
+    placePopup();
 }
 
 void PageView::setZoom(double zoom) {
@@ -245,6 +290,11 @@ void PageView::firstPage() { goToPage(0); }
 void PageView::lastPage() { goToPage(pageCount() - 1); }
 
 void PageView::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Escape && commentPopup() != nullptr) {
+        closePopup(false);
+        event->accept();
+        return;
+    }
     // The Move tool's selection: Delete removes it, arrows nudge it.
     if (tool_ == Tool::Move && selectedAnnot_ != 0) {
         const AnnotRow* a = annotById(selectedAnnot_);
@@ -515,24 +565,131 @@ bool PageView::setTool(Tool tool) {
         return false;
     }
     commitEditor();
+    closePopup(true);
     tool_ = tool;
     highlightWhenSettled_ = false;
     dragPage_ = -1;
     stroke_.clear();
     selectedAnnot_ = 0;
     grip_ = Grip::None;
-    viewport()->setCursor(tool == Tool::Select ? Qt::IBeamCursor
-                          : tool == Tool::Erase ? Qt::PointingHandCursor
-                          : tool == Tool::Move  ? Qt::ArrowCursor
-                                                : Qt::CrossCursor);
+    pressComment_ = 0;
+    viewport()->setCursor(toolCursor());
     viewport()->update();
     return true;
+}
+
+Qt::CursorShape PageView::toolCursor() const {
+    return tool_ == Tool::Select ? Qt::IBeamCursor
+           : tool_ == Tool::Erase ? Qt::PointingHandCursor
+           : tool_ == Tool::Move  ? Qt::ArrowCursor
+                                  : Qt::CrossCursor;
+}
+
+PageView::HoverTarget PageView::hoverTargetAt(QPoint pos) const {
+    HoverTarget t;
+    if (rotation_ != 0) {
+        return t;  // the hit tests work in unrotated page coordinates
+    }
+    viewportToPage(pos, t.page, t.base);
+    if (t.page < 0) {
+        return t;
+    }
+    t.field = fieldAt(t.page, t.base);
+    // Topmost first, as annotAt: the last one drawn is on top.
+    for (auto it = annotations_.crbegin(); it != annotations_.crend(); ++it) {
+        if (it->page == t.page && readable(*it) &&
+            it->rect.normalized().adjusted(-2, -2, 2, 2).contains(t.base)) {
+            t.annot = &*it;
+            break;
+        }
+    }
+    return t;
+}
+
+void PageView::updateHoverCursor(QPoint pos) {
+    Qt::CursorShape shape = toolCursor();
+    if (tool_ == Tool::Select || tool_ == Tool::Note) {
+        const HoverTarget t = hoverTargetAt(pos);
+        const bool opens = tool_ == Tool::Select
+                               ? t.field != nullptr || t.annot != nullptr
+                               : t.annot != nullptr && t.annot->type == QLatin1String("Text");
+        if (opens) {
+            shape = Qt::PointingHandCursor;
+        }
+    }
+    if (viewport()->cursor().shape() != shape) {
+        viewport()->setCursor(shape);
+    }
+}
+
+void PageView::setCommentsEditable(bool editable) {
+    commentsEditable_ = editable;
+    if (const CommentPopup* p = commentPopup()) {
+        // Reopened read-only (or with Edit back), same comment.
+        const int id = p->annotationId();
+        closePopup(false);
+        (void)showComment(id, false);
+    }
+}
+
+CommentPopup* PageView::commentPopup() const {
+    return popup_ != nullptr && popup_->isVisible() ? popup_ : nullptr;
+}
+
+bool PageView::showComment(int id, bool edit) {
+    const AnnotRow* a = annotById(id);
+    if (a == nullptr || a->page < 0 || a->page >= baseSizes_.size()) {
+        return false;
+    }
+    commitEditor();  // one thing typed into at a time
+    const QRectF shown = baseRectToViewport(a->page, a->rect.normalized());
+    if (!viewport()->rect().intersects(shown.toAlignedRect())) {
+        // A third of the way down, as a find match is.
+        const int y = pageTop(a->page) + int(a->rect.normalized().top() * zoom_) -
+                      viewport()->height() / 3;
+        verticalScrollBar()->setValue(std::clamp(y, 0, verticalScrollBar()->maximum()));
+        requestVisible();
+    }
+    if (popup_ == nullptr) {
+        popup_ = new CommentPopup(viewport());
+        connect(popup_, &CommentPopup::textRequested, this, &PageView::annotationTextRequested);
+        connect(popup_, &CommentPopup::deleteRequested, this, &PageView::eraseRequested);
+    }
+    QToolTip::hideText();
+    popup_->showFor(*a, commentsEditable_, edit);
+    placePopup();
+    return true;
+}
+
+void PageView::placePopup() {
+    if (popup_ == nullptr || !popup_->isVisible()) {
+        return;
+    }
+    const AnnotRow* a = annotById(popup_->annotationId());
+    if (a == nullptr || a->page >= baseSizes_.size()) {
+        return;
+    }
+    popup_->place(baseRectToViewport(a->page, a->rect.normalized()));
+}
+
+void PageView::closePopup(bool keepEdits) {
+    if (popup_ != nullptr) {
+        popup_->dismiss(keepEdits);
+    }
 }
 
 void PageView::setAnnotations(const QVector<AnnotRow>& rows) {
     annotations_ = rows;
     if (annotById(selectedAnnot_) == nullptr) {
         selectedAnnot_ = 0;  // deleted, or undone out of existence
+    }
+    if (CommentPopup* p = commentPopup()) {
+        if (const AnnotRow* a = annotById(p->annotationId())) {
+            p->refresh(*a);
+            placePopup();
+        } else {
+            closePopup(false);  // gone: deleted here, elsewhere, or undone
+        }
     }
     viewport()->update();
 }
@@ -647,6 +804,7 @@ QPlainTextEdit* PageView::textEditor() const {
 void PageView::openEditor(int page, QRectF box, int annotId, const QString& text, double size,
                           QColor color) {
     commitEditor();  // one at a time
+    closePopup(true);
     if (editor_ == nullptr) {
         editor_ = new QPlainTextEdit(viewport());
         editor_->setObjectName(QStringLiteral("freeTextEditor"));
@@ -778,11 +936,31 @@ void PageView::mousePressEvent(QMouseEvent* event) {
     int page = -1;
     QPointF base;
     viewportToPage(event->pos(), page, base);
+    pressComment_ = 0;
+    if (commentPopup() != nullptr) {
+        // A click elsewhere closes the card and does nothing more, unless it
+        // opens another comment.
+        closePopup(true);
+        const HoverTarget t = hoverTargetAt(event->pos());
+        const bool opensAnother =
+            t.annot != nullptr &&
+            ((tool_ == Tool::Select && t.field == nullptr) ||
+             (tool_ == Tool::Note && t.annot->type == QLatin1String("Text")));
+        if (!opensAnother) {
+            return;
+        }
+    }
     if (page < 0) {
         return;
     }
     switch (tool_) {
     case Tool::Note:
+        // On a note already there: read it, rather than stack another on it.
+        if (const HoverTarget t = hoverTargetAt(event->pos());
+            t.annot != nullptr && t.annot->type == QLatin1String("Text")) {
+            (void)showComment(t.annot->id, false);
+            return;
+        }
         emit noteRequested(page, base);
         return;
     case Tool::Erase:
@@ -850,12 +1028,20 @@ void PageView::mousePressEvent(QMouseEvent* event) {
     case Tool::Stamp:
         emit stampRequested(page, base);
         return;
-    case Tool::Select:
-        if (const FieldRow* f = fieldAt(page, base)) {
-            emit fieldClicked(f->name);
+    case Tool::Select: {
+        // A field first, then a comment: a click (not a drag) opens its card
+        // on release, and a drag still selects the text under it.
+        const HoverTarget t = hoverTargetAt(event->pos());
+        if (t.field != nullptr) {
+            emit fieldClicked(t.field->name);
             return;
         }
+        if (t.annot != nullptr) {
+            pressComment_ = t.annot->id;
+            pressPos_ = event->pos();
+        }
         break;
+    }
     case Tool::Highlight:
     case Tool::Underline:
     case Tool::StrikeOut:
@@ -897,6 +1083,9 @@ void PageView::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
     if (!selecting_) {
+        if (!(event->buttons() & Qt::LeftButton)) {
+            updateHoverCursor(event->pos());
+        }
         return;
     }
     // Selection stays on the anchor page; clamp the far point to it.
@@ -959,6 +1148,15 @@ void PageView::mouseReleaseEvent(QMouseEvent* event) {
             finishHighlight();  // every reply is already in
         }
     }
+    const int comment = std::exchange(pressComment_, 0);
+    if (selecting_ && tool_ == Tool::Select && comment != 0 &&
+        (event->pos() - pressPos_).manhattanLength() < 4) {
+        // A click, not a drag: whatever the few pixels selected goes.
+        selectionPage_ = -1;
+        selectionBoxes_.clear();
+        selectionText_.clear();
+        (void)showComment(comment, false);
+    }
     selecting_ = false;
 }
 
@@ -970,8 +1168,9 @@ void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
         return;
     }
     // Double-clicking text on the page edits it: free text in place, a note
-    // in a dialog.
-    if (tool_ == Tool::Select || tool_ == Tool::Move || tool_ == Tool::Text) {
+    // in its card.
+    if (tool_ == Tool::Select || tool_ == Tool::Move || tool_ == Tool::Text ||
+        tool_ == Tool::Note) {
         if (const AnnotRow* a = annotAt(page, base)) {
             if (a->type == QStringLiteral("FreeText")) {
                 selecting_ = false;
@@ -980,7 +1179,8 @@ void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
             }
             if (a->type == QStringLiteral("Text")) {
                 selecting_ = false;
-                emit noteEditRequested(a->id, a->contents);
+                pressComment_ = 0;
+                (void)showComment(a->id, true);
                 return;
             }
         }
@@ -1197,6 +1397,26 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
     }
 }
 
+bool PageView::viewportEvent(QEvent* event) {
+    if (event->type() == QEvent::ToolTip) {
+        // A comment's words on hover; nothing while a drag or an editor is on.
+        const auto* help = static_cast<QHelpEvent*>(event);
+        const bool busy = selecting_ || dragPage_ >= 0 || textEditor() != nullptr ||
+                          (commentPopup() != nullptr && popup_->editing());
+        const HoverTarget t = busy ? HoverTarget{} : hoverTargetAt(help->pos());
+        const AnnotRow* a = t.field == nullptr ? t.annot : nullptr;
+        if (a != nullptr && !(commentPopup() != nullptr && popup_->annotationId() == a->id)) {
+            QToolTip::showText(help->globalPos(), commentToolTip(*a), viewport(),
+                               baseRectToViewport(a->page, a->rect.normalized()).toAlignedRect());
+        } else {
+            QToolTip::hideText();
+            event->ignore();
+        }
+        return true;
+    }
+    return QAbstractScrollArea::viewportEvent(event);
+}
+
 bool PageView::event(QEvent* event) {
     // Moved to a screen with a different scale: every image is now the wrong
     // resolution. Asking again is enough -- none of them is "sharp" any more.
@@ -1214,6 +1434,7 @@ void PageView::resizeEvent(QResizeEvent* /*event*/) {
 
 void PageView::scrollContentsBy(int /*dx*/, int /*dy*/) {
     placeEditor();
+    placePopup();
     requestVisible();
     viewport()->update();
 }

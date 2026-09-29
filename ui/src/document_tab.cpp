@@ -360,18 +360,6 @@ void DocumentTab::wireWorker() {
     connect(view_, &PageView::annotationTextRequested, this, [this](int id, QString text) {
         onWorker([=](RenderWorker* w) { w->setAnnotationText(id, text); });
     });
-    connect(view_, &PageView::noteEditRequested, this, [this](int id, QString current) {
-        bool ok = false;
-        const QString text = QInputDialog::getMultiLineText(window(), tr("Note"), tr("Note text:"),
-                                                            current, &ok);
-        if (ok && text != current) {
-            if (text.trimmed().isEmpty()) {
-                onWorker([=](RenderWorker* w) { w->deleteAnnotation(id); });
-            } else {
-                onWorker([=](RenderWorker* w) { w->setAnnotationText(id, text); });
-            }
-        }
-    });
     connect(view_, &PageView::cropBoxRequested, this, [this](int page, QRectF box) {
         const QString pages = askCropPages(window(), page, view_->pageCount());
         if (!pages.isNull()) {
@@ -481,19 +469,8 @@ void DocumentTab::buildPanels() {
             [this](int page, QRectF rect) { view_->goToPage(page, std::max(0.0, rect.top() - 36)); });
     connect(comments_, &CommentsPanel::deleteRequested, this,
             [this](int id) { onWorker([=](RenderWorker* w) { w->deleteAnnotation(id); }); });
-    connect(comments_, &CommentsPanel::editRequested, this, [this](int id, const QString& current) {
-        bool ok = false;
-        const QString text =
-            QInputDialog::getMultiLineText(window(), tr("Edit comment"), tr("Text:"), current, &ok);
-        if (!ok || text == current) {
-            return;
-        }
-        if (text.trimmed().isEmpty()) {
-            onWorker([=](RenderWorker* w) { w->deleteAnnotation(id); });
-        } else {
-            onWorker([=](RenderWorker* w) { w->setAnnotationText(id, text); });
-        }
-    });
+    connect(comments_, &CommentsPanel::openRequested, this,
+            [this](int id, bool edit) { (void)view_->showComment(id, edit); });
     connect(comments_, &CommentsPanel::styleRequested, this,
             [this](int id, const QColor& color, double opacity, double lineWidth, double fontSize,
                    const QString& author) {
@@ -1434,6 +1411,7 @@ void DocumentTab::applyCertification(int level) {
     // Filling fields is the one change level 2 and 3 allow and 1 does not.
     form_->setEditable(level != 1);
     comments_->setEditable(certAllows(3));
+    view_->setCommentsEditable(certAllows(3));
     emit certificationChanged();
     emit stateChanged();
 }

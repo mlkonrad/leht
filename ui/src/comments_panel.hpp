@@ -15,8 +15,9 @@ class QTreeWidget;
 class QTreeWidgetItem;
 
 /// The Comments tab: every annotation in the document, by page, with a filter.
-/// Clicking one shows it on the page, and its colour, opacity and author
-/// below the list; notes and text boxes can be edited or deleted from here. It edits nothing itself: it asks, and the window sends
+/// Clicking one shows it on the page with its card open, and its colour,
+/// opacity and author below the list; notes and text boxes can be edited (in
+/// the card) or deleted from here. It edits nothing itself: it asks, and the window sends
 /// the request to the worker like any other edit.
 class CommentsPanel : public QWidget {
     Q_OBJECT
@@ -31,7 +32,8 @@ public:
 
 signals:
     void showRequested(int page, QRectF rect);
-    void editRequested(int id, const QString& current);
+    /// Open comment `id`'s card on the page; with `edit`, ready to edit.
+    void openRequested(int id, bool edit);
     void deleteRequested(int id);
     void styleRequested(int id, QColor color, double opacity, double lineWidth, double fontSize,
                         QString author);
