@@ -17,6 +17,8 @@ namespace prefs {
 inline constexpr const char* kAuthor = "annotations/author";
 inline constexpr const char* kDefaultZoom = "view/defaultZoom";  ///< "width" | "page" | "actual"
 inline constexpr const char* kToolbarText = "appearance/toolbarText";
+/// Reopen, at start-up, the documents open when Leht last closed. Off by default.
+inline constexpr const char* kRestoreTabs = "general/restoreTabs";
 inline constexpr const char* kTrusted = "trustedCertificates";
 /// Who asks SK for Smart-ID and Mobile-ID signatures. Empty: SK's DEMO.
 inline constexpr const char* kSmartIdRpName = "signing/smartIdRpName";
@@ -46,6 +48,7 @@ private:
 
     QLineEdit* author_ = nullptr;
     QComboBox* zoom_ = nullptr;
+    QCheckBox* restoreTabs_ = nullptr;
     QCheckBox* toolbarText_ = nullptr;
     QCheckBox* themeIcons_ = nullptr;
 

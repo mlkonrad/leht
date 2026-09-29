@@ -77,6 +77,11 @@ PreferencesDialog::PreferencesDialog(QWidget* parent, const QStringList& ocrLang
     zoom_->setCurrentIndex(std::max(0, zoom_->findData(settings.value(QLatin1String(prefs::kDefaultZoom),
                                                                        QStringLiteral("width")))));
     form->addRow(tr("Open documents at:"), zoom_);
+    restoreTabs_ = new QCheckBox(tr("Reopen the documents that were open when Leht closed"), general);
+    restoreTabs_->setObjectName(QStringLiteral("restoreTabs"));
+    restoreTabs_->setChecked(settings.value(QLatin1String(prefs::kRestoreTabs), false).toBool());
+    restoreTabs_->setToolTip(tr("Each on the page it was left at. Files opened from elsewhere open as well."));
+    form->addRow(tr("Start-up:"), restoreTabs_);
     toolbarText_ = new QCheckBox(tr("Show text under toolbar icons"), general);
     toolbarText_->setChecked(settings.value(QLatin1String(prefs::kToolbarText), false).toBool());
     form->addRow(tr("Toolbar:"), toolbarText_);
@@ -291,6 +296,7 @@ void PreferencesDialog::save() {
     QSettings settings;
     settings.setValue(QLatin1String(prefs::kAuthor), author_->text().trimmed());
     settings.setValue(QLatin1String(prefs::kDefaultZoom), zoom_->currentData());
+    settings.setValue(QLatin1String(prefs::kRestoreTabs), restoreTabs_->isChecked());
 
     const bool appearance =
         settings.value(QLatin1String(prefs::kToolbarText), false).toBool() != toolbarText_->isChecked() ||

@@ -66,6 +66,13 @@ public:
     [[nodiscard]] static MainWindow* lastActive();
     /// Up from the taskbar if minimised, raised, and asked for the focus.
     void bringForward();
+    /// Remembers this window's documents, in tab order, with the page each
+    /// shows and which is current (Preferences > Reopen the documents).
+    /// closeEvent() calls it when the last window closes.
+    void saveSession() const;
+    /// Opens the documents saveSession() remembered, those still there, as
+    /// tabs here; each goes to its page.
+    void restoreSession();
     /// File > New Window: another window, empty, deleted when closed.
     MainWindow* newWindow();
 

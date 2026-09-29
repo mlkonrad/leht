@@ -36,6 +36,7 @@
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
+#include <QSettings>
 #include <QShortcut>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -696,6 +697,56 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         discarded_.insert(d);
     }
     event->accept();
+    // The last window to close remembers what was open, if asked to.
+    bool last = true;
+    for (QWidget* w : QApplication::topLevelWidgets()) {
+        last = last && (w == this || qobject_cast<MainWindow*>(w) == nullptr || !w->isVisible());
+    }
+    if (last && QSettings().value(QLatin1String(prefs::kRestoreTabs), false).toBool()) {
+        saveSession();
+    }
+}
+
+void MainWindow::saveSession() const {
+    QStringList files;
+    QVariantList pages;
+    int currentAt = 0;
+    for (const DocumentTab* d : tabs_) {
+        if (!d->isOpen() || d->path().isEmpty()) {
+            continue;
+        }
+        if (d == current_) {
+            currentAt = static_cast<int>(files.size());
+        }
+        files << d->path();
+        pages << std::max(0, d->currentPage());
+    }
+    QSettings settings;
+    settings.setValue(QStringLiteral("session/files"), files);
+    settings.setValue(QStringLiteral("session/pages"), pages);
+    settings.setValue(QStringLiteral("session/current"), currentAt);
+}
+
+void MainWindow::restoreSession() {
+    const QSettings settings;
+    const QStringList files = settings.value(QStringLiteral("session/files")).toStringList();
+    const QVariantList pages = settings.value(QStringLiteral("session/pages")).toList();
+    const int currentAt = settings.value(QStringLiteral("session/current"), 0).toInt();
+    DocumentTab* chosen = nullptr;
+    for (int i = 0; i < files.size(); ++i) {
+        if (!QFileInfo::exists(files[i])) {
+            continue;  // moved or deleted since: nothing to reopen
+        }
+        DocumentTab* d = addDocument();
+        d->setStartPage(pages.value(i).toInt());
+        d->openPath(files[i]);
+        if (i <= currentAt) {
+            chosen = d;
+        }
+    }
+    if (chosen != nullptr) {
+        setCurrent(chosen);
+    }
 }
 
 // --- Actions -----------------------------------------------------------------------

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "main_window.hpp"
 #include "outline_model.hpp"
+#include "preferences.hpp"
 #include "single_instance.hpp"
 
 #include <QApplication>
 #include <QFileInfo>
 #include <QIcon>
+#include <QSettings>
 #include <QTimer>
 
 #include <memory>
@@ -62,6 +64,10 @@ int main(int argc, char** argv) {
 
     MainWindow window;
     window.show();
+    // Started on its own: what was open last time, if Preferences say so.
+    if (paths.isEmpty() && QSettings().value(QLatin1String(prefs::kRestoreTabs), false).toBool()) {
+        window.restoreSession();
+    }
     for (const QString& path : paths) {
         window.openDocument(path);
     }

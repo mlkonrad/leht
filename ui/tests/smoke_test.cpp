@@ -1461,6 +1461,37 @@ int main(int argc, char** argv) {
             QFile(tmp.filePath(QStringLiteral("stale.sock"))).open(QIODevice::WriteOnly);  // left by a crash
             check(stale.listen(), "a socket left behind by a crashed Leht is taken over");
         }
+
+        // Reopen the documents (Preferences): the tabs come back in their
+        // order, each on its page, the current one current.
+        {
+            QTemporaryDir tmp;
+            const QString one = tmp.filePath(QStringLiteral("one.pdf"));
+            const QString two = tmp.filePath(QStringLiteral("two.pdf"));
+            QFile::copy(QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf"), one);
+            QFile::copy(QString::fromStdString(doc), two);
+            {
+                MainWindow before;
+                before.show();
+                before.openDocument(one);
+                before.openDocument(two);
+                pump(1500);
+                before.view()->goToPage(4);
+                pump(300);
+                before.saveSession();
+            }
+            MainWindow after;
+            after.resize(800, 1000);
+            after.show();
+            after.restoreSession();
+            pump(2000);
+            QTabBar* bar = after.tabBar();
+            check(bar->count() == 2 && bar->tabText(0) == QStringLiteral("one.pdf") &&
+                      bar->tabText(1) == QStringLiteral("two.pdf") && bar->currentIndex() == 1 &&
+                      after.view()->currentPage() == 4,
+                  "Reopen brings the tabs back in order, each on its page");
+            QSettings().remove(QStringLiteral("session"));
+        }
         check(fresh.actions()->find(QStringLiteral("save"))->isEnabled() &&
                   fresh.actions()->find(QStringLiteral("toolHighlight"))->isEnabled(),
               "an open document enables the tools");
