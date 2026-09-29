@@ -12,6 +12,8 @@
 #include <QVector>
 #include <QtGlobal>
 
+#include <cmath>
+
 /// One annotation, as the GUI sees it: for hit-testing (erasing) and listing.
 /// Built on the worker thread from ops::AnnotInfo. Geometry is in base
 /// coordinates, like every other box the view draws.
@@ -31,6 +33,13 @@ struct AnnotRow {
     bool styleable = false;  ///< its colour and the rest can be changed
 };
 
+/// One place a form field shows on a page.
+struct FieldWidget {
+    int page = 0;
+    QRectF rect;      ///< in base coordinates
+    QString onState;  ///< checkbox and radio: the state a click on it sets
+};
+
 /// One form field, for the Form panel and the outlines on the page. `type` is
 /// a leht::ops::FieldType cast to int.
 struct FieldRow {
@@ -43,7 +52,25 @@ struct FieldRow {
     QRectF rect;  ///< of the first widget, in base coordinates
     bool required = false;
     int maxLength = 0;  ///< text: most characters allowed, 0 = no limit
+    QVector<FieldWidget> widgets;  ///< every widget; the first is `page`/`rect`
+    bool multiline = false;        ///< text: takes several lines
+    bool editableChoice = false;   ///< choice: also takes typed text
 };
+
+/// The order a reader fills a form in: page, then rows top to bottom (a few
+/// points of slack, so fields on one line stay together), then left to right.
+/// The Form panel lists fields in it, and Tab on the page follows it.
+inline bool fieldReadsBefore(const FieldRow& a, const FieldRow& b) {
+    if (a.page != b.page) {
+        return a.page < b.page;
+    }
+    const double ay = std::round(a.rect.top() / 6.0);
+    const double by = std::round(b.rect.top() / 6.0);
+    if (ay != by) {
+        return ay < by;
+    }
+    return a.rect.left() < b.rect.left();
+}
 
 /// What the Sign dialog collected. The password lives only as long as the
 /// signing request: it is handed to leht::crypto and wiped there.

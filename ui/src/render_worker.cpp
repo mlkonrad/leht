@@ -2061,6 +2061,14 @@ void RenderWorker::listFields() {
                                         f.read_only,
                                         QRectF(QPointF(f.rect.x0, f.rect.y0), QPointF(f.rect.x1, f.rect.y1)),
                                         f.required, f.max_length});
+                FieldRow& row = rows.back();
+                row.multiline = f.multiline;
+                row.editableChoice = f.editable_choice;
+                for (const leht::ops::FieldInfo::Widget& w : f.widgets) {
+                    row.widgets.push_back(FieldWidget{
+                        w.page, QRectF(QPointF(w.rect.x0, w.rect.y0), QPointF(w.rect.x1, w.rect.y1)),
+                        QString::fromStdString(w.on_state)});
+                }
             }
         } else if (reply) {
             (void)ipc::decode_as<ipc::Failed>(*reply);  // not a PDF, or XFA: no fields

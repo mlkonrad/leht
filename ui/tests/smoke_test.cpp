@@ -168,6 +168,55 @@ QString writeDeepOutline(const QString& path, int depth) {
     return path;
 }
 
+/// A one-page form with a field of every kind that is filled in on the page:
+/// a text field, a radio group of two, a combo box, a multi-line text field
+/// and a checkbox, top to bottom in that order.
+QString writeFillForm(const QString& path) {
+    QByteArray out = "%PDF-1.7\n";
+    QVector<qsizetype> offsets(14, 0);
+    auto add = [&](int num, const QByteArray& body) {
+        offsets[num] = out.size();
+        out += QByteArray::number(num) + " 0 obj\n" + body + "\nendobj\n";
+    };
+    auto face = [](const QByteArray& ops) {
+        return "<< /BBox [0 0 12 12] /Length " + QByteArray::number(ops.size()) + " >>\nstream\n" +
+               ops + "\nendstream";
+    };
+    add(1, "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 6 9 10 11] "
+           "/DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 4 0 R >> >> >> >>");
+    add(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    add(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> "
+           "/Annots [5 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R] >>");
+    add(4, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+    add(5, "<< /Type /Annot /Subtype /Widget /FT /Tx /T (first) /MaxLen 30 "
+           "/Rect [72 700 272 720] /P 3 0 R >>");
+    add(6, "<< /FT /Btn /Ff 49152 /T (color) /V /Off /Kids [7 0 R 8 0 R] >>");
+    add(7, "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /AS /Off /Rect [72 650 84 662] "
+           "/P 3 0 R /AP << /N << /Red 12 0 R /Off 13 0 R >> >> >>");
+    add(8, "<< /Type /Annot /Subtype /Widget /Parent 6 0 R /AS /Off /Rect [120 650 132 662] "
+           "/P 3 0 R /AP << /N << /Blue 12 0 R /Off 13 0 R >> >> >>");
+    add(9, "<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (country) "
+           "/Opt [(Estonia) (Finland) (Latvia)] /Rect [72 600 272 620] /P 3 0 R >>");
+    add(10, "<< /Type /Annot /Subtype /Widget /FT /Tx /Ff 4096 /T (notes) "
+            "/Rect [72 480 372 580] /P 3 0 R >>");
+    add(11, "<< /Type /Annot /Subtype /Widget /FT /Btn /T (agree) /V /Off /AS /Off "
+            "/Rect [72 440 84 452] /P 3 0 R /AP << /N << /Yes 12 0 R /Off 13 0 R >> >> >>");
+    add(12, face("0 0 12 12 re f"));
+    add(13, face(""));
+    const qsizetype xref = out.size();
+    out += "xref\n0 14\n0000000000 65535 f \n";
+    for (int n = 1; n <= 13; ++n) {
+        out += QByteArray::number(offsets[n]).rightJustified(10, '0') + " 00000 n \n";
+    }
+    out += "trailer\n<< /Size 14 /Root 1 0 R >>\nstartxref\n" + QByteArray::number(xref) +
+           "\n%%EOF\n";
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly)) {
+        f.write(out);
+    }
+    return path;
+}
+
 /// A PDF whose page tree lists an object that never parses. MuPDF re-parses it
 /// on every page lookup, so sizing all pages is quadratic: 16,000 pages take
 /// ~10 s to open where a clean file takes ~0.1 s. See tests/crashes/README.md.
@@ -2490,6 +2539,162 @@ int main(int argc, char** argv) {
             pump(1500);
         } else {
             std::printf("  skip  forms (tests/corpus/form.pdf not generated)\n");
+        }
+
+        // Forms filled in on the page: an editor over a text or choice field,
+        // a click for a checkbox or radio button, Tab to the next field.
+        {
+            const QString fill = writeFillForm(tmp.filePath(QStringLiteral("fill me.pdf")));
+            window.openPath(fill);
+            pump(1500);
+            PageView* page = window.view();
+            RenderWorker* fw = window.worker();
+            QVector<FieldRow> fieldRows;
+            const auto listed = QObject::connect(fw, &RenderWorker::fieldsReady, &window,
+                                                 [&fieldRows](const QVector<FieldRow>& r) { fieldRows = r; });
+            QMetaObject::invokeMethod(fw, "listFields", Qt::QueuedConnection);
+            pump(500);
+            const auto valueOf = [&fieldRows](const char* name) {
+                for (const FieldRow& r : fieldRows) {
+                    if (r.name == QLatin1String(name)) {
+                        return r.value;
+                    }
+                }
+                return QStringLiteral("<none>");
+            };
+            const auto rowOf = [&fieldRows](const char* name) {
+                for (const FieldRow& r : fieldRows) {
+                    if (r.name == QLatin1String(name)) {
+                        return r;
+                    }
+                }
+                return FieldRow{};
+            };
+            check(rowOf("color").widgets.size() == 2 && rowOf("color").widgets[1].onState == QStringLiteral("Blue") &&
+                      rowOf("notes").multiline,
+                  "the viewer gets every widget of a field, and which fields take several lines");
+            page->setZoom(1.0);
+            page->verticalScrollBar()->setValue(0);
+            page->horizontalScrollBar()->setValue(0);
+            (void)page->setTool(PageView::Tool::Select);
+            window.sidebar()->setExpanded(false);
+            pump(300);
+            QWidget* vp = page->viewport();
+            const auto click = [&](const char* name, int widget) {
+                const QPoint at = page->fieldWidgetRect(QLatin1String(name), widget).center().toPoint();
+                for (const auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+                    QMouseEvent e(type, QPointF(at), vp->mapToGlobal(QPointF(at)), Qt::LeftButton,
+                                  type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
+                                  Qt::NoModifier);
+                    QApplication::sendEvent(vp, &e);
+                }
+            };
+            const auto key = [](QWidget* w, int k) {
+                QKeyEvent press(QEvent::KeyPress, k, Qt::NoModifier);
+                QApplication::sendEvent(w, &press);
+            };
+
+            // Text: an editor on the page; Enter sends it; one undo takes it back.
+            click("first", 0);
+            auto* line = qobject_cast<QLineEdit*>(page->fieldEditor());
+            check(line != nullptr && line->maxLength() == 30,
+                  "a click on a text field opens an editor there, keeping to its length");
+            check(!window.sidebar()->isExpanded(), "and the Form panel stays closed");
+            if (line != nullptr) {
+                line->setText(QStringLiteral("Marlon"));
+                shot(&window, "forms-inline-text");
+                key(line, Qt::Key_Return);
+            }
+            pump(1200);
+            check(page->fieldEditor() == nullptr && valueOf("first") == QStringLiteral("Marlon"),
+                  "Enter sets the value");
+            QAction* undo = window.actions()->find(QStringLiteral("undo"));
+            if (undo != nullptr) {
+                undo->trigger();
+            }
+            pump(1200);
+            check(valueOf("first").isEmpty(), "one undo takes it back");
+
+            // Tab: from the text field to the next field that is typed in (the
+            // combo box; the radio buttons between are clicked, not typed).
+            click("first", 0);
+            if (QWidget* e = page->fieldEditor()) {
+                key(e, Qt::Key_Tab);
+            }
+            check(qobject_cast<QComboBox*>(page->fieldEditor()) != nullptr &&
+                      page->currentField() == QStringLiteral("country"),
+                  "Tab goes on to the next field in reading order");
+            if (auto* combo = qobject_cast<QComboBox*>(page->fieldEditor())) {
+                combo->setCurrentIndex(combo->findText(QStringLiteral("Finland")));
+                key(combo, Qt::Key_Tab);  // on to the notes, sending the choice
+            }
+            check(qobject_cast<QPlainTextEdit*>(page->fieldEditor()) != nullptr,
+                  "a multi-line field gets a multi-line editor");
+            if (auto* notes = qobject_cast<QPlainTextEdit*>(page->fieldEditor())) {
+                notes->setPlainText(QStringLiteral("one\ntwo"));
+                QKeyEvent send(QEvent::KeyPress, Qt::Key_Return, Qt::ControlModifier);
+                QApplication::sendEvent(notes, &send);
+            }
+            pump(1200);
+            check(valueOf("country") == QStringLiteral("Finland") &&
+                      valueOf("notes") == QStringLiteral("one\ntwo"),
+                  "the choice and the lines are set");
+
+            // Checkbox and radio: the click is the value.
+            click("agree", 0);
+            pump(1200);
+            check(valueOf("agree") == QStringLiteral("Yes") && page->fieldEditor() == nullptr,
+                  "a click ticks a checkbox");
+            click("agree", 0);
+            pump(1200);
+            check(valueOf("agree") == QStringLiteral("Off"), "and another unticks it");
+            click("color", 1);
+            pump(1200);
+            check(valueOf("color") == QStringLiteral("Blue"), "a click on the second radio button chooses it");
+
+            // Outlines hidden: still filled in on the page.
+            page->setFieldsShown(false);
+            click("first", 0);
+            check(page->fieldEditor() != nullptr, "fields can be filled in with the outlines hidden");
+            if (QWidget* e = page->fieldEditor()) {
+                key(e, Qt::Key_Escape);
+            }
+            check(page->fieldEditor() == nullptr, "Esc closes the editor");
+            page->setFieldsShown(true);
+
+            // A form that may not be filled in: no editor, the panel instead.
+            page->setFieldsEditable(false);
+            click("first", 0);
+            click("agree", 0);
+            pump(800);
+            check(page->fieldEditor() == nullptr && valueOf("agree") == QStringLiteral("Off"),
+                  "a locked form opens no editor and changes nothing");
+            check(window.sidebar()->isExpanded() && window.sidebar()->currentPanel() == QStringLiteral("form"),
+                  "a click on a locked form's field shows it in the Form panel");
+            page->setFieldsEditable(true);
+
+            // What is still being typed goes into a save.
+            click("first", 0);
+            if (auto* e = qobject_cast<QLineEdit*>(page->fieldEditor())) {
+                e->setText(QStringLiteral("Typed"));
+            }
+            (void)window.save();
+            pump(2000);
+            try {
+                leht::Document saved = leht::Document::open(ctx, fill.toStdString());
+                QHash<QString, QString> values;
+                for (const auto& f : leht::ops::list_fields(ctx, saved)) {
+                    values.insert(QString::fromStdString(f.name), QString::fromStdString(f.value));
+                }
+                check(values.value(QStringLiteral("first")) == QStringLiteral("Typed") &&
+                          values.value(QStringLiteral("color")) == QStringLiteral("Blue") &&
+                          values.value(QStringLiteral("country")) == QStringLiteral("Finland") &&
+                          values.value(QStringLiteral("notes")) == QStringLiteral("one\ntwo"),
+                      "the values filled in on the page are saved, the one still open too");
+            } catch (const leht::Error&) {
+                check(false, "the filled-in form opens");
+            }
+            QObject::disconnect(listed);
         }
 
         // Signing, the whole way through the viewer: the worker leaves a hole,

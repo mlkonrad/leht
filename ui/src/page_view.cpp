@@ -8,7 +8,10 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QHelpEvent>
+#include <QComboBox>
+#include <QHideEvent>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -18,10 +21,12 @@
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QToolTip>
+#include <QTimer>
 #include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <utility>
 
 namespace {
@@ -58,6 +63,28 @@ QString commentToolTip(const AnnotRow& a) {
     }
     return QStringLiteral("<qt>") + html + QStringLiteral("</qt>");
 }
+using leht::ops::FieldType;
+
+FieldType typeOf(const FieldRow& f) { return static_cast<FieldType>(f.type); }
+
+/// Filled in through an editor over the field, rather than by a click.
+bool typedIn(const FieldRow& f) {
+    return typeOf(f) == FieldType::Text || typeOf(f) == FieldType::Choice;
+}
+
+/// A combo box that says when its list closes, chosen from or not.
+class FieldCombo final : public QComboBox {
+public:
+    using QComboBox::QComboBox;
+    std::function<void()> popupHidden;
+
+    void hidePopup() override {
+        QComboBox::hidePopup();
+        if (popupHidden) {
+            popupHidden();
+        }
+    }
+};
 
 }  // namespace
 
@@ -85,6 +112,7 @@ void PageView::clear() {
     redactionMarks_.clear();
     fields_.clear();
     currentField_.clear();
+    cancelFieldEditor();
     cancelEditor();
     closePopup(false);
     selectedAnnot_ = 0;
@@ -105,13 +133,32 @@ void PageView::setRedactionMarks(const QVector<QPair<int, QRectF>>& marks) {
 
 void PageView::setFormFields(const QVector<FieldRow>& fields) {
     fields_.clear();
-    for (const FieldRow& f : fields) {
+    for (FieldRow f : fields) {
         // A button does nothing here and a signature field has its own tool;
         // a field without a widget box has nowhere to be drawn.
-        const auto type = static_cast<leht::ops::FieldType>(f.type);
-        if (type != leht::ops::FieldType::PushButton && type != leht::ops::FieldType::Signature &&
-            type != leht::ops::FieldType::Unknown && !f.rect.isEmpty()) {
+        const FieldType type = typeOf(f);
+        if (type == FieldType::PushButton || type == FieldType::Signature ||
+            type == FieldType::Unknown) {
+            continue;
+        }
+        if (f.widgets.isEmpty()) {
+            f.widgets.push_back(FieldWidget{f.page, f.rect, f.options.value(0)});
+        }
+        f.widgets.erase(std::remove_if(f.widgets.begin(), f.widgets.end(),
+                                       [](const FieldWidget& w) { return w.rect.isEmpty(); }),
+                        f.widgets.end());
+        if (!f.widgets.isEmpty()) {
             fields_.push_back(f);
+        }
+    }
+    // Tab on the page walks the fields as the Form panel lists them.
+    std::stable_sort(fields_.begin(), fields_.end(), fieldReadsBefore);
+    if (fieldEditor_ != nullptr) {
+        const FieldRow* open = fieldByName(fieldEditorName_);
+        if (open == nullptr || fieldEditorWidget_ >= open->widgets.size() || open->readOnly) {
+            cancelFieldEditor();  // gone, or changed under the editor (an undo)
+        } else {
+            placeFieldEditor();
         }
     }
     viewport()->update();
@@ -122,15 +169,21 @@ void PageView::setFieldsShown(bool shown) {
     viewport()->update();
 }
 
+void PageView::setFieldsEditable(bool editable) {
+    fieldsEditable_ = editable;
+    if (!editable) {
+        cancelFieldEditor();
+    }
+}
+
 void PageView::setCurrentField(const QString& name) {
     currentField_ = name;
-    const auto it = std::find_if(fields_.cbegin(), fields_.cend(),
-                                 [&](const FieldRow& f) { return f.name == name; });
-    if (it != fields_.cend() && it->page < baseSizes_.size()) {
-        const QRectF shown = baseRectToViewport(it->page, it->rect);
+    const FieldRow* f = fieldByName(name);
+    if (f != nullptr && f->page < baseSizes_.size()) {
+        const QRectF shown = baseRectToViewport(f->page, f->rect);
         if (!viewport()->rect().contains(shown.toAlignedRect())) {
             // A third of the way down, as a find match is.
-            const int y = pageTop(it->page) + int(it->rect.center().y() * zoom_) - viewport()->height() / 3;
+            const int y = pageTop(f->page) + int(f->rect.center().y() * zoom_) - viewport()->height() / 3;
             verticalScrollBar()->setValue(std::clamp(y, 0, verticalScrollBar()->maximum()));
             requestVisible();
         }
@@ -138,20 +191,35 @@ void PageView::setCurrentField(const QString& name) {
     viewport()->update();
 }
 
-const FieldRow* PageView::fieldAt(int page, QPointF base) const {
-    if (!fieldsShown_) {
-        return nullptr;
-    }
+PageView::FieldHit PageView::fieldAt(int page, QPointF base) const {
+    // Whether the outlines are shown or not: they only say where fields are.
     for (const FieldRow& f : fields_) {
-        if (f.page == page && f.rect.contains(base)) {
-            return &f;
+        for (int i = 0; i < f.widgets.size(); ++i) {
+            if (f.widgets[i].page == page && f.widgets[i].rect.contains(base)) {
+                return FieldHit{&f, i};
+            }
         }
     }
-    return nullptr;
+    return {};
+}
+
+QRectF PageView::fieldWidgetRect(const QString& name, int widget) const {
+    const FieldRow* f = fieldByName(name);
+    if (f == nullptr || widget < 0 || widget >= f->widgets.size()) {
+        return {};
+    }
+    return baseRectToViewport(f->widgets[widget].page, f->widgets[widget].rect);
+}
+
+const FieldRow* PageView::fieldByName(const QString& name) const {
+    const auto it = std::find_if(fields_.cbegin(), fields_.cend(),
+                                 [&](const FieldRow& f) { return f.name == name; });
+    return it != fields_.cend() ? &*it : nullptr;
 }
 
 void PageView::forgetPages() {
     redactionMarks_.clear();
+    commitFieldEditor(false);  // by name: still right after pages move
     cancelEditor();
     closePopup(false);  // its annotation may be another one now
     selectedAnnot_ = 0;
@@ -209,6 +277,7 @@ void PageView::relayout() {
     verticalScrollBar()->setPageStep(vp.height());
     placeEditor();
     placePopup();
+    placeFieldEditor();
 }
 
 void PageView::setZoom(double zoom) {
@@ -270,6 +339,7 @@ void PageView::fitPage() {
 }
 
 void PageView::rotateBy(int degrees) {
+    commitFieldEditor();  // it sits over the unrotated page
     rotation_ = (((rotation_ + degrees) % 360) + 360) % 360;
     if (rotation_ != 0 && editing()) {
         tool_ = Tool::Select;
@@ -566,6 +636,7 @@ bool PageView::setTool(Tool tool) {
     }
     commitEditor();
     closePopup(true);
+    commitFieldEditor();
     tool_ = tool;
     highlightWhenSettled_ = false;
     dragPage_ = -1;
@@ -594,7 +665,9 @@ PageView::HoverTarget PageView::hoverTargetAt(QPoint pos) const {
     if (t.page < 0) {
         return t;
     }
-    t.field = fieldAt(t.page, t.base);
+    const FieldHit hit = fieldAt(t.page, t.base);
+    t.field = hit.field;
+    t.fieldWidget = hit.widget;
     // Topmost first, as annotAt: the last one drawn is on top.
     for (auto it = annotations_.crbegin(); it != annotations_.crend(); ++it) {
         if (it->page == t.page && readable(*it) &&
@@ -642,6 +715,7 @@ bool PageView::showComment(int id, bool edit) {
         return false;
     }
     commitEditor();  // one thing typed into at a time
+    commitFieldEditor(false);
     const QRectF shown = baseRectToViewport(a->page, a->rect.normalized());
     if (!viewport()->rect().intersects(shown.toAlignedRect())) {
         // A third of the way down, as a find match is.
@@ -874,6 +948,9 @@ void PageView::cancelEditor() {
 }
 
 bool PageView::eventFilter(QObject* watched, QEvent* event) {
+    if (fieldEditorEvent(watched, event)) {
+        return true;
+    }
     if (watched == editor_) {
         if (event->type() == QEvent::KeyPress) {
             const auto* key = static_cast<QKeyEvent*>(event);
@@ -1033,7 +1110,7 @@ void PageView::mousePressEvent(QMouseEvent* event) {
         // on release, and a drag still selects the text under it.
         const HoverTarget t = hoverTargetAt(event->pos());
         if (t.field != nullptr) {
-            emit fieldClicked(t.field->name);
+            clickField(*t.field, t.fieldWidget);
             return;
         }
         if (t.annot != nullptr) {
@@ -1348,13 +1425,16 @@ void PageView::paintEvent(QPaintEvent* /*event*/) {
         }
         // Form fields: a light wash says where to type; the one being
         // filled in gets a frame.
-        if (fieldsShown_) {
-            for (const FieldRow& f : fields_) {
-                if (f.page != p) {
+        for (const FieldRow& f : fields_) {
+            const bool current = f.name == currentField_;
+            if (!fieldsShown_ && !(current && fieldEditor_ != nullptr)) {
+                continue;  // hidden, except the one being typed in
+            }
+            for (const FieldWidget& w : f.widgets) {
+                if (w.page != p) {
                     continue;
                 }
-                const QRectF box = baseRectToViewport(p, f.rect);
-                const bool current = f.name == currentField_;
+                const QRectF box = baseRectToViewport(p, w.rect);
                 painter.fillRect(box, f.readOnly ? QColor(128, 128, 128, 30) : QColor(40, 110, 230, current ? 45 : 28));
                 if (current) {
                     painter.setPen(QPen(QColor(40, 110, 230), 2));
@@ -1402,6 +1482,7 @@ bool PageView::viewportEvent(QEvent* event) {
         // A comment's words on hover; nothing while a drag or an editor is on.
         const auto* help = static_cast<QHelpEvent*>(event);
         const bool busy = selecting_ || dragPage_ >= 0 || textEditor() != nullptr ||
+                          fieldEditor_ != nullptr ||
                           (commentPopup() != nullptr && popup_->editing());
         const HoverTarget t = busy ? HoverTarget{} : hoverTargetAt(help->pos());
         const AnnotRow* a = t.field == nullptr ? t.annot : nullptr;
@@ -1435,6 +1516,7 @@ void PageView::resizeEvent(QResizeEvent* /*event*/) {
 void PageView::scrollContentsBy(int /*dx*/, int /*dy*/) {
     placeEditor();
     placePopup();
+    placeFieldEditor();
     requestVisible();
     viewport()->update();
 }
@@ -1447,4 +1529,286 @@ void PageView::wheelEvent(QWheelEvent* event) {
     } else {
         QAbstractScrollArea::wheelEvent(event);
     }
+}
+
+// --- Form fields on the page ----------------------------------------------
+
+void PageView::clickField(const FieldRow& f, int widget) {
+    // Under a certification that forbids filling in, or on a turned view the
+    // editors cannot sit on, the Form panel is where the field is.
+    if (!fieldsEditable_ || rotation_ != 0) {
+        emit fieldClicked(f.name, false);
+        return;
+    }
+    if (f.readOnly) {
+        emit toolRefused(tr("This field cannot be changed."));
+        return;
+    }
+    const QString name = f.name;
+    if (typedIn(f)) {
+        openFieldEditor(f, widget, /*popup=*/true);
+        emit fieldClicked(name, true);
+        return;
+    }
+    // A checkbox or radio button: the click is the value.
+    commitEditor();
+    commitFieldEditor(false);
+    const FieldRow* row = fieldByName(name);  // the commits may have changed the list
+    if (row == nullptr || widget >= row->widgets.size()) {
+        return;
+    }
+    QString on = row->widgets[widget].onState;
+    if (on.isEmpty()) {
+        on = row->options.value(0, QStringLiteral("Yes"));
+    }
+    QString value = on;
+    if (typeOf(*row) == FieldType::Checkbox && row->value == on) {
+        value = QStringLiteral("Off");  // a checkbox unticks; a radio stays chosen
+    }
+    setCurrentField(name);
+    emit fieldClicked(name, true);
+    if (value != row->value) {
+        // Shown at once, so a quick second click toggles back; the worker's
+        // list confirms it.
+        fields_[static_cast<int>(row - fields_.constData())].value = value;
+        emit fieldValueRequested(name, value);
+    }
+}
+
+void PageView::openFieldEditor(const FieldRow& f, int widget, bool popup) {
+    const QString name = f.name;  // `f` may not outlive the commits
+    commitEditor();  // one editor at a time, of any kind
+    commitFieldEditor(false);
+    closePopup(true);
+    const FieldRow* row = fieldByName(name);
+    if (row == nullptr || widget >= row->widgets.size()) {
+        return;
+    }
+    fieldEditorName_ = row->name;
+    fieldEditorWidget_ = widget;
+    fieldEditorOriginal_ = row->value;
+    const QString label = row->name.section(QLatin1Char('.'), -1);
+
+    QWidget* editor = nullptr;
+    if (typeOf(*row) == FieldType::Choice) {
+        if (fieldCombo_ == nullptr) {
+            auto* combo = new FieldCombo(viewport());
+            combo->setObjectName(QStringLiteral("fieldCombo"));
+            combo->setInsertPolicy(QComboBox::NoInsert);
+            combo->installEventFilter(this);
+            // A list closed with nothing chosen leaves the field as it was;
+            // one closed on a choice sends it. Either way the editor goes,
+            // after the combo has finished with the click.
+            combo->popupHidden = [this, combo] {
+                if (!combo->isEditable()) {
+                    QTimer::singleShot(0, this, [this, combo] {
+                        if (fieldEditor_ == combo) {
+                            commitFieldEditor();
+                        }
+                    });
+                }
+            };
+            connect(combo, &QComboBox::activated, this, [this, combo] {
+                if (fieldEditor_ == combo && !combo->isEditable()) {
+                    QTimer::singleShot(0, this, [this, combo] {
+                        if (fieldEditor_ == combo) {
+                            commitFieldEditor();
+                        }
+                    });
+                }
+            });
+            fieldCombo_ = combo;
+        }
+        fieldCombo_->clear();
+        fieldCombo_->setEditable(row->editableChoice);
+        if (QLineEdit* typed = fieldCombo_->lineEdit()) {
+            typed->installEventFilter(this);
+        }
+        fieldCombo_->addItems(row->options);
+        const int at = fieldCombo_->findText(row->value);
+        fieldCombo_->setCurrentIndex(at);
+        if (at < 0 && row->editableChoice) {
+            fieldCombo_->setEditText(row->value);
+        }
+        editor = fieldCombo_;
+    } else if (row->multiline) {
+        if (fieldText_ == nullptr) {
+            fieldText_ = new QPlainTextEdit(viewport());
+            fieldText_->setObjectName(QStringLiteral("fieldTextEditor"));
+            fieldText_->installEventFilter(this);
+            fieldText_->setFrameStyle(QFrame::Box | QFrame::Plain);
+            fieldText_->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+            fieldText_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        }
+        fieldText_->setPlainText(row->value);
+        fieldText_->moveCursor(QTextCursor::End);
+        editor = fieldText_;
+    } else {
+        if (fieldLine_ == nullptr) {
+            fieldLine_ = new QLineEdit(viewport());
+            fieldLine_->setObjectName(QStringLiteral("fieldLineEditor"));
+            fieldLine_->installEventFilter(this);
+            fieldLine_->setFrame(false);
+            fieldLine_->setTextMargins(2, 0, 2, 0);
+        }
+        fieldLine_->setMaxLength(row->maxLength > 0 ? row->maxLength : 32767);
+        fieldLine_->setText(row->value);
+        fieldLine_->selectAll();
+        editor = fieldLine_;
+    }
+    // White and dark whatever the theme: it stands on the paper.
+    QPalette pal = editor->palette();
+    pal.setColor(QPalette::Base, Qt::white);
+    pal.setColor(QPalette::Text, Qt::black);
+    editor->setPalette(pal);
+    editor->setAccessibleName(label);
+    fieldEditor_ = editor;
+    setCurrentField(fieldEditorName_);  // may scroll: before placing
+    placeFieldEditor();
+    editor->show();
+    editor->raise();
+    editor->setFocus(Qt::OtherFocusReason);
+    if (popup && editor == fieldCombo_ && !fieldCombo_->isEditable()) {
+        fieldCombo_->showPopup();
+    }
+    viewport()->update();
+}
+
+void PageView::placeFieldEditor() {
+    if (fieldEditor_ == nullptr) {
+        return;
+    }
+    const FieldRow* row = fieldByName(fieldEditorName_);
+    if (row == nullptr || fieldEditorWidget_ >= row->widgets.size()) {
+        return;
+    }
+    const FieldWidget& w = row->widgets[fieldEditorWidget_];
+    if (w.page < 0 || w.page >= baseSizes_.size()) {
+        return;
+    }
+    // The size a reader would expect in a field this tall; several lines of
+    // a multi-line field at an ordinary size.
+    const double points = row->multiline ? 10.0 : std::clamp(w.rect.height() * 0.65, 6.0, 12.0);
+    QFont font(QStringLiteral("Helvetica"));
+    font.setStyleHint(QFont::SansSerif);
+    font.setPixelSize(std::max(6, static_cast<int>(std::lround(points * zoom_))));
+    fieldEditor_->setFont(font);
+    QRect box = baseRectToViewport(w.page, w.rect).toAlignedRect();
+    if (fieldEditor_ == fieldCombo_) {
+        // Room for the arrow and the text, however small the field is drawn.
+        const QSize least = fieldCombo_->minimumSizeHint();
+        box.setWidth(std::max(box.width(), least.width()));
+        box.setHeight(std::max(box.height(), least.height()));
+    } else {
+        box.setHeight(std::max(box.height(), QFontMetrics(font).height() + 2));
+    }
+    fieldEditor_->setGeometry(box);
+}
+
+void PageView::commitFieldEditor(bool refocus) {
+    QWidget* editor = std::exchange(fieldEditor_, nullptr);  // hiding sends a focus-out
+    if (editor == nullptr) {
+        return;
+    }
+    QString value;
+    if (editor == fieldLine_) {
+        value = fieldLine_->text();
+    } else if (editor == fieldText_) {
+        value = fieldText_->toPlainText();
+    } else {
+        value = fieldCombo_->currentText();
+    }
+    const QString name = fieldEditorName_;
+    editor->hide();
+    if (refocus) {
+        setFocus();
+    }
+    auto it = std::find_if(fields_.begin(), fields_.end(),
+                           [&](const FieldRow& f) { return f.name == name; });
+    if (it != fields_.end() && it->maxLength > 0 && value.size() > it->maxLength) {
+        value.truncate(it->maxLength);  // a pasted multi-line value
+    }
+    if (it != fields_.end() && value != fieldEditorOriginal_ &&
+        !(typeOf(*it) == FieldType::Choice && value.isEmpty())) {
+        it->value = value;  // shown at once; the worker's list confirms it
+        emit fieldValueRequested(name, value);
+    }
+    viewport()->update();
+}
+
+void PageView::cancelFieldEditor() {
+    QWidget* editor = std::exchange(fieldEditor_, nullptr);
+    if (editor != nullptr) {
+        const bool had = editor->hasFocus();
+        editor->hide();
+        if (had) {
+            setFocus();
+        }
+        viewport()->update();
+    }
+}
+
+void PageView::moveFieldEditor(bool forward) {
+    const QString from = fieldEditorName_;
+    commitFieldEditor(false);
+    const auto at = std::find_if(fields_.cbegin(), fields_.cend(),
+                                 [&](const FieldRow& f) { return f.name == from; });
+    const int n = static_cast<int>(fields_.size());
+    const int start = at != fields_.cend() ? static_cast<int>(at - fields_.cbegin()) : (forward ? -1 : n);
+    for (int step = 1; step <= n; ++step) {
+        const int i = (((start + (forward ? step : -step)) % n) + n) % n;  // round the form
+        const FieldRow& f = fields_.at(i);
+        if (typedIn(f) && !f.readOnly) {
+            const QString name = f.name;
+            openFieldEditor(f, 0, /*popup=*/false);
+            emit fieldClicked(name, true);
+            return;
+        }
+    }
+    setFocus();
+}
+
+bool PageView::fieldEditorEvent(QObject* watched, QEvent* event) {
+    if (fieldEditor_ == nullptr) {
+        return false;
+    }
+    const bool typed = fieldCombo_ != nullptr && watched == fieldCombo_->lineEdit();
+    if (watched != fieldEditor_ && !(typed && fieldEditor_ == fieldCombo_)) {
+        return false;
+    }
+    if (event->type() == QEvent::KeyPress) {
+        const auto* key = static_cast<QKeyEvent*>(event);
+        switch (key->key()) {
+        case Qt::Key_Escape:
+            cancelFieldEditor();
+            return true;
+        case Qt::Key_Tab:
+        case Qt::Key_Backtab:
+            moveFieldEditor(key->key() == Qt::Key_Tab && !(key->modifiers() & Qt::ShiftModifier));
+            return true;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            // A new line in a multi-line field; Ctrl+Enter sends it.
+            if (fieldEditor_ != fieldText_ || (key->modifiers() & Qt::ControlModifier)) {
+                commitFieldEditor();
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+    } else if (event->type() == QEvent::FocusOut) {
+        // Not for a context menu or a combo's own list, nor while another
+        // window is in front: the field is still being filled in.
+        const auto reason = static_cast<QFocusEvent*>(event)->reason();
+        if (reason != Qt::PopupFocusReason && reason != Qt::ActiveWindowFocusReason) {
+            commitFieldEditor(false);
+        }
+    }
+    return false;
+}
+
+void PageView::hideEvent(QHideEvent* event) {
+    commitFieldEditor(false);  // another tab came to the front
+    QAbstractScrollArea::hideEvent(event);
 }

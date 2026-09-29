@@ -479,17 +479,23 @@ void DocumentTab::buildPanels() {
                 });
             });
 
-    // Form panel: one labelled editor per field, in reading order. The page
-    // outlines the fields; a click on one goes to its editor, and the editor
-    // being typed in frames its field on the page.
+    // Form panel: one labelled editor per field, in reading order. Fields
+    // are filled in on the page too; the panel then shows where the field
+    // is, and the editor being typed in (either) frames it on the page.
     form_ = new FormPanel(sidebar_);
-    connect(form_, &FormPanel::valueEdited, this, [this](const QString& name, const QString& value) {
+    const auto setField = [this](const QString& name, const QString& value) {
         onWorker([=](RenderWorker* w) { w->setFieldValue(name, value); });
-    });
+    };
+    connect(form_, &FormPanel::valueEdited, this, setField);
+    connect(view_, &PageView::fieldValueRequested, this, setField);
     connect(form_, &FormPanel::currentFieldChanged, view_, &PageView::setCurrentField);
     connect(form_, &FormPanel::highlightChanged, view_, &PageView::setFieldsShown);
     connect(form_, &FormPanel::flattenRequested, this, &DocumentTab::flattenRequested);
-    connect(view_, &PageView::fieldClicked, this, [this](const QString& name) {
+    connect(view_, &PageView::fieldClicked, this, [this](const QString& name, bool inPlace) {
+        if (inPlace) {
+            form_->revealField(name);  // shown or not; the keyboard stays on the page
+            return;
+        }
         sidebar_->showPanel(QStringLiteral("form"));
         form_->focusField(name);
     });
@@ -1071,6 +1077,7 @@ bool DocumentTab::settlePendingRedactions() {
 }
 
 bool DocumentTab::save() {
+    view_->finishFieldEditing();  // queued before the save, so saved with it
     if (pageCount_ <= 0 || !settlePendingRedactions()) {
         return false;
     }
@@ -1084,6 +1091,7 @@ bool DocumentTab::save() {
 }
 
 bool DocumentTab::saveAs() {
+    view_->finishFieldEditing();
     if (pageCount_ <= 0 || !settlePendingRedactions()) {
         return false;
     }
@@ -1410,6 +1418,7 @@ void DocumentTab::applyCertification(int level) {
     certLevel_ = level;
     // Filling fields is the one change level 2 and 3 allow and 1 does not.
     form_->setEditable(level != 1);
+    view_->setFieldsEditable(level != 1);
     comments_->setEditable(certAllows(3));
     view_->setCommentsEditable(certAllows(3));
     emit certificationChanged();

@@ -16,6 +16,8 @@
 #include "edit_model.hpp"
 
 class CommentPopup;
+class QComboBox;
+class QLineEdit;
 class QPlainTextEdit;
 
 /// Continuous vertical page view.
@@ -43,15 +45,31 @@ public:
     /// outlined, not blacked out, so what they cover can still be read.
     void setRedactionMarks(const QVector<QPair<int, QRectF>>& marks);
     /// The document's form fields, outlined on their pages while shown, so
-    /// the reader sees where to type; a click on one asks for it in the Form
-    /// panel (fieldClicked).
+    /// the reader sees where to type. A click on one with the Select tool fills
+    /// it in on the page: text and choices in an editor over the field,
+    /// checkboxes and radio buttons at once (fieldValueRequested).
     void setFormFields(const QVector<FieldRow>& fields);
+    /// Only hides the outlines: fields can still be filled in on the page.
     void setFieldsShown(bool shown);
     [[nodiscard]] bool fieldsShown() const { return fieldsShown_; }
     /// The field being filled in: drawn stronger, and scrolled into view if it
     /// is off screen. Empty for none.
     void setCurrentField(const QString& name);
     [[nodiscard]] QString currentField() const { return currentField_; }
+    /// Whether values may be changed on the page. When not (a certification
+    /// that forbids filling in), a click on a field only asks for it in the
+    /// Form panel.
+    void setFieldsEditable(bool editable);
+    [[nodiscard]] bool fieldsEditable() const { return fieldsEditable_; }
+    /// The editor open over a form field (a QLineEdit, QPlainTextEdit or
+    /// QComboBox), or null; for tests.
+    [[nodiscard]] QWidget* fieldEditor() const { return fieldEditor_; }
+    /// Where widget `widget` of field `name` is drawn now, in viewport
+    /// coordinates; empty if there is no such widget. For tests.
+    [[nodiscard]] QRectF fieldWidgetRect(const QString& name, int widget) const;
+    /// Sends what is typed in the field editor, if one is open: before a
+    /// save, so the save has it.
+    void finishFieldEditing() { commitFieldEditor(false); }
     /// The colour the Text Box tool types new text in.
     void setNewTextColor(const QColor& color) { newTextColor_ = color; }
 
@@ -133,6 +151,7 @@ public:
         int page = -1;
         QPointF base;
         const FieldRow* field = nullptr;
+        int fieldWidget = 0;  ///< which of the field's widgets
         const AnnotRow* annot = nullptr;
     };
     [[nodiscard]] HoverTarget hoverTargetAt(QPoint pos) const;
@@ -191,8 +210,13 @@ signals:
     void annotationTextRequested(int annotId, QString text);
     /// A box was dragged with the Crop tool: the part of the page to keep.
     void cropBoxRequested(int page, QRectF box);
-    /// A form field was clicked with the Select tool.
-    void fieldClicked(QString name);
+    /// A form field was clicked with the Select tool, or reached with Tab
+    /// from another. `inPlace`: it is being filled in on the page, so the
+    /// Form panel need only show where it is; otherwise the panel is where to
+    /// fill it in.
+    void fieldClicked(QString name, bool inPlace);
+    /// A value was typed or chosen for form field `name` on the page.
+    void fieldValueRequested(QString name, QString value);
     /// A tool could not be used, with the reason, for the status bar.
     void toolRefused(QString reason);
 
@@ -207,6 +231,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void hideEvent(QHideEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     bool viewportEvent(QEvent* event) override;
 
@@ -297,10 +322,38 @@ private:
     int editorAnnot_ = 0;  ///< 0 while typing new free text
     QString editorOriginal_;
     QVector<QPair<int, QRectF>> redactionMarks_;
-    QVector<FieldRow> fields_;
+    QVector<FieldRow> fields_;  ///< in reading order
     bool fieldsShown_ = true;
+    bool fieldsEditable_ = true;
     QString currentField_;
-    [[nodiscard]] const FieldRow* fieldAt(int page, QPointF base) const;
+    /// A field widget under a point: the field, and which of its widgets.
+    struct FieldHit {
+        const FieldRow* field = nullptr;
+        int widget = 0;
+    };
+    [[nodiscard]] FieldHit fieldAt(int page, QPointF base) const;
+    [[nodiscard]] const FieldRow* fieldByName(const QString& name) const;
+    /// A click on widget `widget` of field `f` with the Select tool.
+    void clickField(const FieldRow& f, int widget);
+    /// Opens the editor over a text or choice field's widget; `popup` opens
+    /// a choice's list at once.
+    void openFieldEditor(const FieldRow& f, int widget, bool popup);
+    void placeFieldEditor();
+    /// Sends the open field editor's value, if changed, and closes it.
+    /// `refocus`: give the keyboard back to the view.
+    void commitFieldEditor(bool refocus = true);
+    void cancelFieldEditor();
+    /// Commits the open field editor and opens the next (or previous) text
+    /// or choice field in reading order.
+    void moveFieldEditor(bool forward);
+    bool fieldEditorEvent(QObject* watched, QEvent* event);
+    QLineEdit* fieldLine_ = nullptr;
+    QPlainTextEdit* fieldText_ = nullptr;
+    QComboBox* fieldCombo_ = nullptr;
+    QWidget* fieldEditor_ = nullptr;  ///< whichever of the three is open
+    QString fieldEditorName_;
+    int fieldEditorWidget_ = 0;
+    QString fieldEditorOriginal_;
     QColor newTextColor_ = Qt::black;
     /// Highlight, Underline and Strike-out act on a text selection.
     [[nodiscard]] bool markupTool() const {

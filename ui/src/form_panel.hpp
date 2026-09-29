@@ -34,6 +34,9 @@ public:
     void setEditable(bool editable);
     /// Puts the keyboard in field `name`'s editor (a click on the page does).
     void focusField(const QString& name);
+    /// Scrolls to field `name`'s entry and marks it, leaving the keyboard
+    /// where it is (a field being filled in on the page does).
+    void revealField(const QString& name);
     [[nodiscard]] int count() const { return static_cast<int>(rows_.size()); }
     /// Required fields still without a value, in reading order.
     [[nodiscard]] QStringList emptyRequired() const;
@@ -55,6 +58,7 @@ private:
         FieldRow row;
         QWidget* editor = nullptr;
         QLabel* error = nullptr;
+        QWidget* box = nullptr;  ///< the whole entry: label, editor, error
         bool touched = false;  ///< left once: from then on its problems show
     };
 
@@ -65,6 +69,8 @@ private:
     void commit(const QString& name, const QString& value);
     void validate(Entry& e);
     void updateSummary();
+    /// Shows field `name`'s entry as the current one; empty for none.
+    void markCurrent(const QString& name);
     [[nodiscard]] static bool sameShape(const QVector<FieldRow>& a, const QVector<FieldRow>& b);
     [[nodiscard]] static bool isEmptyValue(const FieldRow& row);
 
@@ -77,6 +83,7 @@ private:
     QLabel* summary_ = nullptr;
     QCheckBox* highlight_ = nullptr;
     QPushButton* flatten_ = nullptr;
+    QString current_;  ///< the entry marked as the one being filled in
     bool editable_ = true;
     bool updating_ = false;
 };

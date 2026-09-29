@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 using leht::ops::FieldType;
 
@@ -34,20 +35,6 @@ FieldType typeOf(const FieldRow& row) {
 /// signature field is filled by signing, so it is listed without an editor.
 bool listed(const FieldRow& row) {
     return typeOf(row) != FieldType::PushButton && typeOf(row) != FieldType::Unknown;
-}
-
-/// Reading order: page, then rows top to bottom (a few points of slack, so
-/// fields on one line stay together), then left to right.
-bool readsBefore(const FieldRow& a, const FieldRow& b) {
-    if (a.page != b.page) {
-        return a.page < b.page;
-    }
-    const double ay = std::round(a.rect.top() / 6.0);
-    const double by = std::round(b.rect.top() / 6.0);
-    if (ay != by) {
-        return ay < by;
-    }
-    return a.rect.left() < b.rect.left();
 }
 
 QColor errorColour(const QWidget* w) {
@@ -138,7 +125,7 @@ void FormPanel::setFields(const QVector<FieldRow>& rows) {
             sorted.push_back(r);
         }
     }
-    std::stable_sort(sorted.begin(), sorted.end(), readsBefore);
+    std::stable_sort(sorted.begin(), sorted.end(), fieldReadsBefore);
     const bool same = sameShape(rows_, sorted);
     rows_ = std::move(sorted);
     if (same && !entries_.isEmpty()) {
@@ -164,6 +151,7 @@ void FormPanel::rebuild() {
         Entry e;
         e.row = row;
         auto* box = new QWidget(list_);
+        e.box = box;
         auto* bl = new QVBoxLayout(box);
         bl->setContentsMargins(0, 6, 0, 4);
         bl->setSpacing(3);
@@ -273,6 +261,7 @@ void FormPanel::rebuild() {
         setEditorValue(e);
     }
     setEditable(editable_);
+    markCurrent(std::exchange(current_, QString()));
 }
 
 void FormPanel::refreshValues() {
@@ -392,6 +381,7 @@ void FormPanel::focusField(const QString& name) {
     }
     // Said now, not left to the focus event: a window that is not active
     // gets that only when it is.
+    markCurrent(name);
     emit currentFieldChanged(name);
     scroll_->ensureWidgetVisible(editor->parentWidget());
     if (typeOf(entries_[*it].row) == FieldType::Radio) {
@@ -411,10 +401,36 @@ void FormPanel::focusField(const QString& name) {
     }
 }
 
+void FormPanel::revealField(const QString& name) {
+    const auto it = byName_.constFind(name);
+    if (it == byName_.constEnd()) {
+        return;
+    }
+    markCurrent(name);
+    scroll_->ensureWidgetVisible(entries_[*it].box);
+}
+
+void FormPanel::markCurrent(const QString& name) {
+    const auto set = [this](const QString& which, bool on) {
+        const auto it = byName_.constFind(which);
+        if (it == byName_.constEnd()) {
+            return;
+        }
+        // The palette's alternate base: a quiet band that follows the theme.
+        QWidget* box = entries_[*it].box;
+        box->setBackgroundRole(QPalette::AlternateBase);
+        box->setAutoFillBackground(on);
+    };
+    set(current_, false);
+    current_ = name;
+    set(current_, true);
+}
+
 bool FormPanel::eventFilter(QObject* watched, QEvent* event) {
     if (event->type() == QEvent::FocusIn) {
         const QString name = watched->property(kFieldProperty).toString();
         if (!name.isEmpty()) {
+            markCurrent(name);
             emit currentFieldChanged(name);
         }
     } else if (event->type() == QEvent::FocusOut) {
