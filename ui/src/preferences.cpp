@@ -95,6 +95,16 @@ PreferencesDialog::PreferencesDialog(QWidget* parent, const QStringList& ocrLang
     toolbarLabels_->setEnabled(showToolbar_->isChecked());
     connect(showToolbar_, &QCheckBox::toggled, toolbarLabels_, &QWidget::setEnabled);
     form->addRow(tr("Toolbar buttons:"), toolbarLabels_);
+    toolbarAlign_ = new QComboBox(general);
+    toolbarAlign_->setObjectName(QStringLiteral("toolbarAlign"));
+    toolbarAlign_->addItem(tr("Left"), QStringLiteral("left"));
+    toolbarAlign_->addItem(tr("Centre"), QStringLiteral("centre"));
+    toolbarAlign_->setCurrentIndex(std::max(0, toolbarAlign_->findData(settings.value(
+                                                   QLatin1String(prefs::kToolbarAlign), QStringLiteral("left")))));
+    toolbarAlign_->setToolTip(tr("Edit, Sign, Files and Pages: right after Undo and Redo, or in the middle"));
+    toolbarAlign_->setEnabled(showToolbar_->isChecked());
+    connect(showToolbar_, &QCheckBox::toggled, toolbarAlign_, &QWidget::setEnabled);
+    form->addRow(tr("Tool buttons position:"), toolbarAlign_);
     themeIcons_ = new QCheckBox(tr("Use the desktop's icon theme where it has an icon"), general);
     themeIcons_->setChecked(settings.value(QLatin1String(icons::kUseThemeKey), false).toBool());
     themeIcons_->setToolTip(tr("Leht's own icons are used otherwise, and for anything the theme lacks"));
@@ -312,9 +322,11 @@ void PreferencesDialog::save() {
     const bool appearance =
         settings.value(QLatin1String(prefs::kShowToolbar), true).toBool() != showToolbar_->isChecked() ||
         settings.value(QLatin1String(prefs::kToolbarLabels), true).toBool() != labels ||
+        settings.value(QLatin1String(prefs::kToolbarAlign), QStringLiteral("left")) != toolbarAlign_->currentData() ||
         settings.value(QLatin1String(icons::kUseThemeKey), false).toBool() != themeIcons_->isChecked();
     settings.setValue(QLatin1String(prefs::kShowToolbar), showToolbar_->isChecked());
     settings.setValue(QLatin1String(prefs::kToolbarLabels), labels);
+    settings.setValue(QLatin1String(prefs::kToolbarAlign), toolbarAlign_->currentData());
     settings.setValue(QLatin1String(icons::kUseThemeKey), themeIcons_->isChecked());
 
     settings.setValue(QStringLiteral("signing/name"), signName_->text().trimmed());

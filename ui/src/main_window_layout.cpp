@@ -95,6 +95,11 @@ void MainWindow::buildMainToolbar() {
         QSettings().setValue(QLatin1String(prefs::kToolbarLabels), shown);
         applyAppearanceEverywhere();
     });
+    connect(mainBar_, &MainToolbar::quickAlignmentRequested, this, [](Qt::Alignment alignment) {
+        QSettings().setValue(QLatin1String(prefs::kToolbarAlign),
+                             alignment == Qt::AlignHCenter ? QStringLiteral("centre") : QStringLiteral("left"));
+        applyAppearanceEverywhere();
+    });
 
     // Without the toolbar, the page and zoom stay in sight down here.
     statusPosition_ = new QLabel(this);
@@ -348,6 +353,9 @@ void MainWindow::applyAppearance() {
     const bool labels = settings.value(QLatin1String(prefs::kToolbarLabels), true).toBool() || !icons::available();
     mainBar_->setVisible(shown);
     mainBar_->setLabelsShown(labels);
+    mainBar_->setQuickAlignment(
+        settings.value(QLatin1String(prefs::kToolbarAlign)).toString() == QLatin1String("centre") ? Qt::AlignHCenter
+                                                                                                 : Qt::AlignLeft);
     mainBar_->setToolButtonStyle(icons::available() ? Qt::ToolButtonIconOnly : Qt::ToolButtonTextOnly);
     if (QAction* toggle = actions_->find(QStringLiteral("toggleToolbar"))) {
         const QSignalBlocker quiet(toggle);

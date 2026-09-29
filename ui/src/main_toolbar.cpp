@@ -6,6 +6,7 @@
 #include "welcome_view.hpp"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QContextMenuEvent>
 #include <QLabel>
@@ -78,13 +79,15 @@ MainToolbar::MainToolbar(const ActionRegistry* actions, const std::vector<Group>
     // Left: the file and undo commands, icons only.
     actions_->populate(this, ids({"toggleSidebar", "-", "open", "save", "-", "undo", "redo"}));
 
-    // Middle: the quick tools, centred between two springs.
+    // Then the quick tools: after a separator, or centred between two springs.
     const auto spring = [this] {
         auto* spacer = new QWidget(this);
         spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        addWidget(spacer);
+        return addWidget(spacer);
     };
-    spring();
+    leadSeparator_ = addSeparator();
+    leadSpring_ = spring();
+    leadSpring_->setVisible(false);
     quick_.reserve(groups.size());
     for (const Group& group : groups) {
         addQuick(group);
@@ -225,6 +228,13 @@ void MainToolbar::setLabelsShown(bool shown) {
     fitToWidth();
 }
 
+void MainToolbar::setQuickAlignment(Qt::Alignment alignment) {
+    centred_ = (alignment & Qt::AlignHCenter) != 0;
+    leadSeparator_->setVisible(!centred_);
+    leadSpring_->setVisible(centred_);
+    fitToWidth();
+}
+
 void MainToolbar::setQuickStyle(Qt::ToolButtonStyle style) {
     for (const Quick& q : quick_) {
         q.button->setToolButtonStyle(style);
@@ -269,6 +279,17 @@ void MainToolbar::contextMenuEvent(QContextMenuEvent* event) {
     labels->setCheckable(true);
     labels->setChecked(labels_);
     connect(labels, &QAction::toggled, this, &MainToolbar::labelsToggled);
+    menu.addSeparator();
+    auto* where = new QActionGroup(&menu);
+    QAction* left = menu.addAction(tr("Tools on the Left"));
+    QAction* centre = menu.addAction(tr("Tools in the Centre"));
+    for (QAction* a : {left, centre}) {
+        a->setCheckable(true);
+        where->addAction(a);
+    }
+    (centred_ ? centre : left)->setChecked(true);
+    connect(left, &QAction::triggered, this, [this] { emit quickAlignmentRequested(Qt::AlignLeft); });
+    connect(centre, &QAction::triggered, this, [this] { emit quickAlignmentRequested(Qt::AlignHCenter); });
     menu.exec(event->globalPos());
     event->accept();
 }

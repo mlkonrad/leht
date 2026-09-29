@@ -14,8 +14,9 @@ class QToolButton;
 
 /// The bar at the top of the window, in three zones: the file and undo
 /// commands (icons only) on the left, the four quick tools (Edit, Sign, Files,
-/// Pages, each a big labelled button with a menu of the rest of its group) in
-/// the middle, and the page number and zoom on the right.
+/// Pages, each a big labelled button with a menu of the rest of its group)
+/// right after them or centred (setQuickAlignment), and the page number and
+/// zoom on the right.
 ///
 /// Every button is built from ActionRegistry ids, so its text, icon, tip,
 /// shortcut and certification lock come from one place. The page spin box and
@@ -57,6 +58,13 @@ public:
     /// Whether the labels are showing right now (false while squeezed).
     [[nodiscard]] bool labelsVisible() const { return labels_ && !compact_; }
 
+    /// Where the quick tools sit: Qt::AlignLeft, after undo and redo (the
+    /// default), or Qt::AlignHCenter, in the middle of the bar.
+    void setQuickAlignment(Qt::Alignment alignment);
+    [[nodiscard]] Qt::Alignment quickAlignment() const {
+        return centred_ ? Qt::AlignHCenter : Qt::AlignLeft;
+    }
+
     /// With no document, the buttons with a task ask for a file first.
     void setDocumentOpen(bool open);
 
@@ -67,6 +75,7 @@ signals:
     /// From the bar's context menu.
     void hideRequested();
     void labelsToggled(bool shown);
+    void quickAlignmentRequested(Qt::Alignment alignment);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -98,4 +107,9 @@ private:
     bool compact_ = false;
     int labelWidth_ = 0;  // what the labels add, measured when they were dropped
     bool documentOpen_ = false;
+    // Left: a separator after redo. Centred: a spring there instead, which
+    // balances the one after the quick tools. Hidden, neither takes room.
+    QAction* leadSeparator_ = nullptr;
+    QAction* leadSpring_ = nullptr;
+    bool centred_ = false;
 };

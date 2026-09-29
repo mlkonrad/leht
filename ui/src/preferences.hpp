@@ -20,6 +20,9 @@ inline constexpr const char* kDefaultZoom = "view/defaultZoom";  ///< "width" | 
 /// (default true; false is icons only).
 inline constexpr const char* kShowToolbar = "appearance/showToolbar";
 inline constexpr const char* kToolbarLabels = "appearance/toolbarLabels";
+/// Where the toolbar's quick tools sit: "left" (after undo and redo, the
+/// default) or "centre".
+inline constexpr const char* kToolbarAlign = "appearance/toolbarAlign";
 /// Reopen, at start-up, the documents open when Leht last closed. Off by default.
 inline constexpr const char* kRestoreTabs = "general/restoreTabs";
 inline constexpr const char* kTrusted = "trustedCertificates";
@@ -54,6 +57,7 @@ private:
     QCheckBox* restoreTabs_ = nullptr;
     QCheckBox* showToolbar_ = nullptr;
     QComboBox* toolbarLabels_ = nullptr;
+    QComboBox* toolbarAlign_ = nullptr;
     QCheckBox* themeIcons_ = nullptr;
 
     QLineEdit* signName_ = nullptr;

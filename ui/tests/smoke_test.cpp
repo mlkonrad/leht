@@ -37,6 +37,7 @@
 #include <QPointer>
 #include <QMenuBar>
 #include <QTabBar>
+#include <QDialogButtonBox>
 
 #include <QApplication>
 #include <QClipboard>
@@ -1384,6 +1385,48 @@ int main(int argc, char** argv) {
         fresh.resize(1000, 800);
         pump(100);
         check(quick("edit")->toolButtonStyle() == Qt::ToolButtonTextBesideIcon, "and gets them back when wide");
+        {
+            // Where the quick tools sit: after Undo and Redo (the default), or centred.
+            QWidget* redo = bar->widgetForAction(fresh.actions()->find(QStringLiteral("redo")));
+            const auto left = [&](const char* id) { return quick(id)->mapTo(bar, QPoint(0, 0)).x(); };
+            const int afterRedo = redo->mapTo(bar, QPoint(redo->width(), 0)).x();
+            check(bar->quickAlignment() == Qt::AlignLeft && left("edit") < bar->width() / 2 &&
+                      left("edit") - afterRedo < 30,
+                  "the quick tools sit on the left, right after Redo");
+            shot(bar, "toolbar-left");
+            {
+                // Preferences keeps the choice...
+                PreferencesDialog prefs(&fresh, {});
+                auto* align = prefs.findChild<QComboBox*>(QStringLiteral("toolbarAlign"));
+                check(align != nullptr && align->isEnabled() && align->currentData() == QStringLiteral("left"),
+                      "Preferences offers where the tool buttons sit, Left by default");
+                align->setCurrentIndex(align->findData(QStringLiteral("centre")));
+                prefs.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+                check(QSettings().value(QLatin1String(prefs::kToolbarAlign)).toString() == QStringLiteral("centre"),
+                      "and keeps Centre when chosen");
+            }
+            // ...and the window applies it, as it does from the bar's own menu.
+            emit bar->quickAlignmentRequested(Qt::AlignHCenter);
+            pump(100);
+            QWidget* spin = bar->pageSpin();
+            const int before = left("edit") - afterRedo;
+            const int after = spin->mapTo(bar, QPoint(0, 0)).x() -
+                              quick("pages")->mapTo(bar, QPoint(quick("pages")->width(), 0)).x();
+            check(bar->quickAlignment() == Qt::AlignHCenter && before > 50 && std::abs(before - after) < 30,
+                  "set to Centre, they sit between the two ends of the bar");
+            shot(bar, "toolbar-centre");
+            fresh.resize(600, 800);
+            pump(100);
+            check(quick("edit")->toolButtonStyle() == Qt::ToolButtonIconOnly, "centred, a narrow window drops the labels");
+            fresh.resize(1000, 800);
+            pump(100);
+            check(quick("edit")->toolButtonStyle() == Qt::ToolButtonTextBesideIcon, "and gets them back when wide");
+            emit bar->quickAlignmentRequested(Qt::AlignLeft);  // the bar's own menu
+            pump(50);
+            check(bar->quickAlignment() == Qt::AlignLeft &&
+                      QSettings().value(QLatin1String(prefs::kToolbarAlign)).toString() == QStringLiteral("left"),
+                  "the bar's menu puts them back on the left, and remembers");
+        }
         {
             PreferencesDialog prefs(&fresh, {QStringLiteral("est"), QStringLiteral("eng")});
             prefs.show();
