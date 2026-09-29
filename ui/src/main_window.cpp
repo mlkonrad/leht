@@ -36,6 +36,7 @@
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
+#include <QShortcut>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -537,12 +538,14 @@ void MainWindow::goToPageFromSpin() {
 
 void MainWindow::showFindBar() {
     findBar_->show();
+    findEscape_->setEnabled(true);
     findEdit_->setFocus();
     findEdit_->selectAll();
 }
 
 void MainWindow::hideFindBar() {
     findBar_->hide();
+    findEscape_->setEnabled(false);
     if (DocumentTab* d = current_) {
         d->cancelSearch();
         d->view()->setFocus();
@@ -584,9 +587,9 @@ MainWindow* MainWindow::newWindow() {
     return window;
 }
 
-void MainWindow::openDocument(const QString& path) {
+MainWindow* MainWindow::openDocument(const QString& path) {
     const QString absolute = QFileInfo(path).absoluteFilePath();
-    // Already open somewhere: that window comes forward, rather than a copy.
+    // Already open somewhere: its tab comes forward, rather than a copy.
     for (QWidget* w : QApplication::topLevelWidgets()) {
         auto* other = qobject_cast<MainWindow*>(w);
         if (other == nullptr || !other->isVisible()) {
@@ -595,14 +598,69 @@ void MainWindow::openDocument(const QString& path) {
         for (DocumentTab* d : other->tabs_) {
             if (d->path() == absolute) {
                 other->setCurrent(d);
-                other->showNormal();
-                other->raise();
-                other->activateWindow();
-                return;
+                if (other != this) {
+                    other->bringForward();
+                }
+                return other;
             }
         }
     }
     addDocument()->openPath(absolute);
+    return this;
+}
+
+namespace {
+
+/// The window activated last; see MainWindow::changeEvent.
+QPointer<MainWindow> gLastActive;
+
+}  // namespace
+
+MainWindow* MainWindow::lastActive() {
+    if (gLastActive != nullptr && gLastActive->isVisible()) {
+        return gLastActive;
+    }
+    for (QWidget* w : QApplication::topLevelWidgets()) {
+        if (auto* window = qobject_cast<MainWindow*>(w); window != nullptr && window->isVisible()) {
+            return window;
+        }
+    }
+    auto* window = new MainWindow();
+    window->setAttribute(Qt::WA_DeleteOnClose);
+    window->show();
+    return window;
+}
+
+void MainWindow::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::ActivationChange && isActiveWindow()) {
+        gLastActive = this;
+    }
+    QMainWindow::changeEvent(event);
+}
+
+void MainWindow::bringForward() {
+    if (isMinimized()) {
+        setWindowState((windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
+    }
+    show();
+    raise();
+    activateWindow();
+}
+
+void MainWindow::openHandedOver(const QStringList& paths, const QByteArray& activationToken) {
+    MainWindow* target = lastActive();
+    MainWindow* shown = target;
+    for (const QString& path : paths) {
+        shown = target->openDocument(path);
+    }
+    // On Wayland a window may take the focus only with a token from the
+    // launch that asked for it; Qt's activation request uses the one in the
+    // environment. Without it the compositor marks the window as wanting
+    // attention instead.
+    if (!activationToken.isEmpty()) {
+        qputenv("XDG_ACTIVATION_TOKEN", activationToken);
+    }
+    shown->bringForward();
 }
 
 void MainWindow::openPath(const QString& path) {

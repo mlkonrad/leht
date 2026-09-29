@@ -135,8 +135,11 @@ void MainWindow::buildLayout() {
     addToolBar(Qt::BottomToolBarArea, findBar_);
     findBar_->hide();
     connect(findEdit_, &QLineEdit::returnPressed, this, &MainWindow::runSearch);
-    auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), this);
-    connect(esc, &QShortcut::activated, this, &MainWindow::hideFindBar);
+    // Escape is the find bar's only while it shows: otherwise it is the
+    // page's, a dialog's or the first-run tour's to use.
+    findEscape_ = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+    findEscape_->setEnabled(false);
+    connect(findEscape_, &QShortcut::activated, this, &MainWindow::hideFindBar);
 
     // Modes: each shows Select and its own tools.
     const auto separator = [this] {

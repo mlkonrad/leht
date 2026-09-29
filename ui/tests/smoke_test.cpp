@@ -27,6 +27,7 @@
 #include "first_run_hints.hpp"
 #include "form_panel.hpp"
 #include "signature_cards.hpp"
+#include "single_instance.hpp"
 #include "welcome_view.hpp"
 #include <QAccessible>
 #include <QKeyEvent>
@@ -1418,6 +1419,47 @@ int main(int argc, char** argv) {
             fresh.closeDocument();
             pump(200);
             check(tabs->count() == 1 && fresh.view()->pageCount() == 10, "Close closes only the current tab");
+        }
+
+        // One Leht per user: a second launch hands its files to this one,
+        // and they open as tabs in the window used last.
+        {
+            QTemporaryDir tmp;
+            const QString name = tmp.filePath(QStringLiteral("leht.sock"));
+            SingleInstance running(name);
+            check(running.listen(), "the first Leht listens for later launches");
+            SingleInstance second(name);
+            check(!second.listen(), "a second one sees it is not the first");
+            QObject::connect(&running, &SingleInstance::filesReceived, &MainWindow::openHandedOver);
+            MainWindow* target = MainWindow::lastActive();
+            const int tabsBefore = target->tabBar()->count();
+            const QString copy = tmp.filePath(QStringLiteral("handed over.pdf"));
+            QFile::copy(QString::fromStdString(doc), copy);
+            const QStringList handed{QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf"), copy};
+            bool taken = false;
+            // The launch waits for an answer, so it runs beside this thread's event loop.
+            QThread* launch = QThread::create([&] { taken = SingleInstance::sendToRunning(name, handed, "token-1"); });
+            launch->start();
+            for (int i = 0; i < 100 && !launch->isFinished(); ++i) {
+                pump(50);
+            }
+            launch->wait();
+            delete launch;
+            pump(1500);
+            QTabBar* bar = target->tabBar();
+            check(taken && bar->count() == tabsBefore + 2 && bar->tabText(tabsBefore) == QStringLiteral("outlined.pdf") &&
+                      bar->tabText(tabsBefore + 1) == QStringLiteral("handed over.pdf"),
+                  "the files of a second launch open as tabs in the running Leht");
+            check(qgetenv("XDG_ACTIVATION_TOKEN") == "token-1", "with its activation token, to take the focus");
+            qunsetenv("XDG_ACTIVATION_TOKEN");
+            // Back as it was: the two new tabs close, the one before is current.
+            target->closeDocument();
+            target->closeDocument();
+            pump(200);
+            check(bar->count() == tabsBefore, "and close again");
+            SingleInstance stale(tmp.filePath(QStringLiteral("stale.sock")));
+            QFile(tmp.filePath(QStringLiteral("stale.sock"))).open(QIODevice::WriteOnly);  // left by a crash
+            check(stale.listen(), "a socket left behind by a crashed Leht is taken over");
         }
         check(fresh.actions()->find(QStringLiteral("save"))->isEnabled() &&
                   fresh.actions()->find(QStringLiteral("toolHighlight"))->isEnabled(),

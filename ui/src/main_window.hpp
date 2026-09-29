@@ -27,6 +27,7 @@ class QLineEdit;
 class QMenu;
 class QPrinter;
 class QProgressDialog;
+class QShortcut;
 class QSpinBox;
 class QStackedWidget;
 class QTabBar;
@@ -54,7 +55,17 @@ public:
     void openPath(const QString& path);
     /// Opens `path` as the user asked: the tab already showing it, in this
     /// window or another, comes forward; otherwise it opens in a new tab here.
-    void openDocument(const QString& path);
+    /// Returns the window that shows it.
+    MainWindow* openDocument(const QString& path);
+    /// Files another launch of Leht handed over (SingleInstance): they open
+    /// as tabs in the window used last, which comes forward. `activationToken`
+    /// is the launch's Wayland XDG_ACTIVATION_TOKEN, which lets it take the
+    /// focus.
+    static void openHandedOver(const QStringList& paths, const QByteArray& activationToken);
+    /// The window the user was in last (a new one if none shows).
+    [[nodiscard]] static MainWindow* lastActive();
+    /// Up from the taskbar if minimised, raised, and asked for the focus.
+    void bringForward();
     /// File > New Window: another window, empty, deleted when closed.
     MainWindow* newWindow();
 
@@ -104,6 +115,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void changeEvent(QEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
@@ -191,6 +203,7 @@ private:
     QToolBar* findBar_ = nullptr;
     QLineEdit* findEdit_ = nullptr;
     QLabel* findLabel_ = nullptr;
+    QShortcut* findEscape_ = nullptr;  ///< on only while the find bar shows
     QSpinBox* pageSpin_ = nullptr;
     bool syncingSpin_ = false;
 

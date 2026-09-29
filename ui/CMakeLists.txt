@@ -1,4 +1,4 @@
-find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport)
+find_package(Qt6 REQUIRED COMPONENTS Widgets PrintSupport Network)
 
 qt_standard_project_setup()
 
@@ -31,6 +31,7 @@ qt_add_library(leht_viewer_lib STATIC
     src/render_worker.cpp
     src/sidebar.cpp
     src/signature_cards.cpp
+    src/single_instance.cpp
     src/sign_dialog.cpp
     src/thumbnail_bar.cpp
     src/welcome_view.cpp
@@ -51,9 +52,10 @@ qt_add_resources(leht_viewer_lib "ui_icons"
 # leht::warnings is deliberately not applied: Qt's moc output and headers do not
 # pass our -Werror pedantic set, and they are not ours to fix. core/ stays strict.
 # leht::crypto: the viewer is the trusted process. It holds the signing key,
-# and leht-worker never does -- see docs/signing.md.
+# and leht-worker never does -- see docs/signing.md. Qt6::Network is for the
+# local socket a second launch hands its files over (single_instance.cpp).
 target_link_libraries(leht_viewer_lib PUBLIC leht::core leht::crypto leht::ipc
-                      Qt6::Widgets Qt6::PrintSupport)
+                      Qt6::Widgets Qt6::PrintSupport Qt6::Network)
 # leht::ocr only lists the installed languages here; Tesseract itself runs in
 # the sandboxed OCR worker (leht-worker --ocr).
 if(LEHT_WITH_OCR)
