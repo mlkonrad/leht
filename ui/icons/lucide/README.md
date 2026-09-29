@@ -8,4 +8,5 @@ They are compiled into the viewer as Qt resources (`:/leht/icons/<name>.svg`). `
 draws them in the palette's text colour, so they follow light and dark themes. A desktop
 icon theme's icon wins when it has one under the freedesktop name.
 
-To add one, fetch it from the same version and list it in `ui/CMakeLists.txt`.
+To add one, fetch it from the same version into this folder. `ui/CMakeLists.txt` picks up every SVG
+here (a glob), so there is no list to edit.
