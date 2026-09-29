@@ -8,6 +8,7 @@ qt_add_library(leht_viewer_lib STATIC
     src/actions.cpp
     src/annotation_properties.cpp
     src/color_swatches.cpp
+    src/document_tab.cpp
     src/comments_panel.cpp
     src/export_dialog.cpp
     src/file_tools.cpp
