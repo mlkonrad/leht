@@ -303,19 +303,23 @@ void MainToolbar::applyStyleSheet() {
         "QToolBar#mainBar QToolButton:pressed, QToolBar#mainBar QToolButton:checked {"
         "  background: %1; border-color: palette(highlight); }"
         "QToolBar#mainBar QToolButton:disabled { color: palette(mid); }"
-        "QToolBar#mainBar QToolButton[popupMode=\"1\"] { padding: 5px 22px 5px 8px; margin: 0 2px;"
+        "QToolBar#mainBar QToolButton[popupMode=\"1\"] { padding: 5px 16px 5px 8px; margin: 0 2px;"
         "  font-weight: 600; }"
         "QToolBar#mainBar QToolButton::menu-button { border: none; border-left: 1px solid transparent;"
-        "  background: transparent; border-top-right-radius: 8px; border-bottom-right-radius: 8px; width: 16px; }"
+        "  background: transparent; border-top-right-radius: 8px; border-bottom-right-radius: 8px; width: 14px; }"
         "QToolBar#mainBar QToolButton::menu-button:hover { border-left-color: palette(mid); }"
         "QToolBar#mainBar QToolButton[primary=\"true\"] { background: palette(highlight);"
         "  color: palette(highlighted-text); border-color: palette(highlight); }"
         "QToolBar#mainBar QToolButton[primary=\"true\"]:hover { border-color: palette(highlighted-text); }"
         "QToolBar#mainBar QToolButton[primary=\"true\"]:disabled { background: transparent;"
         "  color: palette(mid); border-color: palette(mid); }"
-        "QToolBar#mainBar QToolButton[primary=\"true\"]::menu-button { background: palette(highlight);"
-        "  border-left-color: palette(highlighted-text); }"
-        "QToolBar#mainBar QToolButton[primary=\"true\"]::menu-button:disabled { background: transparent;"
-        "  border-left-color: palette(mid); }")
+        // Sign reads as one pill: its ▾ segment drawn by the sheet, not the style,
+        // in the same fill, split off by a thin divider.
+        "QToolBar#mainBar QToolButton#quick_sign::menu-button { background: palette(highlight);"
+        "  border: 1px solid palette(highlight); border-left: 1px solid palette(highlighted-text);"
+        "  border-top-left-radius: 0; border-bottom-left-radius: 0;"
+        "  border-top-right-radius: 8px; border-bottom-right-radius: 8px; }"
+        "QToolBar#mainBar QToolButton#quick_sign::menu-button:disabled { background: transparent;"
+        "  border-color: palette(mid); }")
                       .arg(on));
 }
