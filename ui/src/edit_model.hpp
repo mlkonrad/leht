@@ -78,11 +78,6 @@ struct SignSpec {
     QString p12Path;
     QString pkcs11Uri;  ///< a key on an ID card or token instead of p12Path
     QString password;   ///< the .p12 password, or the card's PIN
-    /// A phone signs instead (SK's demo environment): "smart-id-qr",
-    /// "smart-id" (by personal code) or "mobile-id". Empty: a file or a card.
-    QString phoneMethod;
-    QString phonePerson;  ///< Smart-ID: ETSI's "PNOEE-..."; Mobile-ID: the personal code
-    QString phoneNumber;  ///< Mobile-ID: "+372..."
     int certify = 0;    ///< certify the document at this DocMDP level; 0: an ordinary signature
     QString field;      ///< an existing empty signature field, or empty
     int page = 0;

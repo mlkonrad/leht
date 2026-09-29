@@ -75,7 +75,7 @@ private:
 
 /// Collects everything a signature needs, in steps: 1 Where (the box drawn on
 /// the page, an empty signature field of the form, or invisible), 2 How (the
-/// key: a file, a card, or a phone through Smart-ID or Mobile-ID), 3 Look
+/// key: a file or a card), 3 Look
 /// (what a visible signature shows, with a preview; skipped for an invisible
 /// one), 4 Details (name, reason, location, certification, timestamp). Next
 /// checks a step before moving on.
@@ -134,15 +134,6 @@ private:
     QFormLayout* form_ = nullptr;
     QRadioButton* fromFile_ = nullptr;
     QRadioButton* fromCard_ = nullptr;
-    QRadioButton* fromSmartId_ = nullptr;
-    QRadioButton* fromMobileId_ = nullptr;
-    QWidget* smartIdRow_ = nullptr;
-    QComboBox* smartIdHow_ = nullptr;      ///< QR code, or personal code
-    QComboBox* smartIdCountry_ = nullptr;
-    QLineEdit* smartIdCode_ = nullptr;
-    QLineEdit* mobilePhone_ = nullptr;
-    QLineEdit* mobileCode_ = nullptr;
-    QLabel* phoneNote_ = nullptr;
     QWidget* keyFileRow_ = nullptr;
     QLineEdit* keyPath_ = nullptr;
     QLineEdit* password_ = nullptr;

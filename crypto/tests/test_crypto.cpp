@@ -3,12 +3,18 @@
 #include "leht/error.hpp"
 #include "edit_harness.hpp"
 #include "prepared.hpp"
+#include "ossl.hpp"
 #include "test_pki.hpp"
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <string>
+#include <thread>
 
 using leht::crypto::Bytes;
 using leht::crypto::CmsReport;
@@ -278,6 +284,40 @@ void trust_store_round_trips_through_pem() {
     std::printf("  (system trust store: %d certificates)\n", sys.size());
 }
 
+
+/// A server that hangs up while the request is still being sent: an error,
+/// not SIGPIPE killing the process (the viewer, the CLI).
+void a_server_hanging_up_is_an_error_not_sigpipe() {
+    const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(addr);
+    CHECK(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 &&
+          ::listen(fd, 1) == 0 &&
+          ::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+    std::thread rude([fd] {
+        const int c = ::accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
+        // Close before a byte arrives (a clean FIN): the client's first write
+        // goes out, the next meets a closed socket. Closing with unread data
+        // would send RST instead, and never reproduce it.
+        ::close(c);
+    });
+    const Bytes big(8 << 20, 'x');
+    leht::crypto::detail::HttpRequest post;
+    post.url = "http://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + "/";
+    post.what = "a server that hangs up";
+    post.post = &big;
+    post.content_type = "application/timestamp-query";
+    post.timeout_seconds = 10;
+    CHECK(throws([&] { (void)leht::crypto::detail::http_transfer(post); }));
+    rude.join();
+    ::close(fd);
+    sigset_t pending;
+    sigpending(&pending);
+    CHECK(sigismember(&pending, SIGPIPE) == 0);  // none left behind either
+}
+
 }  // namespace
 
 int main() {
@@ -295,6 +335,7 @@ int main() {
     RUN(a_timestamp_makes_it_b_t);
     RUN(a_replayed_timestamp_is_refused);
     RUN(an_unreachable_tsa_fails);
+    RUN(a_server_hanging_up_is_an_error_not_sigpipe);
     RUN(trust_store_round_trips_through_pem);
     return 0;
 }

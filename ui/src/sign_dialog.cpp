@@ -21,7 +21,6 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QRadioButton>
-#include <QRegularExpression>
 #include <QSettings>
 #include <QStackedWidget>
 #include <QVBoxLayout>
@@ -235,16 +234,12 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
     detailsLayout->addLayout(details);
     steps_->addWidget(detailsPage);
 
-    // Where the key is: a .p12 file, a card that keeps it, or a phone.
+    // Where the key is: a .p12 file, or a card that keeps it.
     fromFile_ = new QRadioButton(tr("Key file"), this);
     fromCard_ = new QRadioButton(tr("ID card or token"), this);
-    fromSmartId_ = new QRadioButton(tr("Smart-ID"), this);
-    fromMobileId_ = new QRadioButton(tr("Mobile-ID"), this);
     auto* sourceRow = new QHBoxLayout;
     sourceRow->addWidget(fromFile_);
     sourceRow->addWidget(fromCard_);
-    sourceRow->addWidget(fromSmartId_);
-    sourceRow->addWidget(fromMobileId_);
     sourceRow->addStretch();
     form->addRow(tr("Sign with:"), sourceRow);
 
@@ -282,62 +277,10 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
     form->addRow(QString(), cardStatus_);
     connect(cardKeys_, &QComboBox::currentIndexChanged, this, &SignDialog::showCardKey);
 
-    // Smart-ID: a QR code to scan with the app (nothing to type), or the
-    // person's code, which then shows a verification code to compare.
-    smartIdHow_ = new QComboBox(this);
-    smartIdHow_->addItem(tr("Scan a QR code with the Smart-ID app"), QStringLiteral("qr"));
-    smartIdHow_->addItem(tr("Personal code"), QStringLiteral("code"));
-    smartIdCountry_ = new QComboBox(this);
-    for (const char* c : {"EE", "LV", "LT"}) {
-        smartIdCountry_->addItem(QString::fromLatin1(c));
-    }
-    smartIdCountry_->setCurrentText(
-        settings.value(QStringLiteral("signing/smartIdCountry"), QStringLiteral("EE")).toString());
-    smartIdCode_ = new QLineEdit(settings.value(QStringLiteral("signing/smartIdCode")).toString(),
-                                 this);
-    smartIdCode_->setPlaceholderText(tr("personal code, e.g. 38001085718"));
-    smartIdRow_ = new QWidget(this);
-    auto* sidRow = new QHBoxLayout(smartIdRow_);
-    sidRow->setContentsMargins(0, 0, 0, 0);
-    sidRow->addWidget(smartIdHow_);
-    sidRow->addWidget(smartIdCountry_);
-    sidRow->addWidget(smartIdCode_, 1);
-    form->addRow(tr("Smart-ID:"), smartIdRow_);
-    smartIdHow_->setCurrentIndex(
-        settings.value(QStringLiteral("signing/smartIdHow")).toString() == QStringLiteral("code")
-            ? 1
-            : 0);
-    connect(smartIdHow_, &QComboBox::currentIndexChanged, this, &SignDialog::showSource);
-
-    mobilePhone_ = new QLineEdit(settings.value(QStringLiteral("signing/mobilePhone")).toString(),
-                                 this);
-    mobilePhone_->setPlaceholderText(tr("+372…"));
-    form->addRow(tr("Phone number:"), mobilePhone_);
-    mobileCode_ = new QLineEdit(settings.value(QStringLiteral("signing/mobileCode")).toString(),
-                                this);
-    mobileCode_->setPlaceholderText(tr("the personal code the number is registered to"));
-    form->addRow(tr("Personal code:"), mobileCode_);
-
-    phoneNote_ = new QLabel(tr("SK's demo environment, for its test accounts: real Smart-ID and "
-                               "Mobile-ID accounts do not work yet. Only the digest to sign is "
-                               "sent to SK, never the document."),
-                            this);
-    phoneNote_->setWordWrap(true);
-    form->addRow(QString(), phoneNote_);
-
-    const QString source = settings.value(QStringLiteral("signing/source")).toString();
-    (source == QStringLiteral("card")        ? fromCard_
-     : source == QStringLiteral("smart-id")  ? fromSmartId_
-     : source == QStringLiteral("mobile-id") ? fromMobileId_
-                                             : fromFile_)
-        ->setChecked(true);
-    for (QRadioButton* b : {fromFile_, fromCard_, fromSmartId_, fromMobileId_}) {
-        connect(b, &QRadioButton::toggled, this, [this](bool on) {
-            if (on) {
-                showSource();
-            }
-        });
-    }
+    const bool card = settings.value(QStringLiteral("signing/source")).toString() ==
+                      QStringLiteral("card");
+    (card ? fromCard_ : fromFile_)->setChecked(true);
+    connect(fromCard_, &QRadioButton::toggled, this, &SignDialog::showSource);
 
     name_ = new QLineEdit(settings.value(QStringLiteral("signing/name")).toString(), this);
     name_->setPlaceholderText(tr("taken from the certificate when left empty"));
@@ -508,15 +451,7 @@ SignDialog::SignDialog(QWidget* parent, int page, QRectF rect, QString suggested
         }
         QSettings saved;
         saved.setValue(QStringLiteral("signing/source"),
-                       fromCard_->isChecked()       ? QStringLiteral("card")
-                       : fromSmartId_->isChecked()  ? QStringLiteral("smart-id")
-                       : fromMobileId_->isChecked() ? QStringLiteral("mobile-id")
-                                                    : QStringLiteral("file"));
-        saved.setValue(QStringLiteral("signing/smartIdHow"), smartIdHow_->currentData());
-        saved.setValue(QStringLiteral("signing/smartIdCountry"), smartIdCountry_->currentText());
-        saved.setValue(QStringLiteral("signing/smartIdCode"), smartIdCode_->text().trimmed());
-        saved.setValue(QStringLiteral("signing/mobilePhone"), mobilePhone_->text().trimmed());
-        saved.setValue(QStringLiteral("signing/mobileCode"), mobileCode_->text().trimmed());
+                       fromCard_->isChecked() ? QStringLiteral("card") : QStringLiteral("file"));
         if (key != nullptr) {
             saved.setValue(QStringLiteral("signing/lastCardKey"), QString::fromStdString(key->uri));
         }
@@ -614,30 +549,6 @@ bool SignDialog::keyIsReady() {
             return false;
         }
     }
-    if (fromSmartId_->isChecked() && smartIdHow_->currentIndex() == 1) {
-        static const QRegularExpression code(QStringLiteral("^[0-9]{6,20}(-[0-9]+)?$"));
-        if (!code.match(smartIdCode_->text().trimmed()).hasMatch()) {
-            QMessageBox::warning(this, tr("Sign document"),
-                                 tr("Enter the personal code of the Smart-ID account, or "
-                                    "sign by scanning a QR code instead."));
-            return false;
-        }
-    }
-    if (fromMobileId_->isChecked()) {
-        static const QRegularExpression phone(QStringLiteral("^\\+[0-9]{7,15}$"));
-        static const QRegularExpression code(QStringLiteral("^[0-9]{6,20}$"));
-        if (!phone.match(mobilePhone_->text().trimmed()).hasMatch()) {
-            QMessageBox::warning(this, tr("Sign document"),
-                                 tr("Enter the phone number with its country code, e.g. "
-                                    "+37268000769."));
-            return false;
-        }
-        if (!code.match(mobileCode_->text().trimmed()).hasMatch()) {
-            QMessageBox::warning(this, tr("Sign document"),
-                                 tr("Enter the personal code the number is registered to."));
-            return false;
-        }
-    }
     return true;
 }
 
@@ -683,17 +594,8 @@ void SignDialog::updatePreview() {
 void SignDialog::showSource() {
     const bool card = fromCard_->isChecked();
     const bool file = fromFile_->isChecked();
-    const bool smartId = fromSmartId_->isChecked();
-    const bool mobileId = fromMobileId_->isChecked();
     form_->setRowVisible(keyFileRow_, file);
     form_->setRowVisible(password_, file);
-    form_->setRowVisible(smartIdRow_, smartId);
-    const bool byCode = smartIdHow_->currentIndex() == 1;
-    smartIdCountry_->setVisible(byCode);
-    smartIdCode_->setVisible(byCode);
-    form_->setRowVisible(mobilePhone_, mobileId);
-    form_->setRowVisible(mobileCode_, mobileId);
-    form_->setRowVisible(phoneNote_, smartId || mobileId);
     form_->setRowVisible(cardRow_, card);
     form_->setRowVisible(cardStatus_, card);
     if (card && !cardKeysLoaded_) {
@@ -814,19 +716,7 @@ void SignDialog::browseForImage() {
 SignSpec SignDialog::spec() const {
     SignSpec spec;
     const int at = cardKeys_->currentIndex();
-    if (fromSmartId_->isChecked()) {
-        if (smartIdHow_->currentIndex() == 1) {
-            spec.phoneMethod = QStringLiteral("smart-id");
-            spec.phonePerson = QStringLiteral("PNO%1-%2").arg(smartIdCountry_->currentText(),
-                                                              smartIdCode_->text().trimmed());
-        } else {
-            spec.phoneMethod = QStringLiteral("smart-id-qr");
-        }
-    } else if (fromMobileId_->isChecked()) {
-        spec.phoneMethod = QStringLiteral("mobile-id");
-        spec.phoneNumber = mobilePhone_->text().trimmed();
-        spec.phonePerson = mobileCode_->text().trimmed();
-    } else if (fromCard_->isChecked() && at >= 0 && at < static_cast<int>(tokenKeys_.size())) {
+    if (fromCard_->isChecked() && at >= 0 && at < static_cast<int>(tokenKeys_.size())) {
         spec.pkcs11Uri = QString::fromStdString(tokenKeys_[static_cast<std::size_t>(at)].uri);
         spec.password = pin_->text();
     } else {

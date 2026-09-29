@@ -8,21 +8,15 @@ find_package(OpenSSL 3.2 REQUIRED COMPONENTS Crypto SSL)
 # knows the modules the system has registered.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(P11KIT REQUIRED IMPORTED_TARGET GLOBAL p11-kit-1)
-# Smart-ID and Mobile-ID speak JSON (nlohmann/json, header-only), and
-# Smart-ID's QR codes are drawn with libqrencode.
-find_package(nlohmann_json 3.10 REQUIRED)
-pkg_check_modules(QRENCODE REQUIRED IMPORTED_TARGET GLOBAL libqrencode)
 
 add_library(lehtcrypto
     src/common.cpp
     src/http.cpp
     src/identity.cpp
     src/pkcs11.cpp
-    src/qr.cpp
     src/qualified.cpp
     src/revocation.cpp
     src/sign.cpp
-    src/sk.cpp
     src/tsa.cpp
     src/verify.cpp
 )
@@ -35,8 +29,7 @@ target_include_directories(lehtcrypto
 # names an OpenSSL type.
 target_link_libraries(lehtcrypto
     PUBLIC  leht::core leht::trustlist
-    PRIVATE OpenSSL::Crypto OpenSSL::SSL PkgConfig::P11KIT PkgConfig::QRENCODE
-            nlohmann_json::nlohmann_json leht::warnings)
+    PRIVATE OpenSSL::Crypto OpenSSL::SSL PkgConfig::P11KIT leht::warnings)
 set_target_properties(lehtcrypto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(LEHT_BUILD_TESTS)
@@ -45,7 +38,8 @@ if(LEHT_BUILD_TESTS)
     add_executable(test_crypto tests/test_crypto.cpp)
     target_link_libraries(test_crypto PRIVATE leht::crypto OpenSSL::Crypto leht::warnings)
     target_include_directories(test_crypto PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+        ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_definitions(test_crypto PRIVATE
         LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
     add_test(NAME test_crypto COMMAND test_crypto)
@@ -109,25 +103,8 @@ if(LEHT_BUILD_TESTS)
     add_test(NAME test_pkcs11 COMMAND test_pkcs11)
     set_tests_properties(test_pkcs11 PROPERTIES SKIP_RETURN_CODE 77)
 
-    # Smart-ID and Mobile-ID (queue M6), against mock SK servers on localhost.
-    # LEHT_SK_DEMO=1 adds one signature through SK's real DEMO environment.
-    add_executable(test_sk tests/test_sk.cpp)
-    target_link_libraries(test_sk PRIVATE
-        leht::crypto OpenSSL::Crypto OpenSSL::SSL nlohmann_json::nlohmann_json leht::warnings)
-    target_include_directories(test_sk PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests ${CMAKE_CURRENT_SOURCE_DIR}/tests
-        ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_compile_definitions(test_sk PRIVATE
-        LEHT_CORPUS_DIR="${CMAKE_SOURCE_DIR}/tests/corpus")
-    if(LEHT_BUILD_CLI)
-        # `leht sign --smart-id` and `--mobile-id`, against the same mocks.
-        target_compile_definitions(test_sk PRIVATE LEHT_CLI="$<TARGET_FILE:leht_cli>")
-        add_dependencies(test_sk leht_cli)
-    endif()
-    add_test(NAME test_sk COMMAND test_sk)
-
     if(LEHT_SANITIZE)
-        set_tests_properties(test_crypto test_revocation test_qualified test_pdf_sign test_pdf_ltv test_pkcs11 test_sk PROPERTIES
+        set_tests_properties(test_crypto test_revocation test_qualified test_pdf_sign test_pdf_ltv test_pkcs11 PROPERTIES
             ENVIRONMENT "${LEHT_SANITIZER_ENV}")
     endif()
 endif()

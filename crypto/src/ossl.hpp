@@ -91,31 +91,11 @@ struct HttpRequest {
     /// Redirects to follow (http or https only). Zero for anything whose
     /// address a document supplied: OCSP, CRLs.
     int max_redirects = 0;
-    /// http11() only: the certificate chain the server presents, once
-    /// verified against the system's CAs, must also contain a key whose
-    /// SHA-256 (of its SubjectPublicKeyInfo, Base64) is one of these. With
-    /// pins, plain http:// is refused except to this machine (the tests' mock).
-    const std::vector<std::string>* pins = nullptr;
 };
-
-/// SHA-256 of `cert`'s SubjectPublicKeyInfo, Base64: the form pins take.
-std::string spki_pin(X509* cert);
 
 /// One HTTP(S) exchange (http.cpp). Throws leht::Error when the URL is not
 /// http(s), the server does not answer, or the reply is empty or too large.
 Bytes http_transfer(const HttpRequest& request);
-
-struct HttpReply {
-    int status = 0;  ///< 200, 404, ...
-    Bytes body;      ///< may be empty
-};
-
-/// One HTTP/1.1 exchange, for services that refuse HTTP/1.0 (which is all
-/// OpenSSL's client speaks) and whose error statuses mean something: SK's
-/// Smart-ID and Mobile-ID. Connection: close, no redirects; Content-Length or
-/// chunked replies. `expected_type`, `expect_asn1` and `max_redirects` are
-/// not used. Throws leht::Error when there is no reply at all.
-HttpReply http11(const HttpRequest& request);
 
 /// The host part of a URL; empty when it does not parse.
 std::string url_host(const std::string& url);
@@ -156,29 +136,6 @@ struct Token;
 /// per signature. Throws leht::Error.
 Bytes token_sign(Token& token, const Bytes& input);
 
-/// A key that signs somewhere else and is reached over the network -- a
-/// phone, through SK's Smart-ID or Mobile-ID. Defined in sk.cpp.
-struct Remote {
-    Remote() = default;
-    Remote(const Remote&) = delete;
-    Remote& operator=(const Remote&) = delete;
-    virtual ~Remote() = default;
-    /// The digest to sign with: for the document, the signed attributes and
-    /// the signature algorithm alike.
-    [[nodiscard]] virtual const EVP_MD* digest() const = 0;
-    /// RSASSA-PSS (MGF1 with the same digest, the salt as long as the digest)
-    /// rather than PKCS#1 v1.5, for an RSA key.
-    [[nodiscard]] virtual bool pss() const { return false; }
-    /// Signs `hash`, the digest of the signed attributes. Returns the value:
-    /// for ECDSA either DER or r||s. Throws leht::Error or Cancelled.
-    virtual Bytes sign(const Bytes& hash) = 0;
-};
-
-/// Base64, standard alphabet with padding; and back, throwing leht::Error on
-/// anything else.
-std::string base64(const Bytes& data);
-Bytes unbase64(const std::string& text);
-
 }  // namespace leht::crypto::detail
 
 namespace leht::crypto {
@@ -190,7 +147,6 @@ struct Identity::Impl {
     detail::X509Ptr cert;
     std::vector<detail::X509Ptr> extra;  ///< the rest of the chain, as the file had it
     std::shared_ptr<detail::Token> token;  ///< set when the key is on a PKCS#11 token
-    std::shared_ptr<detail::Remote> remote;  ///< set when a phone signs
 };
 
 struct TrustStore::Impl {

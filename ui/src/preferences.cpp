@@ -12,14 +12,12 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -144,33 +142,6 @@ PreferencesDialog::PreferencesDialog(QWidget* parent, const QStringList& ocrLang
     connect(useTsa_, &QCheckBox::toggled, this, syncTsa);
     syncTsa();
     layout->addLayout(form);
-
-    // Smart-ID and Mobile-ID: SK serves only relying parties it knows.
-    auto* sk = new QGroupBox(tr("Smart-ID and Mobile-ID"), signing);
-    auto* skLayout = new QVBoxLayout(sk);
-    skLayout->addWidget(note(tr("Signing with a phone goes through SK ID Solutions, which "
-                                "answers only relying parties it has registered. Leht uses SK's "
-                                "demo environment, where the name DEMO works for everyone; "
-                                "leave these empty for it."),
-                             sk));
-    auto* skForm = new QFormLayout;
-    const auto rpField = [&](const char* key, const QString& placeholder) {
-        auto* edit = new QLineEdit(settings.value(QLatin1String(key)).toString(), sk);
-        edit->setPlaceholderText(placeholder);
-        return edit;
-    };
-    smartIdRpName_ = rpField(prefs::kSmartIdRpName, QStringLiteral("DEMO"));
-    smartIdRpUuid_ = rpField(prefs::kSmartIdRpUuid,
-                             QStringLiteral("00000000-0000-4000-8000-000000000000"));
-    mobileIdRpName_ = rpField(prefs::kMobileIdRpName, QStringLiteral("DEMO"));
-    mobileIdRpUuid_ = rpField(prefs::kMobileIdRpUuid,
-                              QStringLiteral("00000000-0000-0000-0000-000000000000"));
-    skForm->addRow(tr("Smart-ID relying party:"), smartIdRpName_);
-    skForm->addRow(tr("Its UUID:"), smartIdRpUuid_);
-    skForm->addRow(tr("Mobile-ID relying party:"), mobileIdRpName_);
-    skForm->addRow(tr("Its UUID:"), mobileIdRpUuid_);
-    skLayout->addLayout(skForm);
-    layout->addWidget(sk);
     layout->addStretch(1);
     addSection(Page::Signing, "signature", tr("Signing"), signing);
 
@@ -260,8 +231,6 @@ PreferencesDialog::PreferencesDialog(QWidget* parent, const QStringList& ocrLang
         "<li><b>Revocation checks</b> and <b>long-term validation</b>: certificate "
         "serial numbers go to the certificate authority's OCSP or CRL service.</li>"
         "<li><b>EU Trusted List</b> updates: the published list is downloaded.</li>"
-        "<li><b>Smart-ID and Mobile-ID</b> signing: the fingerprint to sign, and your "
-        "personal code or phone number, go to SK ID Solutions.</li>"
         "</ul>"
         "<p>Nothing is sent in the background, and there is no telemetry.</p>"));
     layout->addWidget(promise);
@@ -286,17 +255,6 @@ PreferencesDialog::PreferencesDialog(QWidget* parent, const QStringList& ocrLang
         sections->setCurrentRow(0);
     }
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        static const QRegularExpression uuid(
-            QStringLiteral("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"));
-        for (QLineEdit* edit : {smartIdRpUuid_, mobileIdRpUuid_}) {
-            // SK compares UUIDs as written, and only in lower case.
-            if (!edit->text().trimmed().isEmpty() && !uuid.match(edit->text().trimmed()).hasMatch()) {
-                QMessageBox::warning(this, windowTitle(),
-                                     tr("A relying party's UUID is written like "
-                                        "00000000-0000-0000-0000-000000000000, in lower case."));
-                return;
-            }
-        }
         if (useTsa_->isChecked() && !QUrl(tsa_->text().trimmed()).isValid()) {
             QMessageBox::warning(this, windowTitle(), tr("The timestamp authority's address is not a URL."));
             return;
@@ -334,10 +292,6 @@ void PreferencesDialog::save() {
     settings.setValue(QStringLiteral("signing/useTsa"), useTsa_->isChecked());
     settings.setValue(QStringLiteral("signing/tsa"), tsa_->text().trimmed());
     settings.setValue(QStringLiteral("signing/ltv"), ltv_->isChecked());
-    settings.setValue(QLatin1String(prefs::kSmartIdRpName), smartIdRpName_->text().trimmed());
-    settings.setValue(QLatin1String(prefs::kSmartIdRpUuid), smartIdRpUuid_->text().trimmed());
-    settings.setValue(QLatin1String(prefs::kMobileIdRpName), mobileIdRpName_->text().trimmed());
-    settings.setValue(QLatin1String(prefs::kMobileIdRpUuid), mobileIdRpUuid_->text().trimmed());
 
     QStringList trusted;
     for (int i = 0; i < trusted_->count(); ++i) {

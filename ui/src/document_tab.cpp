@@ -10,7 +10,6 @@
 #include "page_grid.hpp"
 #include "page_view.hpp"
 #include "page_view_accessible.hpp"
-#include "phone_sign_dialog.hpp"
 #include "preferences.hpp"
 #include "properties_dialog.hpp"
 #include "render_worker.hpp"
@@ -79,8 +78,6 @@ DocumentTab::~DocumentTab() {
     // would wait with it: these reach it directly, not through its queue.
     worker_->cancelSearch();
     worker_->cancelRecognition();
-    worker_->cancelPhoneSigning();
-    delete phoneDialog_;  // parented to the window, which stays
     workerThread_.quit();
     workerThread_.wait();
 }
@@ -230,42 +227,6 @@ void DocumentTab::wireWorker() {
                 }
                 say(what + QStringLiteral("."), 8000);
             });
-    // Signing with a phone: the window with its QR code or code comes and
-    // goes with the worker's signing; Cancel asks the worker to stop waiting.
-    connect(worker_, &RenderWorker::phoneSigningStarted, this, [this](const QString& service) {
-        if (phoneDialog_ != nullptr) {
-            phoneDialog_->deleteLater();
-        }
-        phoneDialog_ = new PhoneSignDialog(window(), service);
-        connect(phoneDialog_, &PhoneSignDialog::cancelRequested, this,
-                [this] { worker_->cancelPhoneSigning(); });
-        phoneDialog_->open();
-    });
-    connect(worker_, &RenderWorker::phoneLink, this, [this](const QString& link) {
-        if (phoneDialog_ != nullptr) {
-            phoneDialog_->showLink(link);
-        }
-    });
-    connect(worker_, &RenderWorker::phoneCode, this, [this](const QString& code) {
-        if (phoneDialog_ != nullptr) {
-            phoneDialog_->showCode(code);
-        }
-    });
-    connect(worker_, &RenderWorker::phoneStatus, this, [this](const QString& text) {
-        if (phoneDialog_ != nullptr) {
-            phoneDialog_->showStatus(text);
-        }
-    });
-    connect(worker_, &RenderWorker::phoneSigningEnded, this, [this](bool cancelled) {
-        if (phoneDialog_ != nullptr) {
-            phoneDialog_->hide();
-            phoneDialog_->deleteLater();
-            phoneDialog_ = nullptr;
-        }
-        if (cancelled) {
-            say(tr("Signing was cancelled. Nothing was written."), 8000);
-        }
-    });
     connect(worker_, &RenderWorker::saveFailed, this, [this](const QString& why) {
         afterSave_ = nullptr;
         say({});

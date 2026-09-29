@@ -25,7 +25,6 @@ qt_add_library(leht_viewer_lib STATIC
     src/page_grid.cpp
     src/page_view.cpp
     src/page_view_accessible.cpp
-    src/phone_sign_dialog.cpp
     src/preferences.cpp
     src/properties_dialog.cpp
     src/protect_dialog.cpp
@@ -99,12 +98,7 @@ if(LEHT_BUILD_TESTS)
     # for SoftHSM, which stands in for an ID card.
     find_package(OpenSSL 3.2 REQUIRED COMPONENTS Crypto)
     target_link_libraries(ui_smoke_test PRIVATE OpenSSL::Crypto PkgConfig::P11KIT)
-    # sk_mock.hpp imitates SK for the phone-signing checks; sk.hpp gives the
-    # Mobile-ID code to compare against.
-    target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/tests
-        ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/src)
-    find_package(nlohmann_json 3.10 REQUIRED)
-    target_link_libraries(ui_smoke_test PRIVATE nlohmann_json::nlohmann_json)
+    target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/tests)
     add_test(NAME ui_smoke COMMAND ui_smoke_test)
     # Offscreen so it runs headless in CI; skips (77) if even that is unavailable.
     # detect_leaks=0: Qt leaks a lot at exit under LSan (its own caches, not

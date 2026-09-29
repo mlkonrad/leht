@@ -24,12 +24,10 @@ export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
 # tail of the log, which holds the sanitizer report and the failing input.
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
-for target in open ops edit verify ipc trustlist sk; do
-    # The trusted-list target starts from the real lists, and the SK one from
-    # SK's JSON replies, not from PDFs.
+for target in open ops edit verify ipc trustlist; do
+    # The trusted-list target starts from the real lists, not from PDFs.
     seeds=$corpus
     [ "$target" = trustlist ] && seeds=$build/trustlist/fixtures
-    [ "$target" = sk ] && seeds=$(dirname "$0")/../fuzz/sk_seeds
     if "$build/fuzz/leht_fuzz_$target" "$seeds" "$iterations" 1234 "$seconds" >"$log" 2>&1; then
         echo "leht_fuzz_$target: $(tail -n 1 "$log")"
     else

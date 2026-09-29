@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #pragma once
 
-#include <QPointer>
 #include <QThread>
 #include <QVector>
 #include <QWidget>
@@ -15,7 +14,6 @@ class CommentsPanel;
 class FormPanel;
 class PageGrid;
 class PageView;
-class PhoneSignDialog;
 class QLabel;
 class QPrinter;
 class QSplitter;
@@ -235,8 +233,6 @@ private:
     PageView* view_ = nullptr;
     QThread workerThread_;
     RenderWorker* worker_ = nullptr;
-    /// Up while a phone signs: its QR code or verification code, and Cancel.
-    QPointer<PhoneSignDialog> phoneDialog_;
 
     Sidebar* sidebar_ = nullptr;
     ThumbnailBar* thumbnails_ = nullptr;

@@ -13,10 +13,9 @@ dnf -y install --setopt=install_weak_deps=False --disablerepo=fedora-cisco-openh
     gcc-c++ make cmake ninja-build curl binutils \
     mupdf-devel openssl-devel libseccomp-devel p11-kit-devel \
     libxml2-devel xmlsec1-devel xmlsec1-openssl-devel libtool-ltdl-devel \
-    json-devel qrencode-devel \
     tesseract-devel leptonica-devel \
     qt6-qtbase-devel qt6-qtsvg \
-    mupdf qpdf ghostscript poppler-utils openssl softhsm zbar \
+    mupdf qpdf ghostscript poppler-utils openssl softhsm \
     tesseract-langpack-eng tesseract-langpack-est \
     python3 python3-pillow python3-numpy diffutils \
     desktop-file-utils libasan libubsan

@@ -137,92 +137,6 @@ from the sandboxed worker.
   list names the ESTEID CAs. Without them it is *intact* but *untrusted* until you add the
   Estonian roots yourself, with `--trust` or *Sign → Trusted Certificates…*.
 
-## Signing with a phone: Smart-ID and Mobile-ID
-
-SK ID Solutions' two phone signatures are qualified signatures like an ID card's — the key
-is on the phone (Smart-ID's app) or the SIM card (Mobile-ID) — and Leht signs with both, in
-the CLI and the viewer. **For now against SK's demo environment only**, with its test
-accounts: real accounts need a relying-party contract with SK, which Leht does not have.
-
-```
-leht sign doc.pdf -o signed.pdf --smart-id qr                   # scan the code in the terminal
-leht sign doc.pdf -o signed.pdf --smart-id EE:38001085718       # by personal code
-leht sign doc.pdf -o signed.pdf --mobile-id +37268000769:60001017869
-```
-
-The viewer's Sign dialog has *Sign with: Smart-ID* (a QR code, or a personal code) and
-*Mobile-ID* (phone number and personal code). A window then shows the QR code or the
-verification code, what is happening, and Cancel.
-
-- **What goes over the network.** To SK only: the relying party's name and UUID, the
-  person's identifier (their personal code, or phone number and personal code) and the
-  **digest of the signed attributes** — 32 bytes of SHA-256. Never the document, nothing about
-  it but that digest and the text shown on the phone ("Sign contract.pdf"). Then, from the
-  certificate SK returns, its issuer from the `caIssuers` address it names, so that the
-  signature carries the chain a verifier needs. Nothing happens unless the person chooses
-  a phone to sign with; there is no background traffic.
-- **Smart-ID by QR code** (SK's recommended flow, and the viewer's default): an anonymous
-  certificate-choice session shown as a QR code that is **renewed every second**. Its link
-  carries an `authCode`, an HMAC keyed with a session secret that never leaves the trusted
-  process, so a code cannot be made in advance or by anyone else. Scanning it with the
-  Smart-ID app chooses the account; the signature request then goes to that phone as a
-  session *linked* to the scan, which it is waiting for — so there is no code to compare.
-  The CLI draws the QR code in the terminal with half-block characters, and prints the
-  link instead when its output is not a terminal.
-- **Smart-ID by personal code, and Mobile-ID:** the phone is asked directly, and a
-  **four-digit verification code** is shown, which the phone shows too. Enter the PIN only
-  if they match: that is what ties the request on the phone to the one on the screen.
-  Smart-ID's code comes from SK (API v3); Mobile-ID's is computed from the digest (6 bits
-  from its start, 7 from its end).
-- **The signature.** Smart-ID signs with **RSASSA-PSS** (SHA-256, MGF1-SHA-256, a 32-byte
-  salt), which SK recommends and which the SignerInfo says as `id-RSASSA-PSS` with its
-  parameters; Mobile-ID with ECDSA (P-256 in the demo) or RSA PKCS#1 v1.5. As for a card,
-  Leht builds the CMS itself around the value that comes back, and **verifies it against
-  the certificate before a byte is written**: a phone that signed something else, with
-  another key, or with other parameters than asked is an error, not a broken file. SK's
-  reply that the phone signed with a different certificate than it chose is refused too.
-- **Refusals and failures** read as what happened: *You declined on your phone*, *The
-  phone did not answer in time*, *This phone number has no active Mobile-ID*, *this
-  Smart-ID account cannot give a qualified signature* (SK's HTTP 471), and so on. Cancel in
-  the viewer, or Ctrl-C in the CLI, stops within about a second. A refusal or a cancel
-  exits 3 in the CLI, and in every case **nothing is written**.
-- **Trust.** Demo accounts chain to SK's *TEST* CAs, which are on no trusted list: their
-  signatures are *intact* but *untrusted* and *not qualified* unless those roots are added
-  with `--trust`. A live account would chain to the same qualified CAs as an ID card.
-- **HTTP.** SK's Smart-ID service refuses HTTP/1.0, which is all OpenSSL's own client
-  speaks, so SK is reached with a small HTTP/1.1 exchange of Leht's own (`http11()` in
-  `crypto/src/http.cpp`): TLS verified against the system's CAs with the host name
-  checked, one request per connection, a size cap and a timeout, and the status code read
-  from the reply — SK's codes carry the message.
-- **Pinned.** Beyond the system's CAs and the host name, the chain SK's server presents
-  must hold one of two keys built into Leht: DigiCert's issuing CA *Global G2 TLS RSA
-  SHA256 2020 CA1* (valid to 2031) or its root, *DigiCert Global Root G2* (to 2038). All
-  four of SK's hosts, demo and live, are certified that way (checked 28 September 2026). A
-  certificate from any other CA — an intercepting proxy's, or a CA that should not have
-  issued one — is refused before a byte is sent, and so is plain `http://` to anything but
-  this machine. The CA keys are pinned rather than SK's own certificates on purpose: those
-  are renewed every year (the demo Smart-ID one expires on 10 October 2026), and a pinned
-  certificate would break signing on SK's schedule, not Leht's. The cost is that DigiCert
-  itself is trusted for SK's names; if SK ever changes certificate authority, Leht needs an
-  update, and the error says so.
-- **A server that hangs up** mid-request is an error, not the end of Leht: writing to a
-  closed connection raises SIGPIPE, which kills a process by default, so every HTTP
-  exchange (SK, timestamps, OCSP, CRLs, the trusted lists) blocks it on its own thread for
-  its duration, without changing it for the rest of the process.
-
-What SK's demo did, checked by hand on 28 September 2026 (`LEHT_SK_DEMO=1 test_sk`): a
-Mobile-ID signature with `+37268000769`, end to end; a Smart-ID certificate choice by
-personal code, with the certificate and its intermediate; a QR session and its links. SK's
-*MOCK* Smart-ID accounts no longer finish a v3 **signature** on their own, so that last step
-has been tested against a local imitation of SK only (`crypto/tests/sk_mock.hpp`), which
-checks every request as SK documents it — the `authCode` of each QR link included — and
-signs as a phone does. A signature through a real phone and SK's demo app has not been
-made yet.
-
-For a live deployment, what is missing is SK's side: a contract, and a registered name and
-UUID (Preferences → Signing, or `--relying-party-name` and `--relying-party-uuid`), plus
-the live addresses, which use the same pins.
-
 ## Certification and field locks
 
 An ordinary signature says "I signed this". A **certification** is the author's signature,
@@ -549,8 +463,8 @@ same dialog without one. The dialog has four steps:
    signs an existing unsigned field by name, and the dialog lists the ones not yet
    signed), a box to draw now (the dialog closes and the Sign tool takes over), or
    invisible.
-2. **How:** the `.p12` and its password, a key on an ID card and its PIN (listed from the
-   cards in the readers), or Smart-ID or Mobile-ID. Next checks this step before moving on.
+2. **How:** the `.p12` and its password, or a key on an ID card and its PIN (listed from
+   the cards in the readers). Next checks this step before moving on.
 3. **Look:** what a visible signature shows, with a preview in the box's own proportions:
    the name and date, an image, or a signature **drawn** on a small canvas. An invisible
    signature skips this step.
@@ -581,8 +495,12 @@ sandboxed `leht-worker --trusted-list` reads and verifies the XML. The lists are
 where the CLI keeps them, so either one's update serves both; the banner mentions it when
 they are overdue.
 
-## Not yet
+## Not included
 
-- **Smart-ID and Mobile-ID with real accounts.** Only SK's demo environment is wired in;
-  see [Signing with a phone](#signing-with-a-phone-smart-id-and-mobile-id) for what a live
-  one needs.
+- **Smart-ID and Mobile-ID.** Leht once signed with both against SK ID Solutions' demo
+  environment (f337c02), and they were taken out again. Signing with real accounts needs a
+  relying-party contract with SK, which charges every request, authentication or
+  signature, with a monthly minimum per service. A desktop program carrying its
+  relying-party UUID would also let anyone who extracts it sign on that contract's bill,
+  so doing it properly needs a server of Leht's own between the program and SK. An ID card
+  signs for nothing and needs neither.

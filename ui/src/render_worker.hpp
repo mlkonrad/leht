@@ -13,7 +13,6 @@
 #include <QSet>
 
 #include "edit_model.hpp"
-#include "leht/crypto/crypto.hpp"
 #include "outline_model.hpp"
 #include "leht/ipc/process.hpp"
 #include "leht/ipc/protocol.hpp"
@@ -201,9 +200,6 @@ public:
     /// Stops a recognizeText() run after the page it is on. Safe to call
     /// from any thread -- the GUI calls it while this one is busy.
     void cancelRecognition() { ocrCancel_ = true; }
-    /// Stops waiting on a phone (Smart-ID, Mobile-ID) within about a second;
-    /// nothing is written. Safe to call from any thread.
-    void cancelPhoneSigning() { phoneCancel_ = true; }
 
 public slots:
 
@@ -308,15 +304,6 @@ signals:
     void redactionIncomplete(QStringList where);
     void saved(QString path);
     void saveFailed(QString message);
-    /// Signing with a phone: it began (`service` is "Smart-ID" or
-    /// "Mobile-ID"); a QR link to show, renewed every second; a verification
-    /// code to compare; what is happening. Ended comes last, whatever the
-    /// outcome -- after saved() or saveFailed(), or alone when cancelled.
-    void phoneSigningStarted(QString service);
-    void phoneLink(QString link);
-    void phoneCode(QString code);
-    void phoneStatus(QString text);
-    void phoneSigningEnded(bool cancelled);
     void annotationsReady(QVector<AnnotRow> rows);
     void fieldsReady(QVector<FieldRow> rows);
     void signaturesReady(QVector<SigRow> rows);
@@ -331,8 +318,6 @@ signals:
     void trustedListFailed(QString why);
 
 private:
-    /// The phone behind a SignSpec's phoneMethod (sk.cpp does the talking).
-    leht::crypto::Identity phoneIdentity(const SignSpec& spec, const QString& path);
     /// What the viewer was doing when a worker died, which decides the response.
     enum class Phase { Open, Page, Search, Edit };
 
@@ -424,7 +409,6 @@ private:
     std::uint64_t openGroup_ = 0;  ///< nonzero between begin/endEditGroup
     std::uint64_t redoing_ = 0;    ///< the group a redo is putting back
     std::atomic<bool> ocrCancel_{false};
-    std::atomic<bool> phoneCancel_{false};
     void clearLog();
 
     /// The live worker. Shared and atomic because setGeneration() reads it

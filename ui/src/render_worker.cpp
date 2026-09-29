@@ -2,7 +2,6 @@
 #include "render_worker.hpp"
 #include "leht/trustlist/model.hpp"
 #include "worker_files.hpp"
-#include "preferences.hpp"
 
 #include "leht/edit.hpp"
 
@@ -17,7 +16,6 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
-#include <QLocale>
 #include <QDateTime>
 #include <QUrl>
 #include <QMutex>
@@ -1251,52 +1249,6 @@ void RenderWorker::addTrustedCertificate(QString pemPath) {
     listSignatures();
 }
 
-leht::crypto::Identity RenderWorker::phoneIdentity(const SignSpec& spec, const QString& path) {
-    // Runs on this thread, network waits of a second at a time; what the
-    // person must see goes to the GUI as signals.
-    leht::crypto::PhoneDialog dialog;
-    dialog.display_text = tr("Sign %1").arg(QFileInfo(path).fileName()).toStdString();
-    const QString lang = QLocale().name().left(2);
-    dialog.language = lang == QStringLiteral("et")   ? "est"
-                      : lang == QStringLiteral("ru") ? "rus"
-                                                     : "eng";
-    dialog.show_qr = [this](const std::string& link) { emit phoneLink(QString::fromStdString(link)); };
-    dialog.show_code = [this](const std::string& code) {
-        emit phoneCode(QString::fromStdString(code));
-    };
-    dialog.status = [this](const std::string& text) {
-        emit phoneStatus(QString::fromUtf8(text.c_str()));
-    };
-    dialog.cancelled = [this] { return phoneCancel_.load(); };
-
-    QSettings settings;
-    const auto party = [&settings](leht::crypto::RelyingParty p, const char* nameKey,
-                                   const char* uuidKey) {
-        const QString name = settings.value(QLatin1String(nameKey)).toString().trimmed();
-        const QString uuid = settings.value(QLatin1String(uuidKey)).toString().trimmed();
-        if (!name.isEmpty()) {
-            p.name = name.toStdString();
-        }
-        if (!uuid.isEmpty()) {
-            p.uuid = uuid.toStdString();
-        }
-        return p;
-    };
-    if (spec.phoneMethod == QStringLiteral("mobile-id")) {
-        auto service = leht::crypto::MobileIdService::demo();
-        service.party = party(service.party, prefs::kMobileIdRpName, prefs::kMobileIdRpUuid);
-        return leht::crypto::Identity::from_mobile_id(service, spec.phoneNumber.toStdString(),
-                                                      spec.phonePerson.toStdString(), dialog);
-    }
-    auto service = leht::crypto::SmartIdService::demo();
-    service.party = party(service.party, prefs::kSmartIdRpName, prefs::kSmartIdRpUuid);
-    if (spec.phoneMethod == QStringLiteral("smart-id")) {
-        return leht::crypto::Identity::from_smart_id(service, spec.phonePerson.toStdString(),
-                                                     dialog);
-    }
-    return leht::crypto::Identity::from_smart_id_qr(service, dialog);
-}
-
 void RenderWorker::signDocument(QString path, SignSpec spec) {
     if (!proc_.load()) {
         emit saveFailed(tr("No document is open."));
@@ -1309,30 +1261,8 @@ void RenderWorker::signDocument(QString path, SignSpec spec) {
     std::unique_ptr<leht::crypto::Identity> identity;
     leht::crypto::SignOptions options;
     options.tsa_url = spec.tsaUrl.trimmed().toStdString();
-
-    // A phone signs: the window showing its QR code or verification code
-    // stays up until this function is done, however it ends.
-    const bool phone = !spec.phoneMethod.isEmpty();
-    struct PhoneEnd {
-        RenderWorker* self;
-        bool active;
-        bool cancelled = false;
-        ~PhoneEnd() {
-            if (active) {
-                emit self->phoneSigningEnded(cancelled);
-            }
-        }
-    } phoneEnd{this, phone};
-    if (phone) {
-        phoneCancel_ = false;
-        emit phoneSigningStarted(spec.phoneMethod == QStringLiteral("mobile-id")
-                                     ? QStringLiteral("Mobile-ID")
-                                     : QStringLiteral("Smart-ID"));
-    }
     try {
-        if (phone) {
-            identity = std::make_unique<leht::crypto::Identity>(phoneIdentity(spec, path));
-        } else if (!spec.pkcs11Uri.isEmpty()) {
+        if (!spec.pkcs11Uri.isEmpty()) {
             leht::crypto::Secret pin{spec.password.toStdString()};
             spec.password.fill(QChar(0));
             spec.password.clear();
@@ -1355,9 +1285,6 @@ void RenderWorker::signDocument(QString path, SignSpec spec) {
                 leht::crypto::Identity::from_pkcs12(
                     leht::crypto::Bytes(bytes.begin(), bytes.end()), password));
         }
-    } catch (const leht::crypto::Cancelled&) {
-        phoneEnd.cancelled = true;
-        return;
     } catch (const leht::Error& e) {
         emit saveFailed(QString::fromUtf8(e.what()));
         return;
@@ -1431,18 +1358,11 @@ void RenderWorker::signDocument(QString path, SignSpec spec) {
     try {
         // Checks the hole against the file's own bytes before signing it.
         (void)leht::crypto::sign_prepared(fd, prepared.range, *identity, options);
-    } catch (const leht::crypto::Cancelled&) {
-        // Declined on the phone, or Cancel: not a failure to report.
-        ::close(fd);
-        ::unlink(temp.constData());
+    } catch (const leht::Error& e) {
+        discard(QString::fromUtf8(e.what()));
         // The worker wrote the signature's revision and holds the document
         // as saved; open it afresh (the edit log replays unsaved edits), or
         // the next save or signature is refused.
-        (void)openInWorker(/*silent=*/true);
-        phoneEnd.cancelled = true;
-        return;
-    } catch (const leht::Error& e) {
-        discard(QString::fromUtf8(e.what()));
         (void)openInWorker(/*silent=*/true);
         return;
     }
