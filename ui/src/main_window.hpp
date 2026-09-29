@@ -47,6 +47,10 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
+    /// QSettings key: the tab bar's hint, shown the first time a second
+    /// document opens, has been seen.
+    static constexpr const char* kTabHintsKey = "firstRun/tabHintsShown";
+
     MainWindow();
     ~MainWindow() override;
 
@@ -188,7 +192,7 @@ private:
     void runSearch();
     void goToPageFromSpin();
     /// Moves focus to the next (+1) or previous (-1) part of the window:
-    /// toolbar, mode bar, sidebar, page.
+    /// toolbar, tabs, mode bar, sidebar, page.
     void focusRegion(int step);
 
     QList<DocumentTab*> tabs_;  ///< in the tab bar's order
@@ -235,6 +239,10 @@ private:
     /// asks for the password and runs `job` again with it.
     void runFileTool(const QString& title, std::function<void(FileTools*, QString)> job);
     void endFileTool();
+    /// Updates the EU trusted lists, on a thread of its own: they belong to
+    /// no document, and a download of 28 MB must not hold up the pages.
+    RenderWorker* listWorker_ = nullptr;
+    QThread listThread_;
     QThread fileToolsThread_;
     FileTools* fileTools_ = nullptr;
     bool fileToolBusy_ = false;  ///< one job at a time

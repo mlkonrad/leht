@@ -231,6 +231,7 @@ int main(int argc, char** argv) {
     // the windows every other check drives.
     QSettings().setValue(QLatin1String(FirstRunHints::kWelcomeKey), true);
     QSettings().setValue(QLatin1String(FirstRunHints::kDocumentKey), true);
+    QSettings().setValue(QLatin1String(MainWindow::kTabHintsKey), true);
 
     MainWindow window;
     window.resize(800, 1000);
@@ -1336,6 +1337,9 @@ int main(int argc, char** argv) {
             QTabBar* tabs = fresh.tabBar();
             check(tabs->isVisible() && tabs->count() == 1 && tabs->tabText(0) == QStringLiteral("text_10p.pdf"),
                   "an open document shows as a tab named after its file");
+            check(tabs->accessibleName() == QStringLiteral("Open documents") &&
+                      tabs->accessibleTabName(0) == QStringLiteral("text_10p.pdf"),
+                  "a screen reader hears the tabs as Open documents, each by its file");
             const QString outlined = QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf");
             fresh.openDocument(outlined);
             pump(1500);
@@ -1363,6 +1367,8 @@ int main(int argc, char** argv) {
             QAction* undo = fresh.actions()->find(QStringLiteral("undo"));
             check(tabs->count() == 3 && tabs->tabText(2) == QStringLiteral("edit me.pdf *") && undo->isEnabled(),
                   "an edit marks its tab with * and offers Undo");
+            check(tabs->accessibleTabName(2) == QStringLiteral("edit me.pdf, modified"),
+                  "and a screen reader hears that it is modified");
             tabs->setCurrentIndex(0);
             pump(100);
             check(!undo->isEnabled() && !fresh.isModified(), "Undo follows the tab: nothing to undo in the other");
@@ -1390,6 +1396,7 @@ int main(int argc, char** argv) {
             QAction* highlight = fresh.actions()->find(QStringLiteral("toolHighlight"));
             const int certifiedAt = tabs->currentIndex();
             check(certifiedAt == 2 && !highlight->isEnabled(), "a certified document's tab turns annotating off");
+            shot(&fresh, "tabs");
             tabs->setCurrentIndex(0);
             pump(100);
             check(highlight->isEnabled(), "and a plain document's tab turns it back on");

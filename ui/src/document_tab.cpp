@@ -75,6 +75,12 @@ DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
 }
 
 DocumentTab::~DocumentTab() {
+    // Whatever the worker is waiting on stops first, or closing the tab
+    // would wait with it: these reach it directly, not through its queue.
+    worker_->cancelSearch();
+    worker_->cancelRecognition();
+    worker_->cancelPhoneSigning();
+    delete phoneDialog_;  // parented to the window, which stays
     workerThread_.quit();
     workerThread_.wait();
 }
@@ -224,24 +230,6 @@ void DocumentTab::wireWorker() {
                 }
                 say(what + QStringLiteral("."), 8000);
             });
-    connect(worker_, &RenderWorker::trustedListUpdated, this,
-            [this](int verified, int lists, int services, const QStringList& failed) {
-                QString what = tr("EU trusted lists: %1 of %2 verified, %n qualified service(s).",
-                                  nullptr, services)
-                                   .arg(verified)
-                                   .arg(lists);
-                if (!failed.isEmpty()) {
-                    what += QLatin1Char(' ') +
-                            tr("Could not be verified: %1.").arg(failed.join(QStringLiteral(", ")));
-                }
-                say(what, 12000);
-            });
-    connect(worker_, &RenderWorker::trustedListFailed, this, [this](const QString& why) {
-        say({});
-        QMessageBox::warning(window(), tr("EU trusted lists"),
-                             tr("The trusted lists were not updated; the ones cached before are "
-                                "still used.\n\n%1").arg(why));
-    });
     // Signing with a phone: the window with its QR code or code comes and
     // goes with the worker's signing; Cancel asks the worker to stop waiting.
     connect(worker_, &RenderWorker::phoneSigningStarted, this, [this](const QString& service) {

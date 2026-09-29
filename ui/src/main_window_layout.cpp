@@ -648,6 +648,7 @@ void MainWindow::focusRegion(int step) {
         regions << bar;
     }
     if (DocumentTab* d = current(); d != nullptr && !isShowingWelcome()) {
+        regions << tabBar_;
         regions << modes_;
         if (d->sidebar()->isVisible()) {
             regions << d->sidebar();

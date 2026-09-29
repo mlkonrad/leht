@@ -90,6 +90,8 @@ MainWindow::~MainWindow() {
         release(d);
         delete d;
     }
+    listThread_.quit();
+    listThread_.wait();
     fileTools_->cancel();
     fileToolsThread_.quit();
     fileToolsThread_.wait();
@@ -281,6 +283,21 @@ void MainWindow::adopt(DocumentTab* tab) {
 
     stack_->setCurrentWidget(documentPage_);
     setCurrent(tab);
+    // The first time two documents are open at once: where the other went.
+    if (tabs_.size() == 2) {
+        QTimer::singleShot(600, this, [this] {
+            if (tabs_.size() < 2 || !isVisible() || findChild<FirstRunHints*>() != nullptr) {
+                return;
+            }
+            (void)FirstRunHints::showOnce(
+                this,
+                {{tabBar_, tr("One tab per document"),
+                  tr("Each document opens in a tab of its own. Ctrl+Tab goes to the next, Alt+1 to 9 to "
+                     "one by number; drag a tab to reorder, right-click it to move it to a window of "
+                     "its own.")}},
+                QLatin1String(kTabHintsKey));
+        });
+    }
 }
 
 void MainWindow::release(DocumentTab* tab) {
@@ -909,7 +926,7 @@ void MainWindow::buildActions() {
     sidebar->setChecked(true);
     add({.id = QStringLiteral("focusNextRegion"), .text = tr("Next Part of the Window"),
          .shortcuts = {QKeySequence(Qt::Key_F6)},
-         .tip = tr("Move between the toolbar, the mode bar, the sidebar and the page"), .group = view},
+         .tip = tr("Move between the toolbar, the tabs, the mode bar, the sidebar and the page"), .group = view},
         [this] { focusRegion(+1); });
     add({.id = QStringLiteral("focusPreviousRegion"), .text = tr("Previous Part of the Window"),
          .shortcuts = {QKeySequence(Qt::SHIFT | Qt::Key_F6)}, .group = view},
@@ -1079,10 +1096,37 @@ void MainWindow::updateTrustedList() {
     if (answer != QMessageBox::Yes) {
         return;
     }
-    // Any worker can fetch them; with no document open, one of its own.
-    DocumentTab* d = current_ != nullptr ? current_ : addDocument();
+    if (listWorker_ == nullptr) {
+        listWorker_ = new RenderWorker();
+        listWorker_->moveToThread(&listThread_);
+        connect(&listThread_, &QThread::finished, listWorker_, &QObject::deleteLater);
+        // Every network contact says where it goes, as it goes.
+        connect(listWorker_, &RenderWorker::networkUsed, this, [this](const QString& hosts) {
+            statusBar()->showMessage(
+                tr("Contacting %1 (certificate identifiers only, never the document)…").arg(hosts));
+        });
+        connect(listWorker_, &RenderWorker::trustedListUpdated, this,
+                [this](int verified, int lists, int services, const QStringList& failed) {
+                    QString what = tr("EU trusted lists: %1 of %2 verified, %n qualified service(s).",
+                                      nullptr, services)
+                                       .arg(verified)
+                                       .arg(lists);
+                    if (!failed.isEmpty()) {
+                        what += QLatin1Char(' ') +
+                                tr("Could not be verified: %1.").arg(failed.join(QStringLiteral(", ")));
+                    }
+                    statusBar()->showMessage(what, 12000);
+                });
+        connect(listWorker_, &RenderWorker::trustedListFailed, this, [this](const QString& why) {
+            statusBar()->clearMessage();
+            QMessageBox::warning(this, tr("EU trusted lists"),
+                                 tr("The trusted lists were not updated; the ones cached before are "
+                                    "still used.\n\n%1").arg(why));
+        });
+        listThread_.start();
+    }
     statusBar()->showMessage(tr("Updating the EU trusted lists…"));
-    d->onWorker([](RenderWorker* w) { w->updateTrustedList(); });
+    QMetaObject::invokeMethod(listWorker_, &RenderWorker::updateTrustedList, Qt::QueuedConnection);
 }
 
 // --- File tools: Combine Files, Reduce File Size, Split Document ----------------
