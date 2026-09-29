@@ -13,6 +13,7 @@
 #include "file_tools.hpp"
 #include "file_tools_dialogs.hpp"
 #include "icons.hpp"
+#include "main_toolbar.hpp"
 #include "mode_bar.hpp"
 #include "page_grid.hpp"
 #include "page_view.hpp"
@@ -75,46 +76,32 @@ bool colourable(const QString& id) {
 }  // namespace
 
 void MainWindow::buildMainToolbar() {
-    QToolBar* bar = addToolBar(tr("Main"));
-    bar->setObjectName(QStringLiteral("mainBar"));
-    bar->setMovable(false);
-    bar->setIconSize(QSize(20, 20));
-    actions_->populate(bar, {QStringLiteral("toggleSidebar"), QStringLiteral("-"), QStringLiteral("open"),
-                             QStringLiteral("save"), QStringLiteral("print"), QStringLiteral("-"),
-                             QStringLiteral("undo"), QStringLiteral("redo")});
-    bar->addSeparator();
-
-    // Go to page: the number, editable, and the count beside it.
-    pageSpin_ = new QSpinBox(bar);
-    pageSpin_->setObjectName(QStringLiteral("pageNumber"));
-    pageSpin_->setMinimum(1);
-    pageSpin_->setMaximum(1);
-    pageSpin_->setEnabled(false);
-    pageSpin_->setKeyboardTracking(false);
-    pageSpin_->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    pageSpin_->setAlignment(Qt::AlignRight);
-    pageSpin_->setMinimumWidth(48);
-    pageSpin_->setToolTip(tr("Go to page"));
-    pageSpin_->setAccessibleName(tr("Page number"));
-    bar->addWidget(pageSpin_);
-    pageLabel_ = new QLabel(bar);
-    pageLabel_->setContentsMargins(4, 0, 8, 0);
-    bar->addWidget(pageLabel_);
+    // The quick tools, with the file commands before them and where you are
+    // after (main_toolbar.hpp). The page and zoom widgets are the bar's, but
+    // the window fills them, for whichever document is current.
+    mainBar_ = new MainToolbar(actions_, MainToolbar::standardGroups(), this);
+    addToolBar(mainBar_);
+    pageSpin_ = mainBar_->pageSpin();
+    pageLabel_ = mainBar_->pageLabel();
+    zoomLabel_ = mainBar_->zoomLabel();
     connect(pageSpin_, &QSpinBox::editingFinished, this, &MainWindow::goToPageFromSpin);
-    bar->addSeparator();
+    // With no document, Edit, Sign and Pages ask for one first, as the
+    // welcome view's tasks do.
+    connect(mainBar_, &MainToolbar::taskRequested, this, &MainWindow::startTask);
+    connect(mainBar_, &MainToolbar::hideRequested, this, [this] {
+        actions_->find(QStringLiteral("toggleToolbar"))->trigger();
+    });
+    connect(mainBar_, &MainToolbar::labelsToggled, this, [](bool shown) {
+        QSettings().setValue(QLatin1String(prefs::kToolbarLabels), shown);
+        applyAppearanceEverywhere();
+    });
 
-    actions_->populate(bar, {QStringLiteral("zoomOut")});
-    zoomLabel_ = new QLabel(bar);
-    zoomLabel_->setAlignment(Qt::AlignCenter);
-    zoomLabel_->setMinimumWidth(48);
-    zoomLabel_->setToolTip(tr("Zoom"));
-    bar->addWidget(zoomLabel_);
-    actions_->populate(bar, {QStringLiteral("zoomIn"), QStringLiteral("fitWidth"), QStringLiteral("fitPage")});
-
-    auto* spacer = new QWidget(bar);
-    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    bar->addWidget(spacer);
-    actions_->populate(bar, {QStringLiteral("find")});
+    // Without the toolbar, the page and zoom stay in sight down here.
+    statusPosition_ = new QLabel(this);
+    statusPosition_->setObjectName(QStringLiteral("statusPosition"));
+    statusPosition_->setContentsMargins(8, 0, 8, 0);
+    statusPosition_->hide();
+    statusBar()->addPermanentWidget(statusPosition_);
 }
 
 void MainWindow::buildLayout() {
@@ -340,14 +327,14 @@ void MainWindow::buildMenus() {
         {tr("&Edit"), ids({"undo", "redo", "-", "copy", "-", "find", "findNext", "findPrevious", "-",
                            "preferences"})},
         {tr("&View"), ids({"zoomIn", "zoomOut", "actualSize", "fitWidth", "fitPage", "-", "rotateView", "-",
-                           "toggleSidebar", "fullScreen", "-", "nextTab", "previousTab", "-", "focusNextRegion",
-                           "focusPreviousRegion"})},
+                           "toggleToolbar", "toggleSidebar", "fullScreen", "-", "nextTab", "previousTab", "-",
+                           "focusNextRegion", "focusPreviousRegion"})},
         {tr("&Pages"), ids({"pageRotateLeft", "pageRotateRight", "-", "pageInsertFile", "pageInsertBlank",
                             "pageExtract", "pageDelete", "-", "toolCrop", "cropMargins", "-", "watermark"})},
         {tr("&Comment"), ids({"toolHighlight", "toolUnderline", "toolStrike", "toolNote", "toolText",
                               "toolDraw", "toolStamp", "-", "toolMove", "toolErase"})},
-        {tr("&Sign"), ids({"toolSign", "signInvisibly", "-", "addLongTermValidation", "checkRevocation", "-",
-                           "flattenForm", "-", "updateTrustedList", "trustedCertificates"})},
+        {tr("&Sign"), ids({"toolSign", "signInvisibly", "fillForm", "-", "addLongTermValidation",
+                           "checkRevocation", "-", "flattenForm", "-", "updateTrustedList", "trustedCertificates"})},
         {tr("&Tools"), ids({"recognizeText", "-", "toolRedact", "applyRedactions", "clearRedactionMarks",
                             "redactText"})},
         {tr("&Help"), ids({"shortcuts", "-", "about"})},
@@ -355,14 +342,28 @@ void MainWindow::buildMenus() {
 }
 
 void MainWindow::applyAppearance() {
+    const QSettings settings;
+    const bool shown = settings.value(QLatin1String(prefs::kShowToolbar), true).toBool();
     // Without the SVG plugin there are no icons: words, then, not blank buttons.
-    const bool text = QSettings().value(QLatin1String(prefs::kToolbarText), false).toBool() || !icons::available();
-    const Qt::ToolButtonStyle style = text ? Qt::ToolButtonTextUnderIcon : Qt::ToolButtonIconOnly;
-    if (auto* bar = findChild<QToolBar*>(QStringLiteral("mainBar"))) {
-        bar->setToolButtonStyle(style);
+    const bool labels = settings.value(QLatin1String(prefs::kToolbarLabels), true).toBool() || !icons::available();
+    mainBar_->setVisible(shown);
+    mainBar_->setLabelsShown(labels);
+    mainBar_->setToolButtonStyle(icons::available() ? Qt::ToolButtonIconOnly : Qt::ToolButtonTextOnly);
+    if (QAction* toggle = actions_->find(QStringLiteral("toggleToolbar"))) {
+        const QSignalBlocker quiet(toggle);
+        toggle->setChecked(shown);
     }
-    modes_->setToolButtonStyle(text ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonIconOnly);
+    updateStatusPosition();
+    modes_->setToolButtonStyle(icons::available() ? Qt::ToolButtonIconOnly : Qt::ToolButtonTextBesideIcon);
     actions_->reloadIcons();
+}
+
+void MainWindow::applyAppearanceEverywhere() {
+    for (QWidget* w : QApplication::topLevelWidgets()) {
+        if (auto* window = qobject_cast<MainWindow*>(w)) {
+            window->applyAppearance();
+        }
+    }
 }
 
 void MainWindow::openPreferences(int page) {
@@ -373,7 +374,7 @@ void MainWindow::openPreferences(int page) {
     }
 #endif
     PreferencesDialog dialog(this, languages, static_cast<PreferencesDialog::Page>(page));
-    connect(&dialog, &PreferencesDialog::appearanceChanged, this, &MainWindow::applyAppearance);
+    connect(&dialog, &PreferencesDialog::appearanceChanged, this, &MainWindow::applyAppearanceEverywhere);
     connect(&dialog, &PreferencesDialog::trustChanged, this, [] {
         // Every open document's signatures are judged again, by the new list.
         for (QWidget* w : QApplication::topLevelWidgets()) {
@@ -409,6 +410,7 @@ void MainWindow::showWelcome() {
     stack_->setCurrentWidget(welcome_);
     hideFindBar();
     applyCertification();  // nothing certified: every mode on, for the next document
+    mainBar_->setDocumentOpen(false);
     updatePageControls();
     updateZoomLabel();
     updateTitle();
@@ -519,6 +521,14 @@ void MainWindow::runPendingTask(DocumentTab* tab) {
                 }
             });
         }
+    } else if (task == QLatin1String("edit")) {
+        // The toolbar's Edit: its first tool, the text box, in hand.
+        modes_->setMode(QStringLiteral("comment"));
+        if (QAction* text = actions_->find(QStringLiteral("toolText")); text != nullptr && text->isEnabled()) {
+            text->trigger();
+        }
+    } else if (task == QLatin1String("pages")) {
+        modes_->setMode(QStringLiteral("pages"));
     } else if (task == QLatin1String(WelcomeView::kOcr)) {
         tab->recognizeText();
     } else if (task == QLatin1String(WelcomeView::kReduce)) {

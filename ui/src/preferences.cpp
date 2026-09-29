@@ -82,9 +82,19 @@ PreferencesDialog::PreferencesDialog(QWidget* parent, const QStringList& ocrLang
     restoreTabs_->setChecked(settings.value(QLatin1String(prefs::kRestoreTabs), false).toBool());
     restoreTabs_->setToolTip(tr("Each on the page it was left at. Files opened from elsewhere open as well."));
     form->addRow(tr("Start-up:"), restoreTabs_);
-    toolbarText_ = new QCheckBox(tr("Show text under toolbar icons"), general);
-    toolbarText_->setChecked(settings.value(QLatin1String(prefs::kToolbarText), false).toBool());
-    form->addRow(tr("Toolbar:"), toolbarText_);
+    showToolbar_ = new QCheckBox(tr("Show the toolbar"), general);
+    showToolbar_->setObjectName(QStringLiteral("showToolbar"));
+    showToolbar_->setChecked(settings.value(QLatin1String(prefs::kShowToolbar), true).toBool());
+    showToolbar_->setToolTip(tr("Without it, the page number and zoom show in the status bar"));
+    form->addRow(tr("Toolbar:"), showToolbar_);
+    toolbarLabels_ = new QComboBox(general);
+    toolbarLabels_->setObjectName(QStringLiteral("toolbarLabels"));
+    toolbarLabels_->addItem(tr("Icons and labels"), true);
+    toolbarLabels_->addItem(tr("Icons only"), false);
+    toolbarLabels_->setCurrentIndex(settings.value(QLatin1String(prefs::kToolbarLabels), true).toBool() ? 0 : 1);
+    toolbarLabels_->setEnabled(showToolbar_->isChecked());
+    connect(showToolbar_, &QCheckBox::toggled, toolbarLabels_, &QWidget::setEnabled);
+    form->addRow(tr("Toolbar buttons:"), toolbarLabels_);
     themeIcons_ = new QCheckBox(tr("Use the desktop's icon theme where it has an icon"), general);
     themeIcons_->setChecked(settings.value(QLatin1String(icons::kUseThemeKey), false).toBool());
     themeIcons_->setToolTip(tr("Leht's own icons are used otherwise, and for anything the theme lacks"));
@@ -298,10 +308,13 @@ void PreferencesDialog::save() {
     settings.setValue(QLatin1String(prefs::kDefaultZoom), zoom_->currentData());
     settings.setValue(QLatin1String(prefs::kRestoreTabs), restoreTabs_->isChecked());
 
+    const bool labels = toolbarLabels_->currentData().toBool();
     const bool appearance =
-        settings.value(QLatin1String(prefs::kToolbarText), false).toBool() != toolbarText_->isChecked() ||
+        settings.value(QLatin1String(prefs::kShowToolbar), true).toBool() != showToolbar_->isChecked() ||
+        settings.value(QLatin1String(prefs::kToolbarLabels), true).toBool() != labels ||
         settings.value(QLatin1String(icons::kUseThemeKey), false).toBool() != themeIcons_->isChecked();
-    settings.setValue(QLatin1String(prefs::kToolbarText), toolbarText_->isChecked());
+    settings.setValue(QLatin1String(prefs::kShowToolbar), showToolbar_->isChecked());
+    settings.setValue(QLatin1String(prefs::kToolbarLabels), labels);
     settings.setValue(QLatin1String(icons::kUseThemeKey), themeIcons_->isChecked());
 
     settings.setValue(QStringLiteral("signing/name"), signName_->text().trimmed());

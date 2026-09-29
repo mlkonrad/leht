@@ -15,6 +15,7 @@ class ActionRegistry;
 class ColorSwatches;
 class DocumentTab;
 class FileTools;
+class MainToolbar;
 class ModeBar;
 class PageView;
 class QAction;
@@ -98,7 +99,8 @@ public:
 
     /// Opens one dropped file, or offers to combine several.
     void handleDroppedFiles(const QStringList& paths);
-    /// A welcome-view task: "sign", "fill", "combine", "ocr", "reduce", "verify".
+    /// A welcome-view task: "sign", "fill", "combine", "ocr", "reduce", "verify"; or
+    /// a toolbar one, "edit" or "pages", clicked with no document open.
     void startTask(const QString& task);
     /// The start-screen tour, the first time Leht runs (main() calls it once
     /// the window shows). The document tour follows with the first document.
@@ -143,8 +145,10 @@ private:
     void buildPageActions();
     void buildLayout();
     void buildMenus();
-    /// Toolbar text and icons, from Preferences.
+    /// The toolbar (shown, labels) and icons, from Preferences.
     void applyAppearance();
+    /// applyAppearance() in every window: the settings are the user's, not a window's.
+    static void applyAppearanceEverywhere();
     void openPreferences(int page = 0);
     void showAbout();
     void showWelcome();
@@ -187,6 +191,8 @@ private:
     void updateTitle();
     void updatePageControls();
     void updateZoomLabel();
+    /// The page and zoom in the status bar, while the toolbar is hidden.
+    void updateStatusPosition();
     void showFindBar();
     void hideFindBar();
     void runSearch();
@@ -209,8 +215,10 @@ private:
     /// The colour swatches and the new-text colour, as the checked tool has them.
     void syncSwatches();
 
+    MainToolbar* mainBar_ = nullptr;
     QLabel* pageLabel_ = nullptr;
     QLabel* zoomLabel_ = nullptr;
+    QLabel* statusPosition_ = nullptr;  ///< "Page 3 of 10 · 100%", without the toolbar
     QToolBar* findBar_ = nullptr;
     QLineEdit* findEdit_ = nullptr;
     QLabel* findLabel_ = nullptr;

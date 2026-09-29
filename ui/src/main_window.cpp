@@ -9,6 +9,7 @@
 #include "first_run_hints.hpp"
 #include "form_panel.hpp"
 #include "icons.hpp"
+#include "main_toolbar.hpp"
 #include "mode_bar.hpp"
 #include "outline_model.hpp"
 #include "page_grid.hpp"
@@ -480,6 +481,7 @@ void MainWindow::loadChrome() {
         grid->setChecked(d->isShowingGrid());
     }
     actions_->find(QStringLiteral("toggleSidebar"))->setChecked(d->sidebar()->isExpanded());
+    mainBar_->setDocumentOpen(d->isOpen());
     syncSwatches();
     updatePageControls();
     updateZoomLabel();
@@ -540,11 +542,25 @@ void MainWindow::updatePageControls() {
     } else {
         pageLabel_->clear();
     }
+    updateStatusPosition();
 }
 
 void MainWindow::updateZoomLabel() {
     const PageView* v = view();
     zoomLabel_->setText(v != nullptr ? tr("%1%").arg(qRound(v->zoom() * 100.0)) : QString());
+    updateStatusPosition();
+}
+
+void MainWindow::updateStatusPosition() {
+    const DocumentTab* d = current_;
+    const bool open = d != nullptr && d->isOpen() && !isShowingWelcome();
+    statusPosition_->setVisible(open && mainBar_->isHidden());
+    if (open) {
+        statusPosition_->setText(tr("Page %1 of %2 · %3")
+                                     .arg(qMax(1, d->currentPage() + 1))
+                                     .arg(d->pageCount())
+                                     .arg(zoomLabel_->text()));
+    }
 }
 
 void MainWindow::goToPageFromSpin() {
@@ -914,6 +930,12 @@ void MainWindow::buildActions() {
          .themeIcon = QStringLiteral("object-rotate-right"), .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_R)},
          .tip = tr("Turn the pages on screen; the file is not changed"), .enabledWhen = open, .group = view},
         doc([](DocumentTab* d) { d->view()->rotateBy(90); }));
+    add({.id = QStringLiteral("toggleToolbar"), .text = tr("&Toolbar"),
+         .tip = tr("Show or hide the toolbar"), .checkable = true, .group = view},
+        [](bool on) {
+            QSettings().setValue(QLatin1String(prefs::kShowToolbar), on);
+            applyAppearanceEverywhere();
+        });
     QAction* sidebar = add({.id = QStringLiteral("toggleSidebar"), .text = tr("&Sidebar"),
                             .icon = QStringLiteral("panel-left"), .shortcuts = {QKeySequence(Qt::Key_F9)},
                             .tip = tr("Show or hide the sidebar"), .checkable = true,
@@ -1048,7 +1070,7 @@ void MainWindow::buildEditActions() {
          .tip = tr("Put text such as DRAFT across the pages"), .certNeeds = 4, .group = tools},
         doc([](DocumentTab* d) { d->addWatermark(); }));
     add({.id = QStringLiteral("recognizeText"), .text = tr("&Recognize Text (OCR)…"),
-         .icon = QStringLiteral("scan-text"), .tip = tr("Make scanned pages searchable"), .certNeeds = 4,
+         .icon = QStringLiteral("wand-sparkles"), .tip = tr("Make scanned pages searchable"), .certNeeds = 4,
          .group = tools},
         doc([](DocumentTab* d) { d->recognizeText(); }));
     add({.id = QStringLiteral("cropMargins"), .text = tr("Crop &Margins…"), .icon = QStringLiteral("crop"),
@@ -1057,6 +1079,14 @@ void MainWindow::buildEditActions() {
     add({.id = QStringLiteral("signInvisibly"), .text = tr("Sign &Invisibly…"), .icon = QStringLiteral("file-pen-line"),
          .tip = tr("Sign the document without marking a page"), .certNeeds = 2, .group = sign},
         doc([](DocumentTab* d) { d->startSigning(0, QRectF()); }));
+    add({.id = QStringLiteral("fillForm"), .text = tr("Fill In &Form"), .icon = QStringLiteral("text-cursor-input"),
+         .tip = tr("Type into the form's fields, in the Form panel"), .certNeeds = 2,
+         .enabledWhen = [this] { return docAllows(this, 2) && current_->formPanel()->count() > 0; },
+         .group = sign},
+        doc([this](DocumentTab* d) {
+            modes_->setMode(QStringLiteral("sign"));
+            d->sidebar()->showPanel(QStringLiteral("form"));
+        }));
     add({.id = QStringLiteral("addLongTermValidation"), .text = tr("Add &Long-Term Validation…"),
          .icon = QStringLiteral("history"),
          .tip = tr("Embed what every signature needs to be checked after its certificates expire "
@@ -1145,12 +1175,12 @@ void MainWindow::buildFileTools() {
                                       .tip = tr("Put PDFs and images together into one new PDF"),
                                       .enabledWhen = [this] { return !fileToolBusy_; }, .group = file});
     QAction* reduce = actions_->add({.id = QStringLiteral("reduceFileSize"), .text = tr("Re&duce File Size…"),
-                                     .icon = QStringLiteral("minimize-2"),
+                                     .icon = QStringLiteral("file-archive"),
                                      .tip = tr("Make a smaller copy of this document"),
                                      .enabledWhen = [this, open] { return open() && !fileToolBusy_; },
                                      .group = file});
     QAction* split = actions_->add({.id = QStringLiteral("splitDocument"), .text = tr("Sp&lit Document…"),
-                                    .icon = QStringLiteral("scissors"),
+                                    .icon = QStringLiteral("split"),
                                     .tip = tr("Write this document's pages into separate files"),
                                     .enabledWhen = [this, open] { return open() && !fileToolBusy_; },
                                     .group = file});

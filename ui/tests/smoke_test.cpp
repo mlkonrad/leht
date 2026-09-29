@@ -26,6 +26,7 @@
 #include "color_swatches.hpp"
 #include "first_run_hints.hpp"
 #include "form_panel.hpp"
+#include "main_toolbar.hpp"
 #include "signature_cards.hpp"
 #include "single_instance.hpp"
 #include "welcome_view.hpp"
@@ -87,6 +88,9 @@
 
 #include <QSettings>
 #include <QToolBar>
+#include <QLabel>
+#include <QToolButton>
+#include <QFileDialog>
 
 #include <QDir>
 #include <QMouseEvent>
@@ -303,6 +307,26 @@ int main(int argc, char** argv) {
             pump(2000);
             check(inkSamples(grabView(contrasted)) > 200, "pages still render under a high-contrast palette");
             shot(&contrasted, "ux-high-contrast");
+            shot(contrasted.findChild<QToolBar*>(QStringLiteral("mainBar")), "ux-toolbar-contrast");
+        }
+        QPalette dark(QColor(230, 230, 230), QColor(45, 45, 48));
+        dark.setColor(QPalette::Window, QColor(37, 37, 40));
+        dark.setColor(QPalette::WindowText, QColor(230, 230, 230));
+        dark.setColor(QPalette::Base, QColor(30, 30, 32));
+        dark.setColor(QPalette::AlternateBase, QColor(60, 60, 64));
+        dark.setColor(QPalette::Text, QColor(230, 230, 230));
+        dark.setColor(QPalette::ButtonText, QColor(230, 230, 230));
+        dark.setColor(QPalette::Mid, QColor(90, 90, 96));
+        dark.setColor(QPalette::Highlight, QColor(53, 132, 228));
+        dark.setColor(QPalette::HighlightedText, Qt::white);
+        QApplication::setPalette(dark);
+        {
+            MainWindow darkened;
+            darkened.resize(1100, 700);
+            darkened.show();
+            darkened.openPath(QString::fromStdString(doc));
+            pump(1500);
+            shot(&darkened, "ux-toolbar-dark");
         }
         QApplication::setPalette(saved);
         pump(200);
@@ -1285,7 +1309,8 @@ int main(int argc, char** argv) {
         for (const char* id : {"open", "save", "saveAs", "print", "combineFiles", "reduceFileSize",
                                "splitDocument", "undo", "find", "preferences", "zoomIn", "fitWidth",
                                "toolHighlight", "toolSign", "signInvisibly", "addLongTermValidation",
-                               "toolRedact", "redactText", "watermark", "cropMargins", "shortcuts"}) {
+                               "toolRedact", "redactText", "watermark", "cropMargins", "shortcuts",
+                               "fillForm", "toggleToolbar"}) {
             QAction* a = fresh.actions()->find(QLatin1String(id));
             check(a != nullptr && inMenus.contains(a), (std::string("the menus hold ") + id).c_str());
         }
@@ -1308,6 +1333,57 @@ int main(int argc, char** argv) {
                   !fresh.actions()->find(QStringLiteral("toolHighlight"))->isEnabled() &&
                   fresh.actions()->find(QStringLiteral("combineFiles"))->isEnabled(),
               "with nothing open, only what needs no document is enabled");
+        // The toolbar: four quick buttons, each a group of the registry's commands.
+        auto* bar = fresh.findChild<MainToolbar*>(QStringLiteral("mainBar"));
+        check(bar != nullptr && bar->isVisible(), "the toolbar shows");
+        const auto quick = [&fresh](const char* id) {
+            return fresh.findChild<QToolButton*>(QStringLiteral("quick_") + QLatin1String(id));
+        };
+        const auto menuHolds = [&quick](const char* button, std::initializer_list<const char*> ids) {
+            QToolButton* b = quick(button);
+            if (b == nullptr || b->menu() == nullptr) {
+                return false;
+            }
+            QStringList names;
+            for (QAction* a : b->menu()->actions()) {
+                names << a->objectName();
+            }
+            return std::all_of(ids.begin(), ids.end(),
+                               [&](const char* id) { return names.contains(QLatin1String(id)); });
+        };
+        check(menuHolds("edit", {"toolText", "toolHighlight", "toolNote", "toolDraw", "toolMove", "toolErase"}) &&
+                  menuHolds("sign",
+                            {"toolSign", "signInvisibly", "fillForm", "addLongTermValidation", "flattenForm"}) &&
+                  menuHolds("files", {"combineFiles", "splitDocument", "reduceFileSize", "protect", "exportText"}) &&
+                  menuHolds("pages", {"pageRotateLeft", "pageInsertFile", "pageDelete", "toolCrop", "watermark",
+                                      "recognizeText", "toolRedact"}),
+              "the toolbar has Edit, Sign, Files and Pages, each with its group in a menu");
+        check(quick("files")->isEnabled() && quick("edit")->isEnabled() && quick("sign")->isEnabled() &&
+                  quick("pages")->isEnabled(),
+              "with nothing open, the quick buttons still work");
+        check(quick("edit")->toolButtonStyle() == Qt::ToolButtonTextBesideIcon, "the quick buttons are labelled");
+        {
+            // With nothing open, Pages asks for a file first (cancelled here).
+            QString asked;
+            bool dialog = false;
+            QObject::connect(bar, &MainToolbar::taskRequested, &fresh, [&asked](const QString& t) { asked = t; });
+            QTimer::singleShot(200, [&dialog] {
+                if (auto* d = qobject_cast<QFileDialog*>(QApplication::activeModalWidget())) {
+                    dialog = true;
+                    d->reject();
+                }
+            });
+            quick("pages")->click();
+            pump(300);
+            check(asked == QStringLiteral("pages") && dialog && fresh.isShowingWelcome(),
+                  "with nothing open, Pages asks for a file first");
+        }
+        fresh.resize(600, 800);
+        pump(100);
+        check(quick("edit")->toolButtonStyle() == Qt::ToolButtonIconOnly, "a narrow window drops the labels");
+        fresh.resize(1000, 800);
+        pump(100);
+        check(quick("edit")->toolButtonStyle() == Qt::ToolButtonTextBesideIcon, "and gets them back when wide");
         {
             PreferencesDialog prefs(&fresh, {QStringLiteral("est"), QStringLiteral("eng")});
             prefs.show();
@@ -1324,6 +1400,34 @@ int main(int argc, char** argv) {
               "a file dropped on the window opens");
         check(recent::files().value(0) == QFileInfo(QString::fromStdString(doc)).absoluteFilePath(),
               "an opened file heads the recent list");
+        // The toolbar on a document: Edit takes the text box, in Comment mode.
+        quick("edit")->click();
+        pump(50);
+        check(fresh.actions()->find(QStringLiteral("toolText"))->isChecked() &&
+                  fresh.modeBar()->mode() == QStringLiteral("comment"),
+              "Edit takes the text box, in Comment mode");
+        fresh.modeBar()->setMode(QStringLiteral("read"));  // as the checks below expect it
+        shot(&fresh, "ux-toolbar");
+        {
+            // Hidden: the preference follows, and the page shows in the status bar.
+            QAction* toggle = fresh.actions()->find(QStringLiteral("toggleToolbar"));
+            check(toggle->isChecked(), "View > Toolbar is on");
+            toggle->trigger();
+            pump(50);
+            auto* position = fresh.findChild<QLabel*>(QStringLiteral("statusPosition"));
+            check(!bar->isVisible() && !QSettings().value(QLatin1String(prefs::kShowToolbar), true).toBool() &&
+                      position != nullptr && position->isVisible() &&
+                      position->text().startsWith(QStringLiteral("Page 1 of 10")),
+                  "View > Toolbar hides the toolbar, and the page number moves to the status bar");
+            toggle->trigger();
+            pump(50);
+            check(bar->isVisible() && QSettings().value(QLatin1String(prefs::kShowToolbar), false).toBool() &&
+                      !position->isVisible(),
+                  "and shows it again");
+            bar->setLabelsShown(false);
+            check(quick("edit")->toolButtonStyle() == Qt::ToolButtonIconOnly, "icons only on request");
+            bar->setLabelsShown(true);
+        }
         // Tabs: one window, a tab per document, named after its file.
         {
             const auto windows = [] {
@@ -1396,10 +1500,13 @@ int main(int argc, char** argv) {
             QAction* highlight = fresh.actions()->find(QStringLiteral("toolHighlight"));
             const int certifiedAt = tabs->currentIndex();
             check(certifiedAt == 2 && !highlight->isEnabled(), "a certified document's tab turns annotating off");
+            check(!quick("edit")->isEnabled() && quick("pages")->isEnabled() && quick("files")->isEnabled(),
+                  "and greys out the toolbar's Edit (Pages still shows the grid)");
             shot(&fresh, "tabs");
             tabs->setCurrentIndex(0);
             pump(100);
             check(highlight->isEnabled(), "and a plain document's tab turns it back on");
+            check(quick("edit")->isEnabled(), "and Edit with it");
             fresh.actions()->find(QStringLiteral("nextTab"))->trigger();
             fresh.actions()->find(QStringLiteral("nextTab"))->trigger();
             pump(100);
@@ -2085,6 +2192,18 @@ int main(int argc, char** argv) {
             pump(1500);
             auto* formPanel = window.findChild<FormPanel*>(QStringLiteral("formPanel"));
             check(formPanel != nullptr && formPanel->count() == 2, "the form panel lists two fields");
+            {
+                // Sign > Fill In Form: Fill & Sign mode, the Form panel open.
+                window.sidebar()->setExpanded(false);
+                window.modeBar()->setMode(QStringLiteral("read"));
+                QAction* fill = window.actions()->find(QStringLiteral("fillForm"));
+                check(fill != nullptr && fill->isEnabled(), "Fill In Form is on for a document with fields");
+                fill->trigger();
+                pump(50);
+                check(window.modeBar()->mode() == QStringLiteral("sign") && window.sidebar()->isExpanded() &&
+                          window.sidebar()->currentPanel() == QStringLiteral("form"),
+                      "Fill In Form opens the Form panel in Fill & Sign mode");
+            }
             auto* view = window.findChild<PageView*>();
             check(view != nullptr && view->fieldsShown(), "the fields are outlined on the page");
             QLineEdit* nameEdit = nullptr;

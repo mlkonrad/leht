@@ -16,7 +16,10 @@ class QSpinBox;
 namespace prefs {
 inline constexpr const char* kAuthor = "annotations/author";
 inline constexpr const char* kDefaultZoom = "view/defaultZoom";  ///< "width" | "page" | "actual"
-inline constexpr const char* kToolbarText = "appearance/toolbarText";
+/// The toolbar shows (default true), and its quick buttons are labelled
+/// (default true; false is icons only).
+inline constexpr const char* kShowToolbar = "appearance/showToolbar";
+inline constexpr const char* kToolbarLabels = "appearance/toolbarLabels";
 /// Reopen, at start-up, the documents open when Leht last closed. Off by default.
 inline constexpr const char* kRestoreTabs = "general/restoreTabs";
 inline constexpr const char* kTrusted = "trustedCertificates";
@@ -49,7 +52,8 @@ private:
     QLineEdit* author_ = nullptr;
     QComboBox* zoom_ = nullptr;
     QCheckBox* restoreTabs_ = nullptr;
-    QCheckBox* toolbarText_ = nullptr;
+    QCheckBox* showToolbar_ = nullptr;
+    QComboBox* toolbarLabels_ = nullptr;
     QCheckBox* themeIcons_ = nullptr;
 
     QLineEdit* signName_ = nullptr;
