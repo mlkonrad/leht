@@ -52,6 +52,7 @@
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QTabBar>
 #include <QTableWidget>
 #include <QTimer>
 #include <QToolBar>
@@ -233,7 +234,32 @@ void MainWindow::buildLayout() {
         }
     });
 
-    // The documents, one DocumentTab each, under the mode bar they share.
+    // The documents, one DocumentTab each, under the mode bar they share,
+    // and a tab for each above it, named after its file.
+    tabBar_ = new QTabBar(this);
+    tabBar_->setObjectName(QStringLiteral("documentTabs"));
+    tabBar_->setAccessibleName(tr("Open documents"));
+    tabBar_->setDocumentMode(true);
+    tabBar_->setMovable(true);
+    tabBar_->setTabsClosable(true);
+    tabBar_->setExpanding(false);
+    tabBar_->setUsesScrollButtons(true);
+    tabBar_->setElideMode(Qt::ElideMiddle);
+    tabBar_->setContextMenuPolicy(Qt::CustomContextMenu);
+    tabBar_->installEventFilter(this);  // middle click (eventFilter)
+    connect(tabBar_, &QTabBar::currentChanged, this, [this](int index) {
+        if (!syncingTabs_ && index >= 0 && index < tabs_.size()) {
+            setCurrent(tabs_[index]);
+        }
+    });
+    connect(tabBar_, &QTabBar::tabMoved, this, [this](int from, int to) { tabs_.move(from, to); });
+    connect(tabBar_, &QTabBar::tabCloseRequested, this, [this](int index) { closeTab(tabs_.value(index)); });
+    connect(tabBar_, &QTabBar::customContextMenuRequested, this, [this](const QPoint& at) {
+        const int index = tabBar_->tabAt(at);
+        if (index >= 0) {
+            showTabMenu(index, tabBar_->mapToGlobal(at));
+        }
+    });
     documentStack_ = new QStackedWidget(this);
     documentStack_->setObjectName(QStringLiteral("documents"));
     documentPage_ = new QWidget(this);
@@ -241,6 +267,7 @@ void MainWindow::buildLayout() {
     auto* column = new QVBoxLayout(documentPage_);
     column->setContentsMargins(0, 0, 0, 0);
     column->setSpacing(0);
+    column->addWidget(tabBar_);
     column->addWidget(modes_);
     column->addWidget(documentStack_, 1);
 
@@ -310,7 +337,8 @@ void MainWindow::buildMenus() {
         {tr("&Edit"), ids({"undo", "redo", "-", "copy", "-", "find", "findNext", "findPrevious", "-",
                            "preferences"})},
         {tr("&View"), ids({"zoomIn", "zoomOut", "actualSize", "fitWidth", "fitPage", "-", "rotateView", "-",
-                           "toggleSidebar", "fullScreen", "-", "focusNextRegion", "focusPreviousRegion"})},
+                           "toggleSidebar", "fullScreen", "-", "nextTab", "previousTab", "-", "focusNextRegion",
+                           "focusPreviousRegion"})},
         {tr("&Pages"), ids({"pageRotateLeft", "pageRotateRight", "-", "pageInsertFile", "pageInsertBlank",
                             "pageExtract", "pageDelete", "-", "toolCrop", "cropMargins", "-", "watermark"})},
         {tr("&Comment"), ids({"toolHighlight", "toolUnderline", "toolStrike", "toolNote", "toolText",

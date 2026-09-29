@@ -6,6 +6,7 @@
 // and zooming change what is drawn. Runs under QT_QPA_PLATFORM=offscreen.
 
 #include "main_window.hpp"
+#include "document_tab.hpp"
 #include "page_view.hpp"
 #include "actions.hpp"
 #include "annotation_properties.hpp"
@@ -33,6 +34,7 @@
 #include <QStackedWidget>
 #include <QPointer>
 #include <QMenuBar>
+#include <QTabBar>
 
 #include <QApplication>
 #include <QClipboard>
@@ -1320,6 +1322,7 @@ int main(int argc, char** argv) {
               "a file dropped on the window opens");
         check(recent::files().value(0) == QFileInfo(QString::fromStdString(doc)).absoluteFilePath(),
               "an opened file heads the recent list");
+        // Tabs: one window, a tab per document, named after its file.
         {
             const auto windows = [] {
                 int n = 0;
@@ -1329,21 +1332,92 @@ int main(int argc, char** argv) {
                 return n;
             };
             const int before = windows();
-            fresh.openDocument(QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf"));
+            QTabBar* tabs = fresh.tabBar();
+            check(tabs->isVisible() && tabs->count() == 1 && tabs->tabText(0) == QStringLiteral("text_10p.pdf"),
+                  "an open document shows as a tab named after its file");
+            const QString outlined = QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf");
+            fresh.openDocument(outlined);
             pump(1500);
-            check(windows() == before + 1 && fresh.view()->pageCount() == 10,
-                  "another file opens in a window of its own, leaving this one as it was");
-            fresh.openDocument(QStringLiteral(LEHT_CORPUS_DIR "/outlined.pdf"));
+            check(windows() == before && tabs->count() == 2 && tabs->currentIndex() == 1 &&
+                      tabs->tabText(1) == QStringLiteral("outlined.pdf") && fresh.view()->pageCount() == 3,
+                  "another file opens in a new tab of the same window");
+            tabs->setCurrentIndex(0);
+            pump(100);
+            check(fresh.view()->pageCount() == 10 && fresh.windowTitle().startsWith(QStringLiteral("text_10p.pdf")),
+                  "a click on a tab shows its document");
+            fresh.openDocument(outlined);
             pump(300);
-            check(windows() == before + 1, "opening it again brings that window forward instead");
-            for (QWidget* w : QApplication::topLevelWidgets()) {
-                auto* other = qobject_cast<MainWindow*>(w);
-                if (other != nullptr && other != &fresh && other != &window && other->isVisible()) {
-                    other->close();  // unmodified: closes without asking
+            check(windows() == before && tabs->count() == 2 && tabs->currentIndex() == 1,
+                  "opening it again selects its tab instead");
+
+            // Edits belong to their tab: the mark, Undo, and the question on close.
+            QTemporaryDir tmp;
+            const QString copy = tmp.filePath(QStringLiteral("edit me.pdf"));
+            QFile::copy(QString::fromStdString(doc), copy);
+            fresh.openDocument(copy);
+            pump(1500);
+            fresh.current()->onWorker(
+                [](RenderWorker* w) { w->addNote(0, QPointF(72, 72), QStringLiteral("a note in a tab")); });
+            pump(800);
+            QAction* undo = fresh.actions()->find(QStringLiteral("undo"));
+            check(tabs->count() == 3 && tabs->tabText(2) == QStringLiteral("edit me.pdf *") && undo->isEnabled(),
+                  "an edit marks its tab with * and offers Undo");
+            tabs->setCurrentIndex(0);
+            pump(100);
+            check(!undo->isEnabled() && !fresh.isModified(), "Undo follows the tab: nothing to undo in the other");
+            tabs->setCurrentIndex(2);
+            pump(100);
+            int asked = 0;
+            QTimer discard;
+            QObject::connect(&discard, &QTimer::timeout, [&asked] {
+                if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                    ++asked;
+                    box->button(QMessageBox::Discard)->click();
                 }
-            }
+            });
+            discard.start(50);
+            fresh.actions()->find(QStringLiteral("close"))->trigger();
+            pump(300);
+            discard.stop();
+            check(asked == 1 && tabs->count() == 2 && windows() == before,
+                  "Close on a modified tab asks, and Discard closes just that tab");
+
+            // The window's tools follow the tab: a certified document has
+            // annotating off, a plain one on.
+            fresh.openDocument(QStringLiteral(LEHT_CORPUS_DIR "/certified.pdf"));
+            pump(2500);
+            QAction* highlight = fresh.actions()->find(QStringLiteral("toolHighlight"));
+            const int certifiedAt = tabs->currentIndex();
+            check(certifiedAt == 2 && !highlight->isEnabled(), "a certified document's tab turns annotating off");
+            tabs->setCurrentIndex(0);
+            pump(100);
+            check(highlight->isEnabled(), "and a plain document's tab turns it back on");
+            fresh.actions()->find(QStringLiteral("nextTab"))->trigger();
+            fresh.actions()->find(QStringLiteral("nextTab"))->trigger();
+            pump(100);
+            check(tabs->currentIndex() == certifiedAt && !highlight->isEnabled(),
+                  "Next Tab goes round the tabs, and the tools follow");
+
+            // Move to New Window: the document goes on in a window of its own.
+            DocumentTab* moving = fresh.current();
+            MainWindow* other = fresh.moveTabToNewWindow(moving);
+            pump(500);
+            check(other != nullptr && windows() == before + 1 && tabs->count() == 2 &&
+                      other->tabBar()->count() == 1 && other->current() == moving,
+                  "Move to New Window leaves one tab here and one there");
+            QImage page;
+            QMetaObject::invokeMethod(moving->worker(), "renderAt", Qt::BlockingQueuedConnection,
+                                      Q_RETURN_ARG(QImage, page), Q_ARG(int, 0), Q_ARG(double, 0.5));
+            check(!page.isNull() && other->view()->pageCount() > 0 &&
+                      !other->actions()->find(QStringLiteral("toolHighlight"))->isEnabled(),
+                  "and the moved document still renders, still certified");
+            other->close();  // unmodified: closes without asking
             pump(300);
             check(windows() == before, "and it closes");
+            tabs->setCurrentIndex(1);
+            fresh.closeDocument();
+            pump(200);
+            check(tabs->count() == 1 && fresh.view()->pageCount() == 10, "Close closes only the current tab");
         }
         check(fresh.actions()->find(QStringLiteral("save"))->isEnabled() &&
                   fresh.actions()->find(QStringLiteral("toolHighlight"))->isEnabled(),
@@ -1416,7 +1490,8 @@ int main(int argc, char** argv) {
 
         fresh.closeDocument();
         pump(200);
-        check(fresh.isShowingWelcome(), "Close returns to the welcome view");
+        check(fresh.isShowingWelcome() && !fresh.tabBar()->isVisible(),
+              "closing the last tab returns to the welcome view, without a tab bar");
         check(!fresh.actions()->find(QStringLiteral("save"))->isEnabled(), "and disables Save again");
     }
 

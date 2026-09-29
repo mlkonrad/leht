@@ -8,6 +8,7 @@
 #include "file_tools_dialogs.hpp"
 #include "first_run_hints.hpp"
 #include "form_panel.hpp"
+#include "icons.hpp"
 #include "mode_bar.hpp"
 #include "outline_model.hpp"
 #include "page_grid.hpp"
@@ -21,6 +22,7 @@
 
 #include <QActionGroup>
 #include <QApplication>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QDir>
 #include <QFileDialog>
@@ -29,12 +31,15 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMouseEvent>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QTabBar>
 #include <QTimer>
 #include <QToolBar>
 
@@ -134,6 +139,10 @@ void MainWindow::adopt(DocumentTab* tab) {
     tab->setParent(documentStack_);
     documentStack_->addWidget(tab);
     tabs_.push_back(tab);
+    syncingTabs_ = true;
+    tabBar_->addTab(QString());
+    syncingTabs_ = false;
+    updateTabText(tab);
 
     // Everything the document says reaches the window's chrome only while it
     // is the one shown; the rest of the time it keeps its state to itself.
@@ -149,7 +158,8 @@ void MainWindow::adopt(DocumentTab* tab) {
             statusBar()->showMessage(text, timeout);
         }
     });
-    links << connect(tab, &DocumentTab::titleChanged, this, [this, shown] {
+    links << connect(tab, &DocumentTab::titleChanged, this, [this, tab, shown] {
+        updateTabText(tab);
         if (shown()) {
             updateTitle();
         }
@@ -285,7 +295,7 @@ void MainWindow::closeTab(DocumentTab* tab, bool ask) {
     }
     if (ask) {
         QPointer<DocumentTab> alive(tab);
-        if (tab != current_) {
+        if (tab != current_ && tab->isModified()) {
             setCurrent(tab);  // the question is about the document in view
         }
         if (!tab->resolveUnsaved([this, alive] {
@@ -296,18 +306,28 @@ void MainWindow::closeTab(DocumentTab* tab, bool ask) {
             return;
         }
     }
-    const qsizetype at = tabs_.indexOf(tab);
-    if (tab == current_) {
-        hideFindBar();
-    }
-    release(tab);
-    tabs_.removeAt(at);
-    documentStack_->removeWidget(tab);
+    detach(tab);
     // Out of the window at once, so nothing finds it; its worker thread is
     // waited for when it is deleted.
     tab->hide();
     tab->setParent(nullptr);
     tab->deleteLater();
+}
+
+void MainWindow::detach(DocumentTab* tab) {
+    const qsizetype at = tabs_.indexOf(tab);
+    if (at < 0) {
+        return;
+    }
+    if (tab == current_) {
+        hideFindBar();
+    }
+    release(tab);
+    tabs_.removeAt(at);
+    syncingTabs_ = true;
+    tabBar_->removeTab(static_cast<int>(at));
+    syncingTabs_ = false;
+    documentStack_->removeWidget(tab);
     if (tab == current_) {
         current_ = nullptr;
         if (tabs_.isEmpty()) {
@@ -318,6 +338,97 @@ void MainWindow::closeTab(DocumentTab* tab, bool ask) {
     }
 }
 
+void MainWindow::closeTabs(const QList<QPointer<DocumentTab>>& tabs) {
+    for (qsizetype i = 0; i < tabs.size(); ++i) {
+        DocumentTab* tab = tabs[i];
+        if (tab == nullptr || !tabs_.contains(tab)) {
+            continue;
+        }
+        if (tab->isModified()) {
+            setCurrent(tab);
+            // A save it starts closes this one and goes on with the rest.
+            if (!tab->resolveUnsaved([this, rest = tabs.mid(i)] { closeTabs(rest); })) {
+                return;
+            }
+        }
+        closeTab(tab, false);
+    }
+}
+
+MainWindow* MainWindow::moveTabToNewWindow(DocumentTab* tab) {
+    if (tab == nullptr || !tabs_.contains(tab) || tabs_.size() < 2) {
+        return nullptr;
+    }
+    detach(tab);
+    // The tab keeps its worker thread and everything it holds; only the
+    // window around it changes.
+    MainWindow* window = newWindow();
+    window->adopt(tab);
+    return window;
+}
+
+void MainWindow::updateTabText(DocumentTab* tab) {
+    const qsizetype at = tabs_.indexOf(tab);
+    if (at < 0) {
+        return;
+    }
+    const int i = static_cast<int>(at);
+    const QString text = tab->title().isEmpty() ? tr("Opening…") : tab->tabText();
+    tabBar_->setTabText(i, text);
+    tabBar_->setTabToolTip(i, tab->path().isEmpty() ? text : tab->path());
+    tabBar_->setAccessibleTabName(i, tab->isModified() ? tr("%1, modified").arg(tab->title()) : tab->title());
+}
+
+void MainWindow::showTabMenu(int index, const QPoint& globalPos) {
+    QPointer<DocumentTab> tab = tabs_.value(index);
+    if (tab == nullptr) {
+        return;
+    }
+    QMenu menu(this);
+    menu.addAction(icons::named(QStringLiteral("x")), tr("&Close"), this, [this, tab] { closeTab(tab); });
+    QAction* others = menu.addAction(tr("Close &Other Tabs"), this, [this, tab] {
+        QList<QPointer<DocumentTab>> list;
+        for (DocumentTab* d : tabs_) {
+            if (d != tab) {
+                list << d;
+            }
+        }
+        closeTabs(list);
+    });
+    others->setEnabled(tabs_.size() > 1);
+    QAction* right = menu.addAction(tr("Close Tabs to the &Right"), this, [this, tab] {
+        QList<QPointer<DocumentTab>> list;
+        for (qsizetype i = tabs_.indexOf(tab) + 1; i < tabs_.size(); ++i) {
+            list << tabs_[i];
+        }
+        closeTabs(list);
+    });
+    right->setEnabled(index < tabs_.size() - 1);
+    menu.addSeparator();
+    QAction* move = menu.addAction(icons::named(QStringLiteral("files")), tr("&Move to New Window"), this,
+                                   [this, tab] { (void)moveTabToNewWindow(tab); });
+    move->setObjectName(QStringLiteral("moveTabToNewWindow"));
+    move->setEnabled(tabs_.size() > 1);
+    QAction* copy = menu.addAction(icons::named(QStringLiteral("copy")), tr("Copy File &Path"), this,
+                                   [tab] { QGuiApplication::clipboard()->setText(tab->path()); });
+    copy->setEnabled(!tab->path().isEmpty());
+    menu.exec(globalPos);
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    // A middle click closes a tab, as in a web browser.
+    if (watched == tabBar_ && event->type() == QEvent::MouseButtonRelease) {
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        if (mouse->button() == Qt::MiddleButton) {
+            if (DocumentTab* tab = tabs_.value(tabBar_->tabAt(mouse->position().toPoint()))) {
+                closeTab(tab);
+                return true;
+            }
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
 void MainWindow::setCurrent(DocumentTab* tab) {
     if (tab != current_ && current_ != nullptr && findBar_->isVisible()) {
         hideFindBar();  // a search belongs to the document it was made in
@@ -326,6 +437,9 @@ void MainWindow::setCurrent(DocumentTab* tab) {
     if (tab == nullptr) {
         return;
     }
+    syncingTabs_ = true;
+    tabBar_->setCurrentIndex(static_cast<int>(tabs_.indexOf(tab)));
+    syncingTabs_ = false;
     documentStack_->setCurrentWidget(tab);
     loadChrome();
 }
@@ -479,7 +593,7 @@ void MainWindow::openDocument(const QString& path) {
             continue;
         }
         for (DocumentTab* d : other->tabs_) {
-            if (d->path() == absolute && d->isOpen()) {
+            if (d->path() == absolute) {
                 other->setCurrent(d);
                 other->showNormal();
                 other->raise();
@@ -488,12 +602,7 @@ void MainWindow::openDocument(const QString& path) {
             }
         }
     }
-    // This window is busy with a document: the new one gets its own.
-    if (current_ != nullptr) {
-        newWindow()->openPath(absolute);
-        return;
-    }
-    openPath(absolute);
+    addDocument()->openPath(absolute);
 }
 
 void MainWindow::openPath(const QString& path) {
@@ -561,7 +670,7 @@ void MainWindow::buildActions() {
         &MainWindow::openDialog);
     add({.id = QStringLiteral("close"), .text = tr("&Close"), .icon = QStringLiteral("x"),
          .themeIcon = QStringLiteral("window-close"), .shortcuts = {QKeySequence::Close},
-         .tip = tr("Close the document"), .enabledWhen = open, .group = file},
+         .tip = tr("Close the document"), .enabledWhen = [this] { return current_ != nullptr; }, .group = file},
         &MainWindow::closeDocument);
     add({.id = QStringLiteral("save"), .text = tr("&Save"), .icon = QStringLiteral("save"),
          .themeIcon = QStringLiteral("document-save"), .shortcuts = {QKeySequence::Save},
@@ -590,6 +699,35 @@ void MainWindow::buildActions() {
     add({.id = QStringLiteral("closeWindow"), .text = tr("Close &Window"),
          .shortcuts = {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_W)}, .group = file},
         [this] { close(); });
+
+    // Tabs: one per open document.
+    const auto step = [this](int by) {
+        return [this, by] {
+            const qsizetype n = tabs_.size();
+            if (n > 1 && current_ != nullptr) {
+                setCurrent(tabs_.value((tabs_.indexOf(current_) + by + n) % n));
+            }
+        };
+    };
+    const auto several = [this] { return tabs_.size() > 1; };
+    add({.id = QStringLiteral("nextTab"), .text = tr("Ne&xt Tab"), .icon = QStringLiteral("chevron-right"),
+         .shortcuts = {QKeySequence(Qt::CTRL | Qt::Key_Tab), QKeySequence(Qt::CTRL | Qt::Key_PageDown)},
+         .tip = tr("Show the next open document"), .enabledWhen = several, .group = view},
+        step(+1));
+    add({.id = QStringLiteral("previousTab"), .text = tr("Pre&vious Tab"), .icon = QStringLiteral("chevron-left"),
+         .shortcuts = {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Backtab), QKeySequence(Qt::CTRL | Qt::Key_PageUp)},
+         .tip = tr("Show the previous open document"), .enabledWhen = several, .group = view},
+        step(-1));
+    for (int n = 1; n <= 9; ++n) {
+        add({.id = QStringLiteral("tab%1").arg(n), .text = tr("Tab %1").arg(n),
+             .shortcuts = {QKeySequence(Qt::ALT | static_cast<Qt::Key>(Qt::Key_0 + n))},
+             .enabledWhen = [this, n] { return tabs_.size() >= n; }, .group = view},
+            [this, n] {
+                if (DocumentTab* d = tabs_.value(n - 1)) {
+                    setCurrent(d);
+                }
+            });
+    }
 
     // Edit.
     add({.id = QStringLiteral("undo"), .text = tr("&Undo"), .icon = QStringLiteral("undo-2"),

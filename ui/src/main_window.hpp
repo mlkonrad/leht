@@ -29,6 +29,7 @@ class QPrinter;
 class QProgressDialog;
 class QSpinBox;
 class QStackedWidget;
+class QTabBar;
 class QToolBar;
 class RenderWorker;
 class Sidebar;
@@ -51,8 +52,8 @@ public:
     /// Opens `path` in the current document's place, replacing what it shows
     /// (a new one if nothing is open).
     void openPath(const QString& path);
-    /// Opens `path` as the user asked: the window already showing it comes
-    /// forward; an empty window opens it; otherwise a new window does.
+    /// Opens `path` as the user asked: the tab already showing it, in this
+    /// window or another, comes forward; otherwise it opens in a new tab here.
     void openDocument(const QString& path);
     /// File > New Window: another window, empty, deleted when closed.
     MainWindow* newWindow();
@@ -82,8 +83,14 @@ public:
     void showFirstRunHints();
     /// The colour a comment tool draws in: the user's choice, else its own.
     [[nodiscard]] QColor toolColor(const QString& toolId) const;
-    /// File > Close: closes the current document (asks about unsaved edits).
+    /// File > Close: closes the current document's tab (asks about unsaved
+    /// edits). The welcome view shows after the last.
     void closeDocument();
+    /// The tab's context menu: Move to New Window. The document goes on as
+    /// it was (worker, edits, page), in a new window of its own.
+    MainWindow* moveTabToNewWindow(DocumentTab* tab);
+    /// The row of tabs, one per open document.
+    [[nodiscard]] QTabBar* tabBar() const { return tabBar_; }
 
     // The current document's, for the smoke test and the actions.
     [[nodiscard]] int pendingRedactions() const;
@@ -97,6 +104,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
@@ -134,8 +142,18 @@ private:
     /// Lets go of `tab` without deleting it: its signals no longer reach
     /// this window.
     void release(DocumentTab* tab);
+    /// Releases `tab` and takes it out of the tab bar and the stack; another
+    /// tab (or the welcome view) comes forward if it was current.
+    void detach(DocumentTab* tab);
     /// Closes `tab` (asks about unsaved edits when `ask`).
     void closeTab(DocumentTab* tab, bool ask = true);
+    /// Closes each of `tabs` in turn, each asking about its unsaved edits;
+    /// Cancel on one keeps it and the rest.
+    void closeTabs(const QList<QPointer<DocumentTab>>& tabs);
+    /// The context menu of the tab at `index`.
+    void showTabMenu(int index, const QPoint& globalPos);
+    /// Its file name, modified mark and path, as the tab bar shows them.
+    void updateTabText(DocumentTab* tab);
     /// Makes `tab` the one shown, and the window's chrome follow it.
     void setCurrent(DocumentTab* tab);
     /// The mode bar, tools, certification, page and zoom controls, title and
@@ -154,7 +172,9 @@ private:
     /// toolbar, mode bar, sidebar, page.
     void focusRegion(int step);
 
-    QList<DocumentTab*> tabs_;
+    QList<DocumentTab*> tabs_;  ///< in the tab bar's order
+    QTabBar* tabBar_ = nullptr;
+    bool syncingTabs_ = false;  ///< the tab bar is being set to match tabs_
     DocumentTab* current_ = nullptr;
     /// What each document is connected to in this window, cut on release().
     QHash<DocumentTab*, QList<QMetaObject::Connection>> links_;
