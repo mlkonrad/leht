@@ -16,8 +16,17 @@ namespace leht::ops {
 enum class FieldType { Text, Checkbox, Radio, Choice, PushButton, Signature, Unknown };
 
 /// One AcroForm field. A field with several widgets (a radio group, or a
-/// value repeated on several pages) is listed once, at its first widget.
+/// value repeated on several pages) is listed once, at its first widget;
+/// `widgets` holds all of them.
 struct FieldInfo {
+    /// One place the field shows on a page.
+    struct Widget {
+        int page = 0;  ///< 0-based
+        Rect rect;
+        /// Checkbox and radio: the on-state this widget sets. Empty otherwise.
+        std::string on_state;
+    };
+
     std::string name;  ///< fully qualified: "address.street"
     FieldType type = FieldType::Unknown;
     /// Text, the chosen option, or for checkboxes and radios the on-state
@@ -31,6 +40,9 @@ struct FieldInfo {
     bool read_only = false;
     bool required = false;
     int max_length = 0;  ///< text: most characters allowed, 0 = no limit
+    bool multiline = false;       ///< text: takes several lines
+    bool editable_choice = false; ///< choice: a combo box that also takes typed text
+    std::vector<Widget> widgets;  ///< every widget, in document order
 };
 
 /// Every field in the document's AcroForm. Throws leht::Error if the form

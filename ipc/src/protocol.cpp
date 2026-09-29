@@ -154,6 +154,7 @@ constexpr std::size_t kMaxStrokePoints = 100000; ///< points across all of them
 constexpr std::size_t kMaxLines = 64;            ///< text lines in an appearance
 constexpr std::size_t kMaxCerts = 64;            ///< certificates in a chain
 constexpr std::size_t kMaxSignatures = 4096;
+constexpr std::size_t kMaxFieldWidgets = 65536;  ///< widgets of one form field
 constexpr std::size_t kMaxQueries = 256;          ///< revocation fetches per document
 constexpr std::size_t kMaxRevocationRows = 64;
 constexpr std::uint8_t kMaxTrust = 5;  ///< crypto::Trust::Revoked, the last value
@@ -1461,10 +1462,18 @@ void FieldList::encode(Writer& w) const {
         w.u8(f.read_only ? 1 : 0);
         w.u8(f.required ? 1 : 0);
         w.i32(f.max_length);
+        w.u8(f.multiline ? 1 : 0);
+        w.u8(f.editable_choice ? 1 : 0);
+        w.u32(static_cast<std::uint32_t>(f.widgets.size()));
+        for (const ops::FieldInfo::Widget& wid : f.widgets) {
+            w.i32(wid.page);
+            put_rect(w, wid.rect);
+            w.str(wid.on_state);
+        }
     }
 }
 FieldList FieldList::decode(Reader& r) {
-    const std::size_t n = r.count(35);
+    const std::size_t n = r.count(41);
     FieldList m;
     m.items.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
@@ -1484,6 +1493,20 @@ FieldList FieldList::decode(Reader& r) {
         f.max_length = r.i32();
         if (f.max_length < 0) {
             throw ProtocolError("field length limit out of range");
+        }
+        f.multiline = r.boolean();
+        f.editable_choice = r.boolean();
+        const std::size_t widgets = r.count(24);
+        if (widgets > kMaxFieldWidgets) {
+            throw ProtocolError("too many field widgets");
+        }
+        f.widgets.reserve(widgets);
+        for (std::size_t k = 0; k < widgets; ++k) {
+            ops::FieldInfo::Widget wid;
+            wid.page = page_index(r);
+            wid.rect = get_rect(r);
+            wid.on_state = r.str(kMaxName);
+            f.widgets.push_back(std::move(wid));
         }
         m.items.push_back(std::move(f));
     }

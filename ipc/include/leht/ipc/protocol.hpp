@@ -33,7 +33,7 @@ namespace leht::ipc {
 
 /// Bumped on any change to framing or to a message layout. Peers exchange it
 /// in Hello/HelloAck, and a mismatch ends the connection.
-inline constexpr std::uint32_t kProtocolVersion = 13;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split; 10: trusted lists; 11: organising pages; 12: form flattening; 13: annotation style
+inline constexpr std::uint32_t kProtocolVersion = 14;  // 2: CancelSearch; 3: editing; 4: signatures; 5: move, retext, crop box; 6: OCR; 7: certification; 8: long-term validation; 9: merge, compress, split; 10: trusted lists; 11: organising pages; 12: form flattening; 13: annotation style; 14: field widgets
 
 /// Largest payload either side will accept. Comfortably above the biggest
 /// legitimate message (a rendered page) and far below anything that would let

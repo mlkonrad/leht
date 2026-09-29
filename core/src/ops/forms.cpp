@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace leht::ops {
@@ -161,17 +162,34 @@ FieldInfo describe(fz_context* c, const std::vector<const WidgetRef*>& refs) {
     info.read_only = (flags & PDF_FIELD_IS_READ_ONLY) != 0;
     info.required = (flags & PDF_FIELD_IS_REQUIRED) != 0;
     info.max_length = std::max(max_len, 0);
+    info.multiline = info.type == FieldType::Text && (flags & PDF_TX_FIELD_IS_MULTILINE) != 0;
+    info.editable_choice = info.type == FieldType::Choice && (flags & kComboIsEditable) != 0;
+
+    const bool button = info.type == FieldType::Checkbox || info.type == FieldType::Radio;
+    for (const WidgetRef* ref : refs) {
+        FieldInfo::Widget widget;
+        widget.page = ref->page;
+        fz_rect wr{};
+        const char* on = nullptr;
+        guarded(c, [&](fz_context* g) {
+            wr = pdf_bound_widget(g, ref->widget);
+            if (button) {
+                on = pdf_to_name(g, pdf_button_field_on_state(g, pdf_annot_obj(g, ref->widget)));
+            }
+        });
+        widget.rect = Rect{wr.x0, wr.y0, wr.x1, wr.y1};
+        if (on != nullptr && std::string_view(on) != "Off") {
+            widget.on_state = on;
+        }
+        info.widgets.push_back(std::move(widget));
+    }
 
     if (info.type == FieldType::Choice) {
         info.options = choice_options(c, first.widget, 0);
-    } else if (info.type == FieldType::Checkbox || info.type == FieldType::Radio) {
-        for (const WidgetRef* ref : refs) {
-            const char* on = nullptr;
-            guarded(c, [&](fz_context* g) {
-                on = pdf_to_name(g, pdf_button_field_on_state(g, pdf_annot_obj(g, ref->widget)));
-            });
-            const std::string state = on != nullptr ? on : "";
-            if (!state.empty() && state != "Off" &&
+    } else if (button) {
+        for (const FieldInfo::Widget& widget : info.widgets) {
+            const std::string& state = widget.on_state;
+            if (!state.empty() &&
                 std::find(info.options.begin(), info.options.end(), state) == info.options.end()) {
                 info.options.push_back(state);
             }

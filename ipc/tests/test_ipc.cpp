@@ -157,6 +157,9 @@ FieldList sample_fields() {
     f.rect = {10, 20, 30, 40};
     f.read_only = true;
     f.max_length = 12;
+    f.multiline = true;
+    f.editable_choice = true;
+    f.widgets = {{2, {10, 20, 30, 40}, ""}, {3, {50, 60, 70, 80}, "Blue"}};
     return FieldList{{f}};
 }
 
@@ -327,6 +330,9 @@ void test_edit_messages_round_trip() {
     CHECK(fl.items.size() == 1 && fl.items[0].name == "address.street" &&
           fl.items[0].type == leht::ops::FieldType::Choice && fl.items[0].options.size() == 2 &&
           fl.items[0].read_only && fl.items[0].max_length == 12);
+    CHECK(fl.items[0].multiline && fl.items[0].editable_choice && fl.items[0].widgets.size() == 2 &&
+          fl.items[0].widgets[1].page == 3 && fl.items[0].widgets[1].rect.y1 == 80.0F &&
+          fl.items[0].widgets[1].on_state == "Blue" && fl.items[0].widgets[0].on_state.empty());
 }
 
 /// Every prefix of `msg`'s payload, and one trailing byte, must be refused.
@@ -498,6 +504,7 @@ void test_signature_messages_reject_hostile_input() {
     }
     check_truncations(sample_prepare());
     check_truncations(sample_signature_list());
+    check_truncations(sample_fields());
     check_truncations(SignaturePrepared{});
 
     // Long-term validation. The viewer sends what a worker asks it to fetch

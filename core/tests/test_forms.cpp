@@ -62,7 +62,7 @@ std::string form_pdf(const std::string& acroform_extra = "") {
              "/Rect [72 700 272 720] /P 3 0 R >>");
     // A field hierarchy: "address" with a text kid "street".
     w.set(6, "<< /T (address) /Kids [7 0 R] >>");
-    w.set(7, "<< /Type /Annot /Subtype /Widget /FT /Tx /T (street) /Parent 6 0 R "
+    w.set(7, "<< /Type /Annot /Subtype /Widget /FT /Tx /Ff 4096 /T (street) /Parent 6 0 R "
              "/Rect [72 670 272 690] /P 3 0 R >>");
     // A checkbox whose on-state is named "Yes".
     w.set(8, "<< /Type /Annot /Subtype /Widget /FT /Btn /T (agree) /V /Off /AS /Off "
@@ -123,6 +123,34 @@ void lists_every_field() {
     CHECK(field(all, "id").value == "A-1");
     CHECK(field(all, "submit").type == FieldType::PushButton);
     CHECK(!field(all, "name").rect.empty());
+}
+
+void lists_every_widget() {
+    const Context ctx;
+    const TempPath in("forms_widgets.pdf");
+    write_file(in.str(), form_pdf());
+    Document doc = Document::open(ctx, in.str());
+    const auto all = list_fields(ctx, doc);
+
+    // A radio group: one widget per button, each with the state it sets.
+    const FieldInfo color = field(all, "color");
+    CHECK(color.widgets.size() == 2);
+    CHECK(color.widgets[0].on_state == "Red");
+    CHECK(color.widgets[1].on_state == "Blue");
+    CHECK(color.widgets[0].page == 0 && color.widgets[1].page == 0);
+    CHECK(color.widgets[0].rect.x0 == 72 && color.widgets[1].rect.x0 == 92);
+    CHECK(color.rect.x0 == color.widgets[0].rect.x0);
+
+    CHECK(field(all, "agree").widgets.size() == 1);
+    CHECK(field(all, "agree").widgets[0].on_state == "Yes");
+    // Text and choice widgets set no state.
+    CHECK(field(all, "name").widgets.size() == 1);
+    CHECK(field(all, "name").widgets[0].on_state.empty());
+    CHECK(field(all, "country").widgets[0].on_state.empty());
+
+    CHECK(field(all, "address.street").multiline);
+    CHECK(!field(all, "name").multiline);
+    CHECK(!field(all, "country").editable_choice);
 }
 
 void set_values_persist() {
@@ -255,6 +283,7 @@ void flatten_bakes_the_values_in() {
 
 int main() {
     RUN(lists_every_field);
+    RUN(lists_every_widget);
     RUN(set_values_persist);
     RUN(checkbox_and_radio_switch_off);
     RUN(scripts_never_run);
